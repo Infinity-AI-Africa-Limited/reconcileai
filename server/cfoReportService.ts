@@ -7,7 +7,7 @@
 import * as db from "./db";
 import { notifyOwner } from "./_core/notification";
 import { sendEmail, renderBrandedHtml, markdownToBasicHtml } from "./_core/email";
-import { storagePut } from "./storage";
+import { putTenantObject } from "./tenantStorage";
 import { loadExcelJS } from "./exceljsLoader";
 import { loggableError } from "./dbErrors";
 import { errorSummary } from "./errorText";
@@ -379,11 +379,12 @@ export async function sendWeeklyChannelReport(
       const fileName = `cfo-channel-report-${period}-${now.getTime()}.xlsx`;
       xlsxBuffer = Buffer.from(buffer);
       xlsxFileName = fileName;
-      const { url } = await storagePut(
-        `reports/cfo/${fileName}`,
-        xlsxBuffer,
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-      );
+      const { url } = await putTenantObject({
+        organizationId: orgId,
+        relKey: `reports/cfo/${fileName}`,
+        body: xlsxBuffer,
+        contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
       xlsxUrl = url;
     } catch (xlsxErr) {
       console.error("[CfoReport] Excel generation failed (non-fatal):", loggableError(xlsxErr));

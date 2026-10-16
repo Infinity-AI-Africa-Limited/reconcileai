@@ -12,7 +12,8 @@
 import { getDb } from "./db";
 import { s3CsvExports } from "../drizzle/schema";
 import { and, eq } from "drizzle-orm";
-import { storagePut, storageDelete } from "./storage";
+import { storageDelete } from "./storage";
+import { csvExportPath, putTenantObject, type CsvExportModule } from "./tenantStorage";
 import { loggableError } from "./dbErrors";
 import { errorSummary } from "./errorText";
 
@@ -23,7 +24,7 @@ export interface TrackCsvExportInput {
   organizationId: number | null;
   filename: string;
   csvContent: string;
-  sourceModule: "cbn" | "cfo" | "reconciliation";
+  sourceModule: CsvExportModule;
   sourceId?: number;
   /** Retention window in days. Defaults to 7. */
   retentionDays?: number;
@@ -58,16 +59,15 @@ export async function trackAndUploadCsvExport(
     retentionDays = 7,
   } = input;
 
-  // Build a unique S3 key: csv-exports/<module>/<userId>/<timestamp>-<filename>
+  // A unique key under the tenant: org/<id>/csv-exports/<module>/<userId>/<timestamp>-<filename>
   const ts = Date.now();
   const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const s3Key = `csv-exports/${sourceModule}/${userId}/${ts}-${safeFilename}`;
-
-  const { url: s3Url } = await storagePut(
-    s3Key,
-    Buffer.from(csvContent, "utf-8"),
-    "text/csv"
-  );
+  const { key: s3Key, url: s3Url } = await putTenantObject({
+    organizationId,
+    relKey: csvExportPath(sourceModule, userId, `${ts}-${safeFilename}`),
+    body: Buffer.from(csvContent, "utf-8"),
+    contentType: "text/csv",
+  });
 
   const sizeBytes = Buffer.byteLength(csvContent, "utf-8");
 

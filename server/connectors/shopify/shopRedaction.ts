@@ -2,9 +2,13 @@ import crypto from "node:crypto";
 import {
   and,
   count,
+  desc,
   eq,
   exists,
+  gt,
   inArray,
+  isNotNull,
+  ne,
   or,
   sql,
   type SQL,
@@ -34,6 +38,7 @@ import {
   cfoReportSchedules,
   channelAlertSettings,
   channels,
+  complianceAssessments,
   complianceSettings,
   controlBatchManifests,
   controlFitBriefs,
@@ -115,7 +120,8 @@ import {
   tenantQuotas,
 } from "../../../drizzle/tenant_schema";
 import { getDb, type DbExecutor } from "../../db";
-import { storageDelete } from "../../storage";
+import { orgScopedKey, storageDelete, storageListKeys } from "../../storage";
+import { legacyUserFilePrefixes } from "../../tenantStorage";
 import { affectedRows } from "./tokenStore";
 import {
   shopifyOrdersChannelCode,
@@ -135,7 +141,13 @@ export type ShopifyShopRedactionFailureCode =
   | "invalid_request_scope"
   | "manifest_version_unsupported"
   | "unmanaged_file_reference"
+  /** The organisation is live, not fenced for redaction: never erase it. */
+  | "tenant_not_fenced"
   | "object_deletion_failed"
+  /** A data-request export may still be uploading; retried once its lease ends. */
+  | "export_in_flight"
+  /** A stored file appeared or changed after the objects were deleted; retried. */
+  | "storage_inventory_changed"
   | "worker_failed";
 
 /**
@@ -173,10 +185,20 @@ export interface ShopifyShopRedactionWorkerDeps {
   uuid?: () => string;
   /** Test-only storage boundary. Missing objects are treated as deleted by storageDelete. */
   deleteObject?: (key: string) => Promise<void>;
+  /** Test-only storage boundary: every key under a folder prefix. */
+  listObjects?: (prefix: string) => Promise<string[]>;
   /** Test-only checkpoint after counting and before storage is erased. */
   afterManifest?: (
     manifest: Readonly<ShopifyShopRedactionManifestSummary>
   ) => Promise<void> | void;
+  /** Test-only checkpoint after storage is erased and before the database transaction. */
+  afterObjectsDeleted?: () => Promise<void> | void;
+}
+
+/** What a manifest counts: one store of one tenant. */
+interface ManifestScope {
+  organizationId: number;
+  storeId: number;
 }
 interface ClaimedShopRedactionJob {
   id: number;
@@ -261,7 +283,7 @@ async function countRows(
 
 async function buildManifest(
   db: DbExecutor,
-  job: ClaimedShopRedactionJob
+  job: ManifestScope
 ): Promise<ShopifyShopRedactionManifestSummary> {
   const organizationId = job.organizationId;
   const storeId = job.storeId;
@@ -484,6 +506,148 @@ class UnmanagedFileReferenceError extends Error {
   }
 }
 
+/** The organisation is live: erasing it would delete a tenant nobody asked to delete. */
+class TenantNotFencedError extends Error {
+  constructor() {
+    super("tenant_not_fenced");
+    this.name = "TenantNotFencedError";
+  }
+}
+
+/** A data-request export holds a live lease, so its upload may still land. */
+class ExportInFlightError extends Error {
+  constructor(readonly leaseExpiresAt: Date) {
+    super("export_in_flight");
+    this.name = "ExportInFlightError";
+  }
+}
+
+/** The stored files changed after they were deleted; the deletion must be redone. */
+class StorageInventoryChangedError extends Error {
+  constructor() {
+    super("storage_inventory_changed");
+    this.name = "StorageInventoryChangedError";
+  }
+}
+
+/**
+ * Redaction erases only a FENCED tenant — one admission marked `redacting`,
+ * which stops new syncs, logins, exports and files. A live organisation is
+ * refused. A missing one is allowed: everything is erased by its id, so a
+ * retry after an erasure, or of a tenant deleted some other way, is the same work.
+ */
+function tenantFenced(organization: { deletionState: string } | undefined): boolean {
+  return organization === undefined || organization.deletionState === "redacting";
+}
+
+async function assertTenantFenced(db: DbExecutor, organizationId: number): Promise<void> {
+  const [organization] = await db
+    .select({ deletionState: organizations.deletionState })
+    .from(organizations)
+    .where(eq(organizations.id, organizationId))
+    .limit(1);
+  if (!tenantFenced(organization)) throw new TenantNotFencedError();
+}
+
+/**
+ * The latest lease a data-request export holds in this tenant, or null.
+ *
+ * An export claimed before admission fenced the tenant passed its fence check
+ * then, and may upload its file at any time until its lease ends. A file that
+ * lands after this run deletes the tenant's objects would outlive the tenant,
+ * and once its row is erased nothing could find it again. So the run waits for
+ * that lease. Any export claimed later sees the fence and uploads nothing.
+ */
+async function liveExportLeaseExpiry(
+  db: DbExecutor,
+  organizationId: number,
+  now: Date,
+  lock = false
+): Promise<Date | null> {
+  const query = db
+    .select({ leaseExpiresAt: shopifyPrivacyDataRequestJobs.leaseExpiresAt })
+    .from(shopifyPrivacyDataRequestJobs)
+    .where(
+      and(
+        eq(shopifyPrivacyDataRequestJobs.organizationId, organizationId),
+        eq(shopifyPrivacyDataRequestJobs.status, "processing"),
+        isNotNull(shopifyPrivacyDataRequestJobs.leaseExpiresAt),
+        gt(shopifyPrivacyDataRequestJobs.leaseExpiresAt, now)
+      )
+    )
+    .orderBy(desc(shopifyPrivacyDataRequestJobs.leaseExpiresAt))
+    .limit(1);
+  const [live] = await (lock ? query.for("update") : query);
+  return live?.leaseExpiresAt ?? null;
+}
+
+/** The storage this worker erases: test doubles replace both halves. */
+interface RedactionStorage {
+  list: (prefix: string) => Promise<string[]>;
+  delete: (key: string) => Promise<void>;
+}
+
+interface ArtifactState {
+  key: string;
+  status: string;
+  sha256: string | null;
+}
+
+/** The tenant's storage as it stood when its objects were deleted. */
+export interface ShopRedactionStorageInventory {
+  /** Every key this run deleted. */
+  deletedKeys: ReadonlySet<string>;
+  /** Each privacy export's state by key: an upload that finished later changes it. */
+  artifactStates: ReadonlyMap<string, string>;
+}
+
+const artifactState = (artifact: Pick<ArtifactState, "status" | "sha256">) =>
+  `${artifact.status}:${artifact.sha256 ?? ""}`;
+
+/**
+ * The folders that hold a tenant's files: `org/<id>/` for everything stored
+ * since files were keyed by tenant, and the per-user folders where the
+ * tenant's own users' exports were kept before that.
+ */
+export function tenantStoragePrefixes(
+  organizationId: number,
+  userIds: readonly number[]
+): string[] {
+  return [
+    orgScopedKey(organizationId, ""),
+    ...userIds.flatMap(userId => legacyUserFilePrefixes(userId)),
+  ];
+}
+
+/**
+ * Has anything been stored, or finished uploading, since `inventory` was taken?
+ *
+ * Under the erasure's locks, a privacy export or tracked file whose key this
+ * run did not delete means a file it never saw. A privacy export whose state
+ * moved since — to `ready`, or back to `writing` because a late upload landed
+ * — means an upload finished after its object was deleted, so the object may
+ * exist again. Either way the deletion must be redone before the rows that
+ * name those files are erased. An export since discarded (`deleted`) left
+ * nothing behind.
+ */
+export function storageChangedSince(
+  inventory: ShopRedactionStorageInventory,
+  artifacts: readonly ArtifactState[],
+  exportKeys: readonly (string | null)[]
+): boolean {
+  for (const key of exportKeys) {
+    if (key && !inventory.deletedKeys.has(key)) return true;
+  }
+  for (const artifact of artifacts) {
+    if (!artifact.key) continue;
+    if (!inventory.deletedKeys.has(artifact.key)) return true;
+    if (artifact.status === "deleted") continue;
+    if (inventory.artifactStates.get(artifact.key) !== artifactState(artifact))
+      return true;
+  }
+  return false;
+}
+
 /** Refuse completion if a legacy opaque URL may still point at merchant data. */
 async function assertNoUnmanagedFileReferences(
   db: DbExecutor,
@@ -511,26 +675,120 @@ async function assertNoUnmanagedFileReferences(
     throw new UnmanagedFileReferenceError();
 }
 
-/** Delete all objects for which ReconcileAI holds an authoritative storage key. */
+/** The privacy exports and tracked files that name this tenant's stored objects. */
+async function readStorageRows(
+  db: DbExecutor,
+  organizationId: number,
+  lock: boolean
+): Promise<{ artifacts: ArtifactState[]; exportKeys: Array<string | null> }> {
+  const artifactQuery = db
+    .select({
+      key: shopifyPrivacyArtifacts.objectKey,
+      status: shopifyPrivacyArtifacts.status,
+      sha256: shopifyPrivacyArtifacts.sha256,
+    })
+    .from(shopifyPrivacyArtifacts)
+    .where(eq(shopifyPrivacyArtifacts.organizationId, organizationId));
+  const exportQuery = db
+    .select({ key: s3CsvExports.s3Key })
+    .from(s3CsvExports)
+    .where(eq(s3CsvExports.organizationId, organizationId));
+  // One after the other: inside the erasure these are locking reads on one connection.
+  const artifacts = await (lock ? artifactQuery.for("update") : artifactQuery);
+  const exportRows = await (lock ? exportQuery.for("update") : exportQuery);
+  return { artifacts, exportKeys: exportRows.map(row => row.key) };
+}
+
+/**
+ * Delete every object the tenant owns: those its rows name, and everything in
+ * its folders — including files no row records, such as downloads written
+ * straight to storage. Returns what was deleted, so the erasure can prove,
+ * under its locks, that nothing was stored after this ran.
+ *
+ * The rows are read BEFORE the folders are listed and the objects deleted: an
+ * upload that lands after the read changes its row, which the erasure sees.
+ */
 async function deleteTenantObjects(
   db: DbExecutor,
   organizationId: number,
-  deleteObject: (key: string) => Promise<void>
-): Promise<void> {
-  const [artifacts, exports] = await Promise.all([
-    db
-      .select({ key: shopifyPrivacyArtifacts.objectKey })
-      .from(shopifyPrivacyArtifacts)
-      .where(eq(shopifyPrivacyArtifacts.organizationId, organizationId)),
-    db
-      .select({ key: s3CsvExports.s3Key })
-      .from(s3CsvExports)
-      .where(eq(s3CsvExports.organizationId, organizationId)),
-  ]);
-  for (const key of new Set(
-    [...artifacts, ...exports].map(({ key }) => key).filter(Boolean)
+  storage: RedactionStorage
+): Promise<ShopRedactionStorageInventory> {
+  const { artifacts, exportKeys } = await readStorageRows(
+    db,
+    organizationId,
+    false
+  );
+  const members = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.organizationId, organizationId));
+  const keys = new Set<string>();
+  for (const key of [...artifacts.map(a => a.key), ...exportKeys])
+    if (key) keys.add(key);
+  for (const prefix of tenantStoragePrefixes(
+    organizationId,
+    members.map(member => member.id)
   ))
-    await deleteObject(key);
+    for (const key of await storage.list(prefix)) keys.add(key);
+  for (const key of keys) await storage.delete(key);
+  return {
+    deletedKeys: keys,
+    artifactStates: new Map(
+      artifacts.map(artifact => [artifact.key, artifactState(artifact)])
+    ),
+  };
+}
+
+/**
+ * After the erasure commits, the tenant no longer exists and nothing may store
+ * a file for it. Whatever is in its folder now came from an upload that
+ * outlived its lease; delete it. Best effort — the receipt already stands, and
+ * a failure is logged without identifiers.
+ */
+async function sweepStragglers(
+  storage: RedactionStorage,
+  organizationId: number
+): Promise<void> {
+  try {
+    for (const key of await storage.list(orgScopedKey(organizationId, "")))
+      await storage.delete(key);
+  } catch {
+    console.error("[shopify-shop-redaction] post-erasure storage sweep failed", {
+      code: "straggler_sweep_failed",
+    });
+  }
+}
+
+/**
+ * This tenant's privacy-queue outbox rows. An outbox row's `jobId` means a
+ * different thing per kind — a privacy REQUEST id for the customer kinds, the
+ * shop-redaction JOB's own id for `shop_redact` — and the two id sequences
+ * overlap. So each kind is matched only against its own ids: a bare
+ * `jobId IN (…)` would also delete another tenant's row of a different kind
+ * that happens to carry the same number, silently dropping its work.
+ */
+export function tenantOutboxRows(organizationId: number): SQL | undefined {
+  const requestIds = new QueryBuilder()
+    .select({ id: shopifyPrivacyRequests.id })
+    .from(shopifyPrivacyRequests)
+    .where(eq(shopifyPrivacyRequests.organizationId, organizationId));
+  const shopRedactionJobIds = new QueryBuilder()
+    .select({ id: shopifyShopRedactionJobs.id })
+    .from(shopifyShopRedactionJobs)
+    .where(eq(shopifyShopRedactionJobs.organizationId, organizationId));
+  return or(
+    and(
+      inArray(shopifyPrivacyQueueOutbox.kind, [
+        "customer_request",
+        "customer_redact",
+      ]),
+      inArray(shopifyPrivacyQueueOutbox.jobId, requestIds)
+    ),
+    and(
+      eq(shopifyPrivacyQueueOutbox.kind, "shop_redact"),
+      inArray(shopifyPrivacyQueueOutbox.jobId, shopRedactionJobIds)
+    )
+  );
 }
 
 async function deleteOrgRows(
@@ -545,12 +803,18 @@ async function deleteOrgRows(
 /**
  * Erase a tenant only while the originally claiming worker holds its lease.
  * Storage is erased first by the caller; all database writes below are atomic.
+ *
+ * The erasure is tenant-wide, so it settles every shop/redact the tenant has:
+ * a tenant with several stores receives one per store, and each such job gets
+ * its own receipt here and is removed with the tenant. A job left behind would
+ * name an organisation that no longer exists and could never complete.
  */
 async function eraseTenantWorkspace(
   db: Db,
   job: ClaimedShopRedactionJob,
   manifest: ShopifyShopRedactionManifestSummary,
-  now: Date
+  inventory: ShopRedactionStorageInventory,
+  clock: () => Date
 ): Promise<void> {
   const organizationId = job.organizationId;
   const userIds = new QueryBuilder()
@@ -571,6 +835,16 @@ async function eraseTenantWorkspace(
     .where(eq(webhooks.organizationId, organizationId));
 
   await db.transaction(async tx => {
+    // Organisation first, then the job and its store: admission's lock order,
+    // and the data-request export's. Holding it, no new shop/redact can be
+    // admitted for this tenant and no export can finish its transition.
+    const [organization] = await tx
+      .select({ deletionState: organizations.deletionState })
+      .from(organizations)
+      .where(eq(organizations.id, organizationId))
+      .limit(1)
+      .for("update");
+    if (!tenantFenced(organization)) throw new TenantNotFencedError();
     const [owned] = await tx
       .select({ shopDomain: shopifyConnectorStores.shopDomain })
       .from(shopifyShopRedactionJobs)
@@ -596,6 +870,45 @@ async function eraseTenantWorkspace(
       .limit(1)
       .for("update");
     if (!owned) throw new Error("shopify_redaction_lease_lost");
+    // Every other shop/redact of this tenant, whatever its state; a worker
+    // running one is fenced out by its lease, which this deletes.
+    const siblings = await tx
+      .select({
+        id: shopifyShopRedactionJobs.id,
+        runId: shopifyShopRedactionJobs.runId,
+        storeId: shopifyShopRedactionJobs.storeId,
+        requestHash: shopifyShopRedactionJobs.requestHash,
+      })
+      .from(shopifyShopRedactionJobs)
+      .where(
+        and(
+          eq(shopifyShopRedactionJobs.organizationId, organizationId),
+          ne(shopifyShopRedactionJobs.id, job.id)
+        )
+      )
+      .for("update");
+    const stores = await tx
+      .select({ shopDomain: shopifyConnectorStores.shopDomain })
+      .from(shopifyConnectorStores)
+      .where(eq(shopifyConnectorStores.organizationId, organizationId))
+      .for("update");
+
+    // The clock is read after the locks: a check made under them must not use
+    // a time from before the wait for them.
+    const at = clock();
+    const liveExport = await liveExportLeaseExpiry(tx, organizationId, at, true);
+    if (liveExport) throw new ExportInFlightError(liveExport);
+    const storageNow = await readStorageRows(tx, organizationId, true);
+    if (
+      storageChangedSince(inventory, storageNow.artifacts, storageNow.exportKeys)
+    )
+      throw new StorageInventoryChangedError();
+    // Count each sibling's store before its rows go, for its own receipt.
+    const siblingManifests: ShopifyShopRedactionManifestSummary[] = [];
+    for (const sibling of siblings)
+      siblingManifests.push(
+        await buildManifest(tx, { organizationId, storeId: sibling.storeId })
+      );
 
     // Child records whose scope derives from a tenant-owned parent must go first.
     await tx
@@ -615,6 +928,10 @@ async function eraseTenantWorkspace(
     await tx
       .delete(magicLinkTokens)
       .where(inArray(magicLinkTokens.userId, userIds));
+    // A self-assessment a tenant user took signed in: it names them and their institution.
+    await tx
+      .delete(complianceAssessments)
+      .where(inArray(complianceAssessments.userId, userIds));
     await tx
       .delete(platformAuditLogs)
       .where(
@@ -631,40 +948,7 @@ async function eraseTenantWorkspace(
       );
     await tx
       .delete(shopifyPrivacyQueueOutbox)
-      .where(
-        or(
-          inArray(
-            shopifyPrivacyQueueOutbox.jobId,
-            new QueryBuilder()
-              .select({ id: shopifyPrivacyDataRequestJobs.requestId })
-              .from(shopifyPrivacyDataRequestJobs)
-              .where(
-                eq(shopifyPrivacyDataRequestJobs.organizationId, organizationId)
-              )
-          ),
-          inArray(
-            shopifyPrivacyQueueOutbox.jobId,
-            new QueryBuilder()
-              .select({ id: shopifyPrivacyCustomerRedactionJobs.requestId })
-              .from(shopifyPrivacyCustomerRedactionJobs)
-              .where(
-                eq(
-                  shopifyPrivacyCustomerRedactionJobs.organizationId,
-                  organizationId
-                )
-              )
-          ),
-          inArray(
-            shopifyPrivacyQueueOutbox.jobId,
-            new QueryBuilder()
-              .select({ id: shopifyShopRedactionJobs.id })
-              .from(shopifyShopRedactionJobs)
-              .where(
-                eq(shopifyShopRedactionJobs.organizationId, organizationId)
-              )
-          )
-        )
-      );
+      .where(tenantOutboxRows(organizationId));
 
     await deleteOrgRows(tx, organizationId, [
       matches,
@@ -749,9 +1033,13 @@ async function eraseTenantWorkspace(
     await tx
       .delete(shopifyConnectorStores)
       .where(eq(shopifyConnectorStores.organizationId, organizationId));
+    // Every store's install lease, not only the claimed store's.
+    const shopDomains = [
+      ...new Set([owned.shopDomain, ...stores.map(store => store.shopDomain)]),
+    ];
     await tx
       .delete(shopifyInstallLeases)
-      .where(eq(shopifyInstallLeases.shopDomain, owned.shopDomain));
+      .where(inArray(shopifyInstallLeases.shopDomain, shopDomains));
     await tx
       .delete(tenantQuotas)
       .where(eq(tenantQuotas.organizationId, organizationId));
@@ -766,24 +1054,29 @@ async function eraseTenantWorkspace(
       .where(eq(auditChainLocks.chainKey, organizationId));
     await tx
       .insert(shopifyShopRedactionReceipts)
-      .values({
-        runId: job.runId,
-        requestHash: job.requestHash,
-        manifestVersion: job.manifestVersion,
-        manifestSummary: manifest,
-        completedAt: now,
-      })
+      .values([
+        {
+          runId: job.runId,
+          requestHash: job.requestHash,
+          manifestVersion: job.manifestVersion,
+          manifestSummary: manifest,
+          completedAt: at,
+        },
+        ...siblings.map((sibling, index) => ({
+          runId: sibling.runId,
+          requestHash: sibling.requestHash,
+          // The summary below is this code's shape, whatever the sibling was admitted with.
+          manifestVersion: SHOPIFY_SHOP_REDACTION_MANIFEST_VERSION,
+          manifestSummary: siblingManifests[index],
+          completedAt: at,
+        })),
+      ])
       .onDuplicateKeyUpdate({
         set: { runId: sql`${shopifyShopRedactionReceipts.runId}` },
       });
     await tx
       .delete(shopifyShopRedactionJobs)
-      .where(
-        and(
-          eq(shopifyShopRedactionJobs.id, job.id),
-          eq(shopifyShopRedactionJobs.leaseId, job.leaseId)
-        )
-      );
+      .where(eq(shopifyShopRedactionJobs.organizationId, organizationId));
     await tx.delete(users).where(eq(users.organizationId, organizationId));
     await tx
       .delete(organizations)
@@ -848,22 +1141,30 @@ async function setNonTerminal(
   });
 }
 
+/**
+ * Release the lease and schedule a retry — or end the job once its attempts are
+ * spent. `notBefore` holds the retry back until a blocker is known to clear: a
+ * retry while an export's lease is still live would only be refused again.
+ */
 async function setRetryableFailure(
   db: Db,
   job: ClaimedShopRedactionJob,
-  now: Date
+  now: Date,
+  failureCode: ShopifyShopRedactionFailureCode = "worker_failed",
+  notBefore?: Date
 ): Promise<void> {
   const terminal = job.attempts >= SHOPIFY_SHOP_REDACTION_MAX_ATTEMPTS;
   const status = terminal ? "failed_terminal" : "failed_retryable";
+  const backoff = now.getTime() + retryDelayMs(job.attempts);
   const nextAttemptAt = terminal
     ? null
-    : new Date(now.getTime() + retryDelayMs(job.attempts));
+    : new Date(Math.max(backoff, (notBefore?.getTime() ?? 0) + 1_000));
   await db.transaction(async tx => {
     const jobWrite = await tx
       .update(shopifyShopRedactionJobs)
       .set({
         status,
-        failureCode: "worker_failed",
+        failureCode,
         leaseId: null,
         leaseExpiresAt: null,
         nextAttemptAt,
@@ -892,7 +1193,7 @@ async function setRetryableFailure(
           leaseId: null,
           leaseExpiresAt: null,
           nextAttemptAt,
-          failureCode: "worker_failed",
+          failureCode,
         })
         .where(
           and(
@@ -904,7 +1205,7 @@ async function setRetryableFailure(
     if (job.privacyRequestId !== null) {
       await tx
         .update(shopifyPrivacyRequests)
-        .set({ status, completionNote: "worker_failed", completedAt: null })
+        .set({ status, completionNote: failureCode, completedAt: null })
         .where(
           and(
             eq(shopifyPrivacyRequests.id, job.privacyRequestId),
@@ -931,8 +1232,13 @@ export async function handleShopifyShopRedactionJob(
     throw new Error("Invalid privacy job payload");
   const db = deps.db ?? (await getDb());
   if (!db) throw new Error("Database unavailable");
-  const now = (deps.now ?? (() => new Date()))();
+  const clock = deps.now ?? (() => new Date());
+  const now = clock();
   const leaseId = (deps.uuid ?? (() => crypto.randomUUID()))();
+  const storage: RedactionStorage = {
+    list: deps.listObjects ?? storageListKeys,
+    delete: deps.deleteObject ?? storageDelete,
+  };
   const job = await claimShopRedactionJob(db, jobId, now, leaseId);
   if (!job) {
     // An at-least-once queue delivery can arrive while the original worker's
@@ -994,20 +1300,27 @@ export async function handleShopifyShopRedactionJob(
       return;
     }
 
+    // Before anything is deleted: never erase a live tenant.
+    await assertTenantFenced(db, job.organizationId);
     const manifest = await buildManifest(db, job);
     await deps.afterManifest?.(manifest);
     await assertNoUnmanagedFileReferences(db, job.organizationId);
+    const exportLease = await liveExportLeaseExpiry(
+      db,
+      job.organizationId,
+      clock()
+    );
+    if (exportLease) throw new ExportInFlightError(exportLease);
+
+    let inventory: ShopRedactionStorageInventory;
     try {
-      await deleteTenantObjects(
-        db,
-        job.organizationId,
-        deps.deleteObject ?? storageDelete
-      );
+      inventory = await deleteTenantObjects(db, job.organizationId, storage);
     } catch {
-      await setRetryableFailure(db, job, now);
+      await setRetryableFailure(db, job, clock(), "object_deletion_failed");
       return;
     }
-    await eraseTenantWorkspace(db, job, manifest, now);
+    await deps.afterObjectsDeleted?.();
+    await eraseTenantWorkspace(db, job, manifest, inventory, clock);
   } catch (error) {
     if (error instanceof UnmanagedFileReferenceError) {
       await setNonTerminal(
@@ -1019,6 +1332,26 @@ export async function handleShopifyShopRedactionJob(
       );
       return;
     }
-    await setRetryableFailure(db, job, now);
+    if (error instanceof TenantNotFencedError) {
+      await setNonTerminal(db, job, "manual_review", "tenant_not_fenced", null);
+      return;
+    }
+    if (error instanceof ExportInFlightError) {
+      await setRetryableFailure(
+        db,
+        job,
+        clock(),
+        "export_in_flight",
+        error.leaseExpiresAt
+      );
+      return;
+    }
+    if (error instanceof StorageInventoryChangedError) {
+      await setRetryableFailure(db, job, clock(), "storage_inventory_changed");
+      return;
+    }
+    await setRetryableFailure(db, job, clock());
+    return;
   }
+  await sweepStragglers(storage, job.organizationId);
 }

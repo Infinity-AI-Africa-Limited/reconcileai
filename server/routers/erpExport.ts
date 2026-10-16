@@ -17,7 +17,7 @@ import {
   DEFAULT_GL_MAPPING,
   RECON_CONTROL_ACCOUNT,
 } from "../erpExport";
-import { storagePut, orgScopedKey } from "../storage";
+import { putTenantObject } from "../tenantStorage";
 import { getDb } from "../db";
 
 export const erpExportRouter = router({
@@ -57,9 +57,12 @@ export const erpExportRouter = router({
       const files: Array<{ filename: string; downloadPath: string }> = [];
 
       for (const f of rendered) {
-        const relKey = `erp-exports/job${input.jobId}/${f.filename}`;
-        const key = orgId ? orgScopedKey(orgId, relKey) : relKey;
-        const { url } = await storagePut(key, Buffer.from(f.content, "utf-8"), "text/csv");
+        const { key, url } = await putTenantObject({
+          organizationId: orgId,
+          relKey: `erp-exports/job${input.jobId}/${f.filename}`,
+          body: Buffer.from(f.content, "utf-8"),
+          contentType: "text/csv",
+        });
         if (db) {
           const { s3CsvExports } = await import("../../drizzle/schema");
           await db.insert(s3CsvExports).values({
