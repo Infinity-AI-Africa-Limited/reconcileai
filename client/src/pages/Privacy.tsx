@@ -7,7 +7,7 @@ export default function Privacy() {
     <div className="min-h-screen bg-background text-foreground">
       <div className="container max-w-4xl py-16">
         <h1 className="text-3xl font-bold mb-2">Privacy Notice</h1>
-        <p className="text-muted-foreground mb-8">Last updated: October 15, 2026</p>
+        <p className="text-muted-foreground mb-8">Last updated: October 16, 2026</p>
 
         <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6">
           <section>
@@ -26,9 +26,9 @@ export default function Privacy() {
               minimum order evidence needed to compare Shopify orders and refunds with settlement evidence that you provide.
             </p>
             <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li><strong>Store metadata:</strong> store domain, display name, currency, and timezone.</li>
+              <li><strong>Store metadata:</strong> store domain and primary domain, Shopify store identifier, display name, currency, timezone, and the permission you granted.</li>
               <li><strong>Order and refund evidence:</strong> identifiers and references, amounts and currency, order and refund dates, financial status, cancellation status, and update timestamps.</li>
-              <li><strong>Merchant-provided settlement evidence:</strong> the reference, amount, currency, settlement date, fee, and limited provenance fields that you confirm for the reconciliation purpose.</li>
+              <li><strong>Merchant-provided settlement evidence:</strong> for each row you confirm, the order reference, the payment provider&apos;s transaction reference, amount, currency, settlement date, and fee, and limited provenance: whether the row is a payment or a refund, the source you named, and the Shopify staff identifier of the person who submitted the import. The free-text description in your file is not kept.</li>
               <li><strong>Access and operational evidence:</strong> the merchant administrator identity needed to authorize the workspace, sync and reconciliation status, and security/audit events.</li>
             </ul>
             <p className="mt-4">
@@ -94,12 +94,29 @@ export default function Privacy() {
             <h2 className="text-xl font-semibold mt-8 mb-4">7. Your choices and requests</h2>
             <p>
               You may ask about access, correction, restriction, or deletion of data associated with your ReconcileAI Shopify
-              workspace. Shopify may also send us the mandatory data-request and redaction webhooks described in its platform
-              requirements. To make a request, contact us with your store domain and the nature of the request at{" "}
+              workspace. To make a request, contact us with your store domain and the nature of the request at{" "}
               <a href="mailto:support@reconcileaiafrica.com" className="text-primary underline">
                 support@reconcileaiafrica.com
               </a>.
             </p>
+            <p className="mt-2">
+              Shopify also sends us the mandatory privacy requests described in its platform requirements. Neither customer-level
+              request restricts your use of the app:
+            </p>
+            <ul className="list-disc pl-6 mt-2 space-y-1">
+              <li>
+                <strong><code>customers/data_request</code>:</strong> we prepare an export of the order evidence we hold for the
+                orders the request names. Your store&apos;s ReconcileAI administrator can download it for up to 7 days.
+              </li>
+              <li>
+                <strong><code>customers/redact</code>:</strong> Scope A does not keep customer personal data, so we complete the
+                request by confirming that none is held for the orders it names, and we prevent those orders from being imported
+                again. The order references and amounts already recorded remain part of your reconciliation evidence.
+              </li>
+              <li>
+                <strong><code>shop/redact</code>:</strong> handled as described in section 6.
+              </li>
+            </ul>
           </section>
 
           <section>

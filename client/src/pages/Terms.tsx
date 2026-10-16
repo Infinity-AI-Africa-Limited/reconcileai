@@ -7,7 +7,7 @@ export default function Terms() {
     <div className="min-h-screen bg-background text-foreground">
       <div className="container max-w-4xl py-16">
         <h1 className="text-3xl font-bold mb-2">Terms of Service</h1>
-        <p className="text-muted-foreground mb-8">Last updated: October 15, 2026</p>
+        <p className="text-muted-foreground mb-8">Last updated: October 16, 2026</p>
 
         <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6">
           <section>
@@ -103,9 +103,19 @@ export default function Terms() {
           <section>
             <h2 className="text-xl font-semibold mt-8 mb-4">10. Termination</h2>
             <p>
-              You may stop using Scope A and uninstall the app at any time. On uninstall or a valid Shopify privacy request,
-              ReconcileAI restricts Shopify access and handles the resulting data request under the Privacy Notice. We may
-              terminate or suspend access if these Terms are breached or if continued access presents a security or legal risk.
+              You may stop using Scope A and uninstall the app at any time. When the app is uninstalled, ReconcileAI marks the
+              store as uninstalled and deletes its Shopify access credentials, so it can no longer read your store. When Shopify
+              then sends a <code>shop/redact</code> request, ReconcileAI also fences the workspace and blocks further processing,
+              as described in the Privacy Notice.
+            </p>
+            <p className="mt-2">
+              Shopify&apos;s customer-level privacy requests (<code>customers/data_request</code> and{" "}
+              <code>customers/redact</code>) do not end or restrict your access. Each is handled for the customer it names,
+              as described in the Privacy Notice.
+            </p>
+            <p className="mt-2">
+              We may terminate or suspend access if these Terms are breached or if continued access presents a security or
+              legal risk.
             </p>
           </section>
 

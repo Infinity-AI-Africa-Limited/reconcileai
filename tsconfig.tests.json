@@ -142,6 +142,7 @@
     "server/webhookTenancy.callers.test.ts",
     "server/webhookTenancy.db.test.ts",
     "server/outboundDestination.test.ts",
-    "server/webhookDestination.db.test.ts"
+    "server/webhookDestination.db.test.ts",
+    "tools/publicPolicyClaims.test.ts"
   ]
 }

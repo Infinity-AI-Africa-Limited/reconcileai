@@ -57,8 +57,9 @@ export default function Support() {
             </CardHeader>
             <CardContent>
               <p className="text-sm text-muted-foreground">
-                Confirm that you are in the correct Shopify store, that the app remains installed, and that your settlement export
-                includes an order reference, amount, currency, and settlement date.
+                Confirm that you are in the correct Shopify store, that the app remains installed, and that each row of your
+                settlement export has an order reference and an amount. A currency and a settlement date are recommended but
+                optional; without a currency, your store&apos;s currency is used.
               </p>
             </CardContent>
           </Card>
