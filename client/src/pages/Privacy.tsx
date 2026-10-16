@@ -105,13 +105,17 @@ export default function Privacy() {
             </p>
             <ul className="list-disc pl-6 mt-2 space-y-1">
               <li>
-                <strong><code>customers/data_request</code>:</strong> we prepare an export of the order evidence we hold for the
-                orders the request names. Your store&apos;s ReconcileAI administrator can download it for up to 7 days.
+                <strong><code>customers/data_request</code>:</strong> for orders that have not yet been reconciled, we prepare an
+                export of the order evidence we hold. Once it is ready, your store&apos;s ReconcileAI administrator can download it
+                for up to 7 days. Where a named order already has reconciliation records (a match, an exception, or an anomaly
+                review), or no administrator can receive the export, our team handles the request manually before any export is
+                available.
               </li>
               <li>
                 <strong><code>customers/redact</code>:</strong> Scope A does not keep customer personal data, so we complete the
                 request by confirming that none is held for the orders it names, and we prevent those orders from being imported
-                again. The order references and amounts already recorded remain part of your reconciliation evidence.
+                again. The order references and amounts already recorded remain part of your reconciliation evidence. Where a
+                stored record is not in the minimised form Scope A writes, our team handles the request manually.
               </li>
               <li>
                 <strong><code>shop/redact</code>:</strong> handled as described in section 6.

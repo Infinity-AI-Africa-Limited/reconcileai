@@ -84,6 +84,23 @@ describe("when the policies describe Shopify's privacy requests", () => {
     expect(prose(privacy)).toContain(`download it for up to ${days} days`);
   });
 
+  it("should qualify each automatic outcome by the cases the workers hold for a person", () => {
+    // Greptile #199: the notice promised every data request an export, but the
+    // worker blocks any order with reconciliation records (and an order with no
+    // administrator to receive it), and creates no download. While the code
+    // blocks, the page must say so; if a block is removed, update the notice.
+    const completion = read("server/connectors/shopify/privacyCompletion.ts");
+    expect(completion).toContain('"downstream_evidence_present"');
+    expect(completion).toContain('"merchant_admin_unavailable"');
+    const redaction = read("server/connectors/shopify/customerRedaction.ts");
+    expect(redaction).toContain('"unsupported_transaction_footprint"');
+
+    const text = prose(privacy);
+    expect(text).toMatch(/for orders that have not yet been reconciled, we prepare an export/);
+    expect(text).toMatch(/already has reconciliation records \(a match, an exception, or an anomaly review\), or no administrator can receive the export, our team handles the request manually/);
+    expect(text).toMatch(/not in the minimised form Scope A writes, our team handles the request manually/);
+  });
+
   it("should describe uninstall as deleting the Shopify credentials, as the webhook does", () => {
     const webhooks = read("server/connectors/shopify/webhooks.ts");
     const uninstall = webhooks.slice(webhooks.indexOf("if (topic === SHOPIFY_UNINSTALL_TOPIC)"));
