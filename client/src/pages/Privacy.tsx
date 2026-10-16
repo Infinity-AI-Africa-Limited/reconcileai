@@ -1,146 +1,141 @@
 /**
- * Privacy Policy page — required for SHOPLINE App Store listing.
- * Accessible at /privacy (public, no auth required).
+ * Public privacy notice for ReconcileAI's Shopify Scope A app.
+ * Accessible at /privacy without authentication.
  */
 export default function Privacy() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <div className="container max-w-4xl py-16">
-        <h1 className="text-3xl font-bold mb-2">Privacy Policy</h1>
-        <p className="text-muted-foreground mb-8">
-          Last updated: July 19, 2026
-        </p>
+        <h1 className="text-3xl font-bold mb-2">Privacy Notice</h1>
+        <p className="text-muted-foreground mb-8">Last updated: October 16, 2026</p>
 
         <div className="prose prose-neutral dark:prose-invert max-w-none space-y-6">
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">1. Introduction</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">1. Who we are</h2>
             <p>
-              ReconcileAI (&quot;we&quot;, &quot;us&quot;, or &quot;our&quot;) is operated by Infinity AI Africa Limited
-              (&quot;Infinity AI&quot;). This Privacy Policy explains how we collect, use, disclose,
-              and safeguard your information when you use our financial reconciliation
-              application available through the SHOPLINE App Store.
+              ReconcileAI is operated by Infinity AI Africa Limited (&quot;Infinity AI&quot;, &quot;we&quot;, &quot;us&quot;, or &quot;our&quot;).
+              This notice describes the Shopify Scope A version of ReconcileAI: a read-only order-evidence and
+              merchant-provided settlement-evidence reconciliation workspace.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">2. Information We Collect</h2>
-            <p>When you install and use ReconcileAI, we access the following data from your SHOPLINE store:</p>
-            <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li><strong>Order data:</strong> Order IDs, amounts, payment status, timestamps, and customer references (no personal customer data is stored)</li>
-              <li><strong>Payment transactions:</strong> Transaction IDs, gateway references, amounts, currencies, and settlement status</li>
-              <li><strong>Payout/settlement data:</strong> Payout IDs, amounts, fees, and settlement dates</li>
-              <li><strong>Store information:</strong> Store name, currency, timezone, and domain</li>
-            </ul>
-            <p className="mt-4">We also collect:</p>
-            <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li><strong>Account information:</strong> Your email address and name (provided during SHOPLINE OAuth authorization)</li>
-              <li><strong>Usage data:</strong> Feature usage patterns, reconciliation run history, and error logs</li>
-            </ul>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">3. How We Use Your Information</h2>
-            <p>We use the collected information exclusively to:</p>
-            <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li>Perform automated financial reconciliation between your orders, payments, and settlements</li>
-              <li>Detect and classify payment exceptions (shortfalls, duplicates, unmatched transactions)</li>
-              <li>Generate reconciliation reports and settlement monitoring dashboards</li>
-              <li>Send you alerts about reconciliation exceptions and billing notifications</li>
-              <li>Improve our reconciliation algorithms and service reliability</li>
-            </ul>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">4. Data Storage and Security</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">2. Shopify data we access and keep</h2>
             <p>
-              Your data is stored in encrypted databases hosted on secure cloud infrastructure.
-              All data in transit is encrypted using TLS 1.3. Access tokens are encrypted at rest
-              using AES-256 envelope encryption. We implement role-based access controls and
-              maintain audit logs for all data access.
+              With your authorization, ReconcileAI requests Shopify&apos;s <code>read_orders</code> permission. We use the
+              minimum order evidence needed to compare Shopify orders and refunds with settlement evidence that you provide.
+            </p>
+            <ul className="list-disc pl-6 mt-2 space-y-1">
+              <li><strong>Store metadata:</strong> store domain and primary domain, Shopify store identifier, display name, currency, timezone, and the permission you granted.</li>
+              <li><strong>Order and refund evidence:</strong> identifiers and references, amounts and currency, order and refund dates, financial status, cancellation status, and update timestamps.</li>
+              <li><strong>Merchant-provided settlement evidence:</strong> for each row you confirm, the order reference, the payment provider&apos;s transaction reference, amount, currency, settlement date, and fee, and limited provenance: whether the row is a payment or a refund, the source you named, and the Shopify staff identifier of the person who submitted the import. The free-text description in your file is not kept.</li>
+              <li><strong>Access and operational evidence:</strong> the merchant administrator identity needed to authorize the workspace, sync and reconciliation status, and security/audit events.</li>
+            </ul>
+            <p className="mt-4">
+              ReconcileAI does <strong>not</strong> request Shopify Payments payouts or fee access in Scope A. It does not
+              request write permissions, edit Shopify records, issue refunds, or move money. We do not intentionally retain
+              customer names, email addresses, phone numbers, delivery addresses, payment-instrument details, or raw Shopify
+              webhook payloads. Merchants should avoid uploading customer personal data in settlement files; the Scope A
+              importer is designed to minimize the fields it keeps.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mt-8 mb-4">3. How we use the data</h2>
+            <p>We use this data only to provide and protect the requested reconciliation workspace, including to:</p>
+            <ul className="list-disc pl-6 mt-2 space-y-1">
+              <li>Synchronize the recent Shopify order evidence that you request;</li>
+              <li>Compare that evidence with settlement evidence you control and import;</li>
+              <li>Present matches, differences, investigation context, and audit evidence to authorized users;</li>
+              <li>Prevent duplicate imports, maintain service security, and investigate operational errors; and</li>
+              <li>Respond to Shopify&apos;s mandatory privacy webhooks and to valid data-rights requests.</li>
+            </ul>
+            <p className="mt-4">
+              ReconcileAI is a read-only financial-operations control layer. It does not make payments, post to a ledger,
+              change Shopify data, or make an autonomous financial decision.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mt-8 mb-4">4. Sharing and processing locations</h2>
+            <p>
+              We do not sell Shopify or merchant data. We share it only with service providers that operate the hosting,
+              database, secure storage, and communications infrastructure needed to provide ReconcileAI, or where disclosure
+              is required by applicable law. Those providers process data only on our instructions for the stated purpose.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mt-8 mb-4">5. Security</h2>
+            <p>
+              We use technical and organizational safeguards appropriate to the Scope A service, including encrypted transport,
+              access controls, tenant separation, protected token storage, and audit evidence. No system can be guaranteed
+              perfectly secure; please contact us promptly if you believe an account or data has been exposed.
+            </p>
+          </section>
+
+          <section>
+            <h2 className="text-xl font-semibold mt-8 mb-4">6. Retention and deletion</h2>
+            <p>
+              We retain Scope A data only for as long as it is needed to operate the reconciliation workspace, meet an
+              applicable legal obligation, resolve a security or operational issue, or complete a valid deletion request.
+              We do not retain raw Shopify webhook payloads, and the settlement evidence file is parsed in memory rather
+              than stored as the original uploaded file.
             </p>
             <p className="mt-2">
-              We retain your reconciliation data for as long as your subscription is active,
-              plus 90 days after cancellation to allow for data export. After this period,
-              all data is permanently deleted.
+              If Shopify sends a <code>shop/redact</code> request, ReconcileAI immediately fences the affected workspace,
+              revokes its Shopify credentials, blocks further processing, and records the deletion work for controlled
+              completion. We treat a deletion request as complete only when the relevant deletion steps and evidence have
+              completed; a fence or a request receipt is not represented as completion.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">5. Data Sharing</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">7. Your choices and requests</h2>
             <p>
-              We do not sell, rent, or share your financial data with third parties.
-              We may share data only in the following circumstances:
+              You may ask about access, correction, restriction, or deletion of data associated with your ReconcileAI Shopify
+              workspace. To make a request, contact us with your store domain and the nature of the request at{" "}
+              <a href="mailto:support@reconcileaiafrica.com" className="text-primary underline">
+                support@reconcileaiafrica.com
+              </a>.
+            </p>
+            <p className="mt-2">
+              Shopify also sends us the mandatory privacy requests described in its platform requirements. Neither customer-level
+              request restricts your use of the app:
             </p>
             <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li>With your explicit consent</li>
-              <li>To comply with legal obligations or valid legal processes</li>
-              <li>With our infrastructure providers (cloud hosting, database) who are bound by data processing agreements</li>
+              <li>
+                <strong><code>customers/data_request</code>:</strong> for orders that have not yet been reconciled, we prepare an
+                export of the order evidence we hold. Once it is ready, your store&apos;s ReconcileAI administrator can download it
+                for up to 7 days. Where a named order already has reconciliation records (a match, an exception, or an anomaly
+                review), or no administrator can receive the export, our team handles the request manually before any export is
+                available.
+              </li>
+              <li>
+                <strong><code>customers/redact</code>:</strong> Scope A does not keep customer personal data, so we complete the
+                request by confirming that none is held for the orders it names, and we prevent those orders from being imported
+                again. The order references and amounts already recorded remain part of your reconciliation evidence. Where a
+                stored record is not in the minimised form Scope A writes, our team handles the request manually.
+              </li>
+              <li>
+                <strong><code>shop/redact</code>:</strong> handled as described in section 6.
+              </li>
             </ul>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">6. Your Rights (GDPR/POPIA Compliance)</h2>
-            <p>You have the right to:</p>
-            <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li><strong>Access:</strong> Request a copy of all data we hold about your store</li>
-              <li><strong>Rectification:</strong> Request correction of inaccurate data</li>
-              <li><strong>Erasure:</strong> Request deletion of your data (subject to legal retention requirements)</li>
-              <li><strong>Portability:</strong> Export your reconciliation data in machine-readable format</li>
-              <li><strong>Restriction:</strong> Request limitation of processing</li>
-            </ul>
-            <p className="mt-2">
-              To exercise these rights, contact us at{" "}
-              <a href="mailto:privacy@reconcileaiafrica.com" className="text-primary underline">
-                privacy@reconcileaiafrica.com
-              </a>
+            <h2 className="text-xl font-semibold mt-8 mb-4">8. Changes to this notice</h2>
+            <p>
+              We may update this notice when the Scope A service or applicable requirements change. The current version and
+              its effective date will be posted on this page.
             </p>
           </section>
 
           <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">7. Data Deletion on Uninstall</h2>
+            <h2 className="text-xl font-semibold mt-8 mb-4">9. Contact</h2>
             <p>
-              When you uninstall ReconcileAI from your SHOPLINE store, we receive an automatic
-              notification. Within 30 days of uninstallation, we will:
-            </p>
-            <ul className="list-disc pl-6 mt-2 space-y-1">
-              <li>Revoke all access tokens to your SHOPLINE store</li>
-              <li>Delete all stored order, payment, and settlement data</li>
-              <li>Remove your account and subscription records</li>
-            </ul>
-            <p className="mt-2">
-              You may also request immediate deletion by contacting our support team.
-            </p>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">8. Cookies and Tracking</h2>
-            <p>
-              ReconcileAI uses essential session cookies for authentication only.
-              We do not use advertising cookies, tracking pixels, or third-party analytics
-              that collect personal data.
-            </p>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">9. Changes to This Policy</h2>
-            <p>
-              We may update this Privacy Policy from time to time. We will notify you of any
-              material changes by posting the new policy on this page and updating the
-              &quot;Last updated&quot; date.
-            </p>
-          </section>
-
-          <section>
-            <h2 className="text-xl font-semibold mt-8 mb-4">10. Contact Us</h2>
-            <p>
-              If you have questions about this Privacy Policy, please contact:
-            </p>
-            <p className="mt-2">
               <strong>Infinity AI Africa Limited</strong><br />
-              Email:{" "}
-              <a href="mailto:privacy@reconcileaiafrica.com" className="text-primary underline">
-                privacy@reconcileaiafrica.com
-              </a><br />
+              Email: <a href="mailto:support@reconcileaiafrica.com" className="text-primary underline">support@reconcileaiafrica.com</a><br />
               Website: <a href="https://www.reconcileaiafrica.com" className="text-primary underline">www.reconcileaiafrica.com</a>
             </p>
           </section>
