@@ -10,6 +10,7 @@ import {
 import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
 import { handleShopifyShopRedactionJob } from "./shopRedaction";
 import { runShopifyPrivacyDeadlineCheck } from "./privacyDeadlines";
+import { runShopifyScopeAEvidenceRetentionIfDue } from "./evidenceRetention";
 
 /** Queue-name prefix per job kind: a job id is unique only within its own table. */
 export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]): string {
@@ -88,14 +89,17 @@ export async function recoverShopifyPrivacyOutbox(): Promise<void> {
 let recoveryTimer: NodeJS.Timeout | null = null;
 
 /**
- * One recovery sweep: re-dispatch the outbox, clean expired artifacts, and
- * report requests nearing Shopify's deadline (throttled to hourly; see
- * privacyDeadlines.ts). Each step contains its own failure so one outage does
- * not stall the others. Exported for tests; production runs it from the loop below.
+ * One recovery sweep: re-dispatch the outbox, clean expired artifacts, purge
+ * selected expired Scope A evidence, and report requests nearing Shopify's
+ * deadline. Each step contains its own failure so one outage does not stall the
+ * others. Retention has its own one-day process-local cadence and is still
+ * transactionally idempotent after a restart. Exported for tests; production
+ * runs it from the loop below.
  */
 export async function runShopifyPrivacyRecoverySweep(deps: {
   recover?: () => Promise<unknown>;
   cleanup?: () => Promise<unknown>;
+  retention?: () => Promise<unknown>;
   deadlines?: () => Promise<unknown>;
 } = {}): Promise<void> {
   try {
@@ -107,6 +111,16 @@ export async function runShopifyPrivacyRecoverySweep(deps: {
     await (deps.cleanup ?? cleanupExpiredShopifyPrivacyArtifacts)();
   } catch (error) {
     console.error("[shopify-privacy] artifact cleanup unavailable", { code: "artifact_cleanup_failed", ...loggableError(error) });
+  }
+  // An explicitly injected sweep is a unit-test/diagnostic path. It must not
+  // accidentally call the real database just because the caller is testing a
+  // different recovery stage. The production loop calls this with no deps.
+  if (deps.retention || Object.keys(deps).length === 0) {
+    try {
+      await (deps.retention ?? runShopifyScopeAEvidenceRetentionIfDue)();
+    } catch (error) {
+      console.error("[shopify-privacy] Scope A retention unavailable", { code: "shopify_scope_a_retention_unavailable", ...loggableError(error) });
+    }
   }
   try {
     await (deps.deadlines ?? runShopifyPrivacyDeadlineCheck)();

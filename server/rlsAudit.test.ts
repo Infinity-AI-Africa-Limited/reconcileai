@@ -171,6 +171,11 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   reviewer_access_links: "tenant_required",
   platform_audit_logs: "global",
 
+  // Aggregate-only proof of the Scope A 90-day retention sweep. It stays
+  // tenant/store scoped only while the workspace exists and is deleted by the
+  // Shopify shop-redaction executor with the rest of the tenant footprint.
+  shopify_evidence_retention_receipts: "tenant_required",
+
   // Woodcore Fineract mirror (POC) — single-tenant by design; multi-tenant
   // Woodcore clients ingest via the connector into `transactions` instead.
   wc_acc_gl_account: "mirror_single_tenant",

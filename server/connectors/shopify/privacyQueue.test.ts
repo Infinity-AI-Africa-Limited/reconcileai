@@ -98,4 +98,21 @@ describe("when the privacy recovery loop ticks", () => {
     expect(error.mock.calls[0]?.[1]).toMatchObject({ code: "privacy_deadline_check_failed" });
     error.mockRestore();
   });
+
+  it("should run scheduled Scope A retention without letting its failure stall deadline checks", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const recover = vi.fn(async () => undefined);
+    const cleanup = vi.fn(async () => 0);
+    const retention = vi.fn(async () => { throw new Error("retention db unavailable"); });
+    const deadlines = vi.fn(async () => undefined);
+
+    await runShopifyPrivacyRecoverySweep({ recover, cleanup, retention, deadlines });
+
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(retention).toHaveBeenCalledTimes(1);
+    expect(deadlines).toHaveBeenCalledTimes(1);
+    expect(error.mock.calls[0]?.[1]).toMatchObject({ code: "shopify_scope_a_retention_unavailable" });
+    error.mockRestore();
+  });
 });

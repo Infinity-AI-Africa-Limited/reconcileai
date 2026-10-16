@@ -83,6 +83,15 @@ export default function Privacy() {
               than stored as the original uploaded file.
             </p>
             <p className="mt-2">
+              For the current Scope A service, field-minimized Shopify order/refund evidence, merchant settlement rows,
+              and their terminal reconciliation outputs are scheduled for removal after <strong>90 days</strong> from the
+              most recent source date or Shopify update recorded for that evidence. We do not remove evidence while it is
+              needed for an active exception investigation, governed human review, an in-progress reconciliation, a valid
+              privacy request, or a legal/security/operational matter. We retain limited de-identified operational and
+              audit evidence separately to operate and demonstrate the deletion control; it does not contain order values,
+              customer identifiers, raw payloads, source-file content, or direct provider identifiers.
+            </p>
+            <p className="mt-2">
               If Shopify sends a <code>shop/redact</code> request, ReconcileAI immediately fences the affected workspace,
               revokes its Shopify credentials, blocks further processing, and records the deletion work for controlled
               completion. We treat a deletion request as complete only when the relevant deletion steps and evidence have

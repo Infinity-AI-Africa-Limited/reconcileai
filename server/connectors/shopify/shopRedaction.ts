@@ -101,6 +101,7 @@ import {
 import {
   shopifyConnectorStores,
   shopifyConnectorTokens,
+  shopifyEvidenceRetentionReceipts,
   shopifyInstallLeases,
   shopifyOrderRedactionTombstones,
   shopifyPrivacyArtifacts,
@@ -1077,6 +1078,8 @@ async function eraseTenantWorkspace(
       slConnectorWebhookEvents,
       slConnectorTokens,
       slConnectorStores,
+      // These receipts remain tenant-linked only while the workspace exists.
+      shopifyEvidenceRetentionReceipts,
       shopifyPrivacyRequestSelectors,
       shopifyPrivacyArtifacts,
       shopifyPrivacyDataRequestJobs,
