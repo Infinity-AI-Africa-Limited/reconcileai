@@ -10,11 +10,13 @@ import * as tenantSchema from "../../../drizzle/tenant_schema";
 import * as shopifySchema from "../../../drizzle/shopify_schema";
 import {
   handleShopifyShopRedactionJob,
+  SHOPIFY_SHOP_REDACTION_UPLOAD_SETTLE_MS,
   storageChangedSince,
   tenantOutboxRows,
   tenantStoragePrefixes,
   type ShopRedactionStorageInventory,
 } from "./shopRedaction";
+import { TENANT_UPLOAD_DEADLINE_MS } from "../../tenantStorage";
 import { rowOf, scriptedDb, type RecordedOp } from "./scriptedDb.testkit";
 
 const JOBS = "shopify_shop_redaction_jobs";
@@ -30,6 +32,7 @@ const DATA_JOBS = "shopify_privacy_data_request_jobs";
 const EXPORTS = "s3_csv_exports";
 const BATCHES = "upload_batches";
 const REPORTS = "reconciliation_reports";
+const BUCKET_SOURCES = "bucket_ingestion_sources";
 const NOW = new Date("2026-10-16T07:30:00.000Z");
 const MEMBER = 5;
 
@@ -42,6 +45,8 @@ const JOB = {
   requestHash: "request-digest",
   attempts: 1,
   manifestVersion: 1,
+  // First claimed long enough ago that no upload can still be landing.
+  startedAt: new Date(NOW.getTime() - 10 * 60_000),
 };
 const SIBLING = {
   id: 950,
@@ -58,6 +63,8 @@ const TRACKED_EXPORT = "csv-exports/cfo/5/1-report.csv";
 
 type Rows = unknown[];
 interface Fixture {
+  bucketSourceOnPlatform?: boolean;
+  job?: Record<string, unknown>;
   organization?: Rows;
   organizationInTx?: Rows;
   unmanagedFile?: boolean;
@@ -87,10 +94,11 @@ function workerDb(fixture: Fixture = {}) {
       exceptions: [{ count: 0 }],
       anomaly_scores: [{ count: 0 }],
       upload_batches: [{ count: 0 }],
+      bucket_ingestion_sources: [{ count: 0 }],
     },
     select: {
       [JOBS]: [
-        [JOB],
+        [{ ...JOB, ...fixture.job }],
         [{ shopDomain: "erasure-test.myshopify.com" }],
         fixture.siblings ?? [],
       ],
@@ -122,6 +130,7 @@ function workerDb(fixture: Fixture = {}) {
         [{ count: fixture.unmanagedFile ? 1 : 0 }],
       ],
       [REPORTS]: [[{ count: 0 }]],
+      [BUCKET_SOURCES]: [[{ count: fixture.bucketSourceOnPlatform ? 1 : 0 }]],
     },
     update: { [JOBS]: fixture.claimRows ?? [1] },
   });
@@ -146,6 +155,7 @@ const run = (fake: ReturnType<typeof scriptedDb>, deps: Parameters<typeof handle
     uuid: () => "11111111-1111-4111-8111-111111111111",
     listObjects: async () => [],
     deleteObject: async () => {},
+    platformBucket: "reconcileai-storage",
     ...deps,
   });
 
@@ -408,6 +418,37 @@ describe("when the destructive Shopify shop-redaction worker runs", () => {
     });
   });
 
+  describe("when tenant uploads that saw the tenant active may still be landing", () => {
+    it("should leave storage untouched and retry once none can be", async () => {
+      // First claimed just now: admission committed moments ago.
+      const fake = workerDb({ job: { startedAt: NOW } });
+      const storage = fakeStorage([ARTIFACT.key, "org/42/exports/5/late.xlsx"]);
+
+      await run(fake, storage);
+
+      expect(storage.listObjects).not.toHaveBeenCalled();
+      expect(storage.deleteObject).not.toHaveBeenCalled();
+      expect(fake.writes("delete", STORES)).toEqual([]);
+      const write = lastJobWrite(fake);
+      expect(write).toMatchObject({ status: "failed_retryable", failureCode: "uploads_settling" });
+      expect((write?.nextAttemptAt as Date).getTime()).toBe(
+        NOW.getTime() + SHOPIFY_SHOP_REDACTION_UPLOAD_SETTLE_MS + 1_000
+      );
+    });
+
+    it("should wait longer than any upload may run", () => {
+      expect(SHOPIFY_SHOP_REDACTION_UPLOAD_SETTLE_MS).toBeGreaterThanOrEqual(TENANT_UPLOAD_DEADLINE_MS + 60_000);
+    });
+
+    it("should proceed once the window has passed since the job was first claimed", async () => {
+      const fake = workerDb({ job: { startedAt: new Date(NOW.getTime() - SHOPIFY_SHOP_REDACTION_UPLOAD_SETTLE_MS) } });
+
+      await run(fake);
+
+      expect(fake.writes("delete", ORGANIZATIONS)).toHaveLength(1);
+    });
+  });
+
   describe("when the organisation is not fenced for redaction", () => {
     it("should delete nothing and hand the job to a person", async () => {
       const fake = workerDb({ organization: [{ deletionState: "active" }] });
@@ -444,6 +485,31 @@ describe("when the destructive Shopify shop-redaction worker runs", () => {
       });
 
       expect(lists).toBe(tenantStoragePrefixes(42, [MEMBER]).length + 1);
+      expect(fake.writes("delete", ORGANIZATIONS)).toHaveLength(1);
+    });
+  });
+
+  describe("when a bucket-ingestion source reads from the platform's own bucket", () => {
+    it("should delete nothing and hand the job to a person", async () => {
+      const fake = workerDb({ bucketSourceOnPlatform: true });
+      const storage = fakeStorage([ARTIFACT.key]);
+
+      await run(fake, { ...storage, platformBucket: "reconcileai-storage" });
+
+      expect(storage.listObjects).not.toHaveBeenCalled();
+      expect(storage.deleteObject).not.toHaveBeenCalled();
+      expect(lastJobWrite(fake)).toMatchObject({ status: "manual_review", failureCode: "unmanaged_file_reference" });
+      // This tenant's sources on THIS bucket — not any tenant's, not any bucket.
+      const check = fake.ops.find(op => op.kind === "select" && op.table === BUCKET_SOURCES);
+      expect(check?.where?.params).toEqual([42, "reconcileai-storage"]);
+    });
+
+    it("should not ask at all when no platform bucket is configured", async () => {
+      const fake = workerDb({ bucketSourceOnPlatform: true });
+
+      await run(fake, { platformBucket: "" });
+
+      expect(fake.ops.some(op => op.kind === "select" && op.table === BUCKET_SOURCES)).toBe(false);
       expect(fake.writes("delete", ORGANIZATIONS)).toHaveLength(1);
     });
   });

@@ -120,8 +120,16 @@ import {
   tenantQuotas,
 } from "../../../drizzle/tenant_schema";
 import { getDb, type DbExecutor } from "../../db";
-import { orgScopedKey, storageDelete, storageListKeys } from "../../storage";
-import { legacyUserFilePrefixes } from "../../tenantStorage";
+import {
+  orgScopedKey,
+  platformBucketName,
+  storageDelete,
+  storageListKeys,
+} from "../../storage";
+import {
+  legacyUserFilePrefixes,
+  TENANT_UPLOAD_DEADLINE_MS,
+} from "../../tenantStorage";
 import { affectedRows } from "./tokenStore";
 import {
   shopifyOrdersChannelCode,
@@ -136,6 +144,16 @@ import {
 export const SHOPIFY_SHOP_REDACTION_MANIFEST_VERSION = 1;
 export const SHOPIFY_SHOP_REDACTION_LEASE_MS = 5 * 60_000;
 export const SHOPIFY_SHOP_REDACTION_MAX_ATTEMPTS = 6;
+/**
+ * How long after this job first ran its storage is left alone. A tenant upload
+ * that passed its "is the tenant active?" check before admission fenced the
+ * tenant ends within `TENANT_UPLOAD_DEADLINE_MS` of that check, which came
+ * before this job existed. Waiting the deadline plus a margin (for clock skew
+ * between instances) from the first claim means the folder listing sees every
+ * such file, and no new one can start.
+ */
+export const SHOPIFY_SHOP_REDACTION_UPLOAD_SETTLE_MS =
+  TENANT_UPLOAD_DEADLINE_MS + 2 * 60_000;
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 export type ShopifyShopRedactionFailureCode =
   | "invalid_request_scope"
@@ -148,6 +166,8 @@ export type ShopifyShopRedactionFailureCode =
   | "export_in_flight"
   /** A stored file appeared or changed after the objects were deleted; retried. */
   | "storage_inventory_changed"
+  /** Uploads that saw the tenant active may still be landing; retried once they cannot be. */
+  | "uploads_settling"
   | "worker_failed";
 
 /**
@@ -193,6 +213,8 @@ export interface ShopifyShopRedactionWorkerDeps {
   ) => Promise<void> | void;
   /** Test-only checkpoint after storage is erased and before the database transaction. */
   afterObjectsDeleted?: () => Promise<void> | void;
+  /** Test-only: the platform's own bucket name (default: configured storage). */
+  platformBucket?: string;
 }
 
 /** What a manifest counts: one store of one tenant. */
@@ -211,6 +233,8 @@ interface ClaimedShopRedactionJob {
   attempts: number;
   leaseId: string;
   manifestVersion: number;
+  /** When this job was first claimed — necessarily after admission committed. */
+  startedAt: Date | null;
 }
 
 function retryDelayMs(attempt: number): number {
@@ -253,6 +277,7 @@ async function claimShopRedactionJob(
       requestHash: shopifyShopRedactionJobs.requestHash,
       attempts: shopifyShopRedactionJobs.attempts,
       manifestVersion: shopifyShopRedactionJobs.manifestVersion,
+      startedAt: shopifyShopRedactionJobs.startedAt,
     })
     .from(shopifyShopRedactionJobs)
     .where(
@@ -523,6 +548,14 @@ class ExportInFlightError extends Error {
 }
 
 /** The stored files changed after they were deleted; the deletion must be redone. */
+/** Tenant uploads may still be landing; storage is not touched until `settlesAt`. */
+class UploadsSettlingError extends Error {
+  constructor(readonly settlesAt: Date) {
+    super("uploads_settling");
+    this.name = "UploadsSettlingError";
+  }
+}
+
 class StorageInventoryChangedError extends Error {
   constructor() {
     super("storage_inventory_changed");
@@ -648,11 +681,30 @@ export function storageChangedSince(
   return false;
 }
 
-/** Refuse completion if a legacy opaque URL may still point at merchant data. */
+/**
+ * Refuse completion while merchant files may sit where this erasure cannot
+ * safely reach them: a legacy opaque URL, or a bucket-ingestion source that
+ * reads from the PLATFORM's own bucket. That source's files and archive live
+ * under prefixes the tenant chose, not under `org/<id>/`, and deleting by a
+ * tenant-chosen prefix (possibly empty) could reach other tenants' objects. A
+ * source on the merchant's own bucket holds the merchant's files, not ours.
+ */
 async function assertNoUnmanagedFileReferences(
   db: DbExecutor,
-  organizationId: number
+  organizationId: number,
+  platformBucket: string
 ): Promise<void> {
+  const sourcesOnPlatformBucket = platformBucket
+    ? await countRows(
+        db,
+        bucketIngestionSources,
+        and(
+          eq(bucketIngestionSources.organizationId, organizationId),
+          eq(bucketIngestionSources.bucket, platformBucket)
+        )
+      )
+    : 0;
+  if (sourcesOnPlatformBucket > 0) throw new UnmanagedFileReferenceError();
   const [batchFiles, reportFiles] = await Promise.all([
     countRows(
       db,
@@ -1304,13 +1356,21 @@ export async function handleShopifyShopRedactionJob(
     await assertTenantFenced(db, job.organizationId);
     const manifest = await buildManifest(db, job);
     await deps.afterManifest?.(manifest);
-    await assertNoUnmanagedFileReferences(db, job.organizationId);
+    await assertNoUnmanagedFileReferences(
+      db,
+      job.organizationId,
+      deps.platformBucket ?? platformBucketName()
+    );
     const exportLease = await liveExportLeaseExpiry(
       db,
       job.organizationId,
       clock()
     );
     if (exportLease) throw new ExportInFlightError(exportLease);
+    const settlesAt = new Date(
+      (job.startedAt ?? now).getTime() + SHOPIFY_SHOP_REDACTION_UPLOAD_SETTLE_MS
+    );
+    if (clock() < settlesAt) throw new UploadsSettlingError(settlesAt);
 
     let inventory: ShopRedactionStorageInventory;
     try {
@@ -1343,6 +1403,16 @@ export async function handleShopifyShopRedactionJob(
         clock(),
         "export_in_flight",
         error.leaseExpiresAt
+      );
+      return;
+    }
+    if (error instanceof UploadsSettlingError) {
+      await setRetryableFailure(
+        db,
+        job,
+        clock(),
+        "uploads_settling",
+        error.settlesAt
       );
       return;
     }

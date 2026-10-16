@@ -62,6 +62,25 @@ export async function assertTenantAcceptsFiles(organizationId: number): Promise<
 }
 
 /**
+ * The longest a tenant upload may run, counted from BEFORE the tenant check.
+ *
+ * The check and the upload are not one atomic step: an upload that passed the
+ * check just before a tenant was fenced may still be landing afterwards, and
+ * no row records an ordinary export. The deadline bounds that: once it has
+ * passed since a tenant was fenced, every upload that saw the tenant active has
+ * landed or been aborted. Shop redaction waits that long (plus a margin) before
+ * it lists the tenant's folder, so the listing sees every such file.
+ */
+export const TENANT_UPLOAD_DEADLINE_MS = 60_000;
+
+export class TenantUploadDeadlineError extends Error {
+  constructor() {
+    super("tenant_upload_deadline_exceeded");
+    this.name = "TenantUploadDeadlineError";
+  }
+}
+
+/**
  * Store a file holding `organizationId`'s data and return its key and a
  * presigned download URL. With no tenant (data that belongs to none) the
  * relative key is used as it is.
@@ -72,6 +91,16 @@ export async function putTenantObject(params: {
   body: Buffer | Uint8Array | string;
   contentType: string;
 }): Promise<{ key: string; url: string }> {
-  if (isTenantId(params.organizationId)) await assertTenantAcceptsFiles(params.organizationId);
-  return storagePut(tenantObjectKey(params.organizationId, params.relKey), params.body, params.contentType);
+  // Started before the check, so the bound covers check AND upload.
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(new TenantUploadDeadlineError()), TENANT_UPLOAD_DEADLINE_MS);
+  try {
+    if (isTenantId(params.organizationId)) await assertTenantAcceptsFiles(params.organizationId);
+    if (deadline.signal.aborted) throw new TenantUploadDeadlineError();
+    return await storagePut(tenantObjectKey(params.organizationId, params.relKey), params.body, params.contentType, {
+      abortSignal: deadline.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -2061,9 +2061,13 @@ sandbox.
   organisation — and refuses a tenant that is being deleted. Shop redaction
   erases a tenant's files by listing that prefix, so a file keyed by a user id
   (the old `exports/<userId>/` layout) is one erasure cannot find.
-  `server/storageUploadGate.test.ts` fails CI when other code names
-  `storagePut`/`storagePutPrivate`; a file that legitimately must is listed
-  there with its reason.
+  Every such upload is aborted after `TENANT_UPLOAD_DEADLINE_MS`, counted from
+  before the tenant check, and shop redaction leaves storage alone until that
+  long (plus a margin) after it first ran. So no upload that saw the tenant
+  active can land after its folder was listed — do not lengthen the deadline
+  without the wait. `server/storageUploadGate.test.ts` fails CI when other
+  code names `storagePut`/`storagePutPrivate` or loads the S3 SDK; a file that
+  legitimately must is listed there with its reason.
 - **Split routers** when any router file exceeds 150 lines — use `server/routers/<feature>.ts`
 - **Vitest tests required** for every new procedure and engine function
 - **Never use `&&` for conditional rendering in JSX** — use a ternary with an

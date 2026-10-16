@@ -148,6 +148,8 @@ describe.runIf(localDatabase)("when Shopify shop redaction erases a tenant in My
       webhookId: `wh_${tag()}`,
       status: "admitted",
       manifestVersion: 1,
+      // Admitted and first claimed long enough ago that no upload can still be landing.
+      startedAt: later(-10 * 60_000),
     });
     await addOutbox("shop_redact", id);
     return { id, runId, requestHash: request.requestHash };

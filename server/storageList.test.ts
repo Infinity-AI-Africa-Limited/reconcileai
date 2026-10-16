@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const s3 = vi.hoisted(() => ({ pages: [] as unknown[], requests: [] as Array<Record<string, unknown>> }));
+const s3 = vi.hoisted(() => ({
+  pages: [] as unknown[],
+  requests: [] as Array<Record<string, unknown>>,
+  options: [] as unknown[],
+}));
 
 vi.mock("./_core/env", () => ({
   ENV: {
@@ -11,11 +15,13 @@ vi.mock("./_core/env", () => ({
     awsS3Endpoint: "",
   },
 }));
+vi.mock("@aws-sdk/s3-request-presigner", () => ({ getSignedUrl: async () => "https://signed.example/object" }));
 vi.mock("@aws-sdk/client-s3", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@aws-sdk/client-s3")>();
   class S3Client {
-    async send(command: { input: Record<string, unknown> }) {
+    async send(command: { input: Record<string, unknown> }, options?: unknown) {
       s3.requests.push(command.input);
+      s3.options.push(options);
       const page = s3.pages.shift();
       if (!page) throw new Error("unexpected request");
       return page;
@@ -24,11 +30,23 @@ vi.mock("@aws-sdk/client-s3", async (importOriginal) => {
   return { ...actual, S3Client };
 });
 
-import { storageListKeys } from "./storage";
+import { storageListKeys, storagePut } from "./storage";
 
 beforeEach(() => {
   s3.pages = [];
   s3.requests = [];
+  s3.options = [];
+});
+
+describe("when an object is uploaded with a deadline", () => {
+  it("should hand the abort signal to the S3 client", async () => {
+    s3.pages = [{}];
+    const deadline = new AbortController();
+
+    await storagePut("org/42/a.csv", "x", "text/csv", { abortSignal: deadline.signal });
+
+    expect(s3.options[0]).toEqual({ abortSignal: deadline.signal });
+  });
 });
 
 describe("when a folder's keys are listed", () => {

@@ -54,6 +54,11 @@ export function tenantObjectKey(organizationId: number | null | undefined, relKe
   return isTenantId(organizationId) ? orgScopedKey(organizationId, relKey) : normalizeKey(relKey);
 }
 
+/** The platform's own bucket, or "" when storage is not configured. */
+export function platformBucketName(): string {
+  return ENV.awsS3Bucket.trim();
+}
+
 /** Extract the owning org from a key under the convention; null for legacy keys. */
 export function orgIdFromKey(key: string): number | null {
   const m = /^org\/(\d+)\//.exec(normalizeKey(key));
@@ -99,7 +104,8 @@ function toBody(data: Buffer | Uint8Array | string): Buffer {
 export async function storagePut(
   relKey: string,
   data: Buffer | Uint8Array | string,
-  contentType = "application/octet-stream"
+  contentType = "application/octet-stream",
+  options: { abortSignal?: AbortSignal } = {}
 ): Promise<{ key: string; url: string }> {
   const { s3, bucket } = getClient();
   const key = normalizeKey(relKey);
@@ -110,7 +116,8 @@ export async function storagePut(
       Key: key,
       Body: toBody(data),
       ContentType: contentType,
-    })
+    }),
+    { abortSignal: options.abortSignal }
   );
 
   const url = await getSignedUrl(

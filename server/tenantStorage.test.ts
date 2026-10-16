@@ -1,6 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const db = vi.hoisted(() => ({ rows: [] as unknown[], reads: 0 }));
+const db = vi.hoisted(() => ({ rows: [] as unknown[], reads: 0, delayMs: 0 }));
 const storage = vi.hoisted(() => ({ put: vi.fn() }));
 
 vi.mock("./db", () => ({
@@ -10,6 +10,7 @@ vi.mock("./db", () => ({
         where: () => ({
           limit: async () => {
             db.reads += 1;
+            if (db.delayMs) await new Promise((resolve) => setTimeout(resolve, db.delayMs));
             return db.rows;
           },
         }),
@@ -28,12 +29,18 @@ import {
   legacyUserFilePrefixes,
   putTenantObject,
   TENANT_FILES_CLOSED_MESSAGE,
+  TENANT_UPLOAD_DEADLINE_MS,
   userExportPath,
 } from "./tenantStorage";
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 beforeEach(() => {
   db.rows = [];
   db.reads = 0;
+  db.delayMs = 0;
   storage.put.mockReset();
   storage.put.mockImplementation(async (key: string) => ({ key, url: `https://signed.example/${key}` }));
 });
@@ -61,7 +68,9 @@ describe("when a file is stored for a tenant", () => {
       contentType: "text/csv",
     });
 
-    expect(storage.put).toHaveBeenCalledWith("org/42/exports/7/a.xlsx", "x", "text/csv");
+    expect(storage.put).toHaveBeenCalledWith("org/42/exports/7/a.xlsx", "x", "text/csv", {
+      abortSignal: expect.any(AbortSignal),
+    });
     expect(stored.key).toBe("org/42/exports/7/a.xlsx");
   });
 
@@ -81,7 +90,50 @@ describe("when a file is stored for a tenant", () => {
     await putTenantObject({ organizationId: null, relKey: "exports/7/a.xlsx", body: "x", contentType: "text/csv" });
 
     expect(db.reads).toBe(0);
-    expect(storage.put).toHaveBeenCalledWith("exports/7/a.xlsx", "x", "text/csv");
+    expect(storage.put).toHaveBeenCalledWith("exports/7/a.xlsx", "x", "text/csv", {
+      abortSignal: expect.any(AbortSignal),
+    });
+  });
+});
+
+describe("when an upload runs past its deadline", () => {
+  /** An upload that never finishes on its own, but stops when its signal aborts — as the S3 client does. */
+  const hangingUpload = async (_key: string, _body: unknown, _type: string, options?: { abortSignal?: AbortSignal }) =>
+    new Promise((_resolve, reject) => {
+      options?.abortSignal?.addEventListener("abort", () => reject(options.abortSignal!.reason));
+    });
+
+  it("should abort it, so no upload that saw the tenant active can land later", async () => {
+    vi.useFakeTimers();
+    db.rows = [{ deletionState: "active" }];
+    storage.put.mockImplementation(hangingUpload);
+
+    const upload = putTenantObject({ organizationId: 42, relKey: "exports/7/a.xlsx", body: "x", contentType: "text/csv" });
+    const outcome = expect(upload).rejects.toMatchObject({ name: "TenantUploadDeadlineError" });
+    await vi.advanceTimersByTimeAsync(TENANT_UPLOAD_DEADLINE_MS);
+    await outcome;
+  });
+
+  it("should count the deadline from before the tenant check", async () => {
+    vi.useFakeTimers();
+    db.rows = [{ deletionState: "active" }];
+    db.delayMs = TENANT_UPLOAD_DEADLINE_MS + 1;
+
+    const upload = putTenantObject({ organizationId: 42, relKey: "exports/7/a.xlsx", body: "x", contentType: "text/csv" });
+    const outcome = expect(upload).rejects.toMatchObject({ name: "TenantUploadDeadlineError" });
+    await vi.advanceTimersByTimeAsync(TENANT_UPLOAD_DEADLINE_MS + 1);
+    await outcome;
+    expect(storage.put).not.toHaveBeenCalled();
+  });
+
+  it("should clear its timer once the upload finishes", async () => {
+    vi.useFakeTimers();
+    db.rows = [{ deletionState: "active" }];
+
+    await putTenantObject({ organizationId: 42, relKey: "exports/7/a.xlsx", body: "x", contentType: "text/csv" });
+
+    expect(vi.getTimerCount()).toBe(0);
+    expect(storage.put.mock.calls[0]?.[3]?.abortSignal).toBeInstanceOf(AbortSignal);
   });
 });
 
