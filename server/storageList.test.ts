@@ -30,7 +30,7 @@ vi.mock("@aws-sdk/client-s3", async (importOriginal) => {
   return { ...actual, S3Client };
 });
 
-import { storageListKeys, storagePut } from "./storage";
+import { sameStorageBucket, storageListKeys, storagePut } from "./storage";
 
 beforeEach(() => {
   s3.pages = [];
@@ -81,5 +81,39 @@ describe("when a folder's keys are listed", () => {
     s3.pages = [{ Contents: [{ Key: "org/42/a" }], IsTruncated: true, NextContinuationToken: "t1" }, page];
 
     await expect(storageListKeys("org/42/")).rejects.toThrow("storage_list_incomplete");
+  });
+});
+
+describe("when two storage locations are compared", () => {
+  const r2 = { bucket: "reconcileai-storage", endpoint: "https://acct.r2.cloudflarestorage.com" };
+
+  it.each([
+    ["the same endpoint written with a trailing slash and capitals", { bucket: "Reconcileai-Storage", endpoint: "HTTPS://ACCT.r2.cloudflarestorage.com/" }],
+    ["the same endpoint with its default port spelled out", { bucket: "reconcileai-storage", endpoint: "https://acct.r2.cloudflarestorage.com:443" }],
+  ])("should be one bucket for %s", (_label, other) => {
+    expect(sameStorageBucket(r2, other)).toBe(true);
+  });
+
+  it.each([
+    ["another host", { bucket: "reconcileai-storage", endpoint: "https://minio.merchant.example" }],
+    ["another port on the same host", { bucket: "reconcileai-storage", endpoint: "https://acct.r2.cloudflarestorage.com:9000" }],
+    ["another scheme on the same host", { bucket: "reconcileai-storage", endpoint: "http://acct.r2.cloudflarestorage.com" }],
+    ["AWS S3", { bucket: "reconcileai-storage", endpoint: null }],
+    ["another name", { bucket: "merchant-drop", endpoint: r2.endpoint }],
+    ["an endpoint that is not a URL", { bucket: "reconcileai-storage", endpoint: "not a url" }],
+  ])("should be different buckets for %s", (_label, other) => {
+    expect(sameStorageBucket(r2, other)).toBe(false);
+  });
+
+  it.each([
+    ["no endpoint", null],
+    ["an empty endpoint", ""],
+    ["a regional AWS endpoint", "https://s3.eu-west-1.amazonaws.com"],
+  ])("should treat %s as AWS S3, where bucket names are global", (_label, endpoint) => {
+    expect(sameStorageBucket({ bucket: "reconcileai-storage", endpoint: "" }, { bucket: "reconcileai-storage", endpoint })).toBe(true);
+  });
+
+  it("should match nothing when the platform has no bucket", () => {
+    expect(sameStorageBucket({ bucket: "", endpoint: "" }, { bucket: "", endpoint: "" })).toBe(false);
   });
 });

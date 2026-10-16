@@ -33,6 +33,8 @@ const EXPORTS = "s3_csv_exports";
 const BATCHES = "upload_batches";
 const REPORTS = "reconciliation_reports";
 const BUCKET_SOURCES = "bucket_ingestion_sources";
+/** The platform's storage, as a tenant's bucket-ingestion source would name it. */
+const PLATFORM = { bucket: "reconcileai-storage", endpoint: "https://acct.r2.cloudflarestorage.com" };
 const NOW = new Date("2026-10-16T07:30:00.000Z");
 const MEMBER = 5;
 
@@ -63,7 +65,7 @@ const TRACKED_EXPORT = "csv-exports/cfo/5/1-report.csv";
 
 type Rows = unknown[];
 interface Fixture {
-  bucketSourceOnPlatform?: boolean;
+  bucketSources?: Array<{ bucket: string; endpoint: string | null }>;
   job?: Record<string, unknown>;
   organization?: Rows;
   organizationInTx?: Rows;
@@ -94,7 +96,7 @@ function workerDb(fixture: Fixture = {}) {
       exceptions: [{ count: 0 }],
       anomaly_scores: [{ count: 0 }],
       upload_batches: [{ count: 0 }],
-      bucket_ingestion_sources: [{ count: 0 }],
+      bucket_ingestion_sources: [],
     },
     select: {
       [JOBS]: [
@@ -130,7 +132,7 @@ function workerDb(fixture: Fixture = {}) {
         [{ count: fixture.unmanagedFile ? 1 : 0 }],
       ],
       [REPORTS]: [[{ count: 0 }]],
-      [BUCKET_SOURCES]: [[{ count: fixture.bucketSourceOnPlatform ? 1 : 0 }]],
+      [BUCKET_SOURCES]: [fixture.bucketSources ?? []],
     },
     update: { [JOBS]: fixture.claimRows ?? [1] },
   });
@@ -155,7 +157,7 @@ const run = (fake: ReturnType<typeof scriptedDb>, deps: Parameters<typeof handle
     uuid: () => "11111111-1111-4111-8111-111111111111",
     listObjects: async () => [],
     deleteObject: async () => {},
-    platformBucket: "reconcileai-storage",
+    platformStorage: PLATFORM,
     ...deps,
   });
 
@@ -491,23 +493,35 @@ describe("when the destructive Shopify shop-redaction worker runs", () => {
 
   describe("when a bucket-ingestion source reads from the platform's own bucket", () => {
     it("should delete nothing and hand the job to a person", async () => {
-      const fake = workerDb({ bucketSourceOnPlatform: true });
+      const fake = workerDb({ bucketSources: [{ ...PLATFORM, endpoint: `${PLATFORM.endpoint}/` }] });
       const storage = fakeStorage([ARTIFACT.key]);
 
-      await run(fake, { ...storage, platformBucket: "reconcileai-storage" });
+      await run(fake, storage);
 
       expect(storage.listObjects).not.toHaveBeenCalled();
       expect(storage.deleteObject).not.toHaveBeenCalled();
       expect(lastJobWrite(fake)).toMatchObject({ status: "manual_review", failureCode: "unmanaged_file_reference" });
-      // This tenant's sources on THIS bucket — not any tenant's, not any bucket.
+      // This tenant's sources with this bucket's name — not any tenant's, not any name.
       const check = fake.ops.find(op => op.kind === "select" && op.table === BUCKET_SOURCES);
-      expect(check?.where?.params).toEqual([42, "reconcileai-storage"]);
+      expect(check?.where?.params).toEqual([42, PLATFORM.bucket]);
+      expect(check?.fields).toEqual(["bucket", "endpoint"]);
+    });
+
+    it.each([
+      ["another S3-compatible service", "https://minio.merchant.example"],
+      ["AWS S3, while the platform is on R2", null],
+    ])("should erase as usual when a bucket of the same name is on %s", async (_label, endpoint) => {
+      const fake = workerDb({ bucketSources: [{ bucket: PLATFORM.bucket, endpoint }] });
+
+      await run(fake);
+
+      expect(fake.writes("delete", ORGANIZATIONS)).toHaveLength(1);
     });
 
     it("should not ask at all when no platform bucket is configured", async () => {
-      const fake = workerDb({ bucketSourceOnPlatform: true });
+      const fake = workerDb({ bucketSources: [PLATFORM] });
 
-      await run(fake, { platformBucket: "" });
+      await run(fake, { platformStorage: { bucket: "", endpoint: "" } });
 
       expect(fake.ops.some(op => op.kind === "select" && op.table === BUCKET_SOURCES)).toBe(false);
       expect(fake.writes("delete", ORGANIZATIONS)).toHaveLength(1);

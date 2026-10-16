@@ -54,9 +54,47 @@ export function tenantObjectKey(organizationId: number | null | undefined, relKe
   return isTenantId(organizationId) ? orgScopedKey(organizationId, relKey) : normalizeKey(relKey);
 }
 
-/** The platform's own bucket, or "" when storage is not configured. */
-export function platformBucketName(): string {
-  return ENV.awsS3Bucket.trim();
+/** A bucket and the S3 service it lives on (`endpoint` empty or null for AWS S3). */
+export interface StorageLocation {
+  bucket: string;
+  endpoint: string | null;
+}
+
+/** Where the platform stores its objects; `bucket` is "" when storage is not configured. */
+export function platformStorageLocation(): StorageLocation {
+  return { bucket: ENV.awsS3Bucket.trim(), endpoint: ENV.awsS3Endpoint.trim() };
+}
+
+/**
+ * The service an endpoint names. Bucket names are global on AWS S3, so no
+ * endpoint and any amazonaws.com host are one service there. Elsewhere (R2,
+ * MinIO) names are scoped to the endpoint's origin — scheme, host and port,
+ * which the URL parser normalises (case, default port, trailing path). An
+ * endpoint that is not a URL can only match itself: no client could have
+ * reached a bucket by it.
+ */
+function storageService(endpoint: string | null | undefined): string {
+  const raw = (endpoint ?? "").trim();
+  if (!raw) return "aws";
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return `unparsed:${raw.toLowerCase()}`;
+  }
+  const host = url.hostname.toLowerCase();
+  if (host === "amazonaws.com" || host.endsWith(".amazonaws.com")) return "aws";
+  return url.origin;
+}
+
+/** Do two locations name the same bucket: the same service, and the same bucket name? */
+export function sameStorageBucket(a: StorageLocation, b: StorageLocation): boolean {
+  const name = a.bucket.trim().toLowerCase();
+  return (
+    name !== "" &&
+    name === b.bucket.trim().toLowerCase() &&
+    storageService(a.endpoint) === storageService(b.endpoint)
+  );
 }
 
 /** Extract the owning org from a key under the convention; null for legacy keys. */

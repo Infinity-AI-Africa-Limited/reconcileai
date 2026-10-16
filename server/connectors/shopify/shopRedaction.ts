@@ -122,7 +122,9 @@ import {
 import { getDb, type DbExecutor } from "../../db";
 import {
   orgScopedKey,
-  platformBucketName,
+  platformStorageLocation,
+  sameStorageBucket,
+  type StorageLocation,
   storageDelete,
   storageListKeys,
 } from "../../storage";
@@ -213,8 +215,8 @@ export interface ShopifyShopRedactionWorkerDeps {
   ) => Promise<void> | void;
   /** Test-only checkpoint after storage is erased and before the database transaction. */
   afterObjectsDeleted?: () => Promise<void> | void;
-  /** Test-only: the platform's own bucket name (default: configured storage). */
-  platformBucket?: string;
+  /** Test-only: the platform's own bucket and endpoint (default: configured storage). */
+  platformStorage?: StorageLocation;
 }
 
 /** What a manifest counts: one store of one tenant. */
@@ -687,24 +689,32 @@ export function storageChangedSince(
  * reads from the PLATFORM's own bucket. That source's files and archive live
  * under prefixes the tenant chose, not under `org/<id>/`, and deleting by a
  * tenant-chosen prefix (possibly empty) could reach other tenants' objects. A
- * source on the merchant's own bucket holds the merchant's files, not ours.
+ * source on the merchant's own bucket holds the merchant's files, not ours —
+ * including one that shares our bucket's NAME on another service (R2 and
+ * MinIO names are scoped to their endpoint), so a bucket is matched by its
+ * service and name together (`sameStorageBucket`).
  */
 async function assertNoUnmanagedFileReferences(
   db: DbExecutor,
   organizationId: number,
-  platformBucket: string
+  platform: StorageLocation
 ): Promise<void> {
-  const sourcesOnPlatformBucket = platformBucket
-    ? await countRows(
-        db,
-        bucketIngestionSources,
-        and(
-          eq(bucketIngestionSources.organizationId, organizationId),
-          eq(bucketIngestionSources.bucket, platformBucket)
+  const sameName = platform.bucket
+    ? await db
+        .select({
+          bucket: bucketIngestionSources.bucket,
+          endpoint: bucketIngestionSources.endpoint,
+        })
+        .from(bucketIngestionSources)
+        .where(
+          and(
+            eq(bucketIngestionSources.organizationId, organizationId),
+            eq(bucketIngestionSources.bucket, platform.bucket)
+          )
         )
-      )
-    : 0;
-  if (sourcesOnPlatformBucket > 0) throw new UnmanagedFileReferenceError();
+    : [];
+  if (sameName.some(source => sameStorageBucket(platform, source)))
+    throw new UnmanagedFileReferenceError();
   const [batchFiles, reportFiles] = await Promise.all([
     countRows(
       db,
@@ -1359,7 +1369,7 @@ export async function handleShopifyShopRedactionJob(
     await assertNoUnmanagedFileReferences(
       db,
       job.organizationId,
-      deps.platformBucket ?? platformBucketName()
+      deps.platformStorage ?? platformStorageLocation()
     );
     const exportLease = await liveExportLeaseExpiry(
       db,
