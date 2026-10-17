@@ -6,7 +6,7 @@
 > columns. This document is the human-readable half; the test is the enforced half.
 > **Both must be updated together when a table is added.**
 
-*Audited: 14 October 2026 · 117 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
+*Audited: 16 October 2026 · 120 tables across 7 schema files · Validator: CI tenant-isolation ratchet*
 
 ## 1. Isolation model
 
@@ -25,12 +25,12 @@ Measured by `server/rlsAudit.test.ts` on 2026-10-14 (117 tables).
 
 | Class | Count | Meaning | Posture |
 |---|---|---|---|
-| `tenant_required` | 35 | `organizationId NOT NULL` | **The standard for all new tables.** |
+| `tenant_required` | 37 | `organizationId NOT NULL` | **The standard for all new tables.** |
 | `tenant_nullable` | 45 | has `organizationId`, nullable | Legacy prototype tables (userId-fallback era). Queries must scope by org *and* treat NULL org rows as legacy-private. |
 | `derived` | 4 | scoped via parent FK (job, config…) | Acceptable; queries must join to the org-carrying parent. `webhook_deliveries` (WS-4, July 2026) joins through `webhookId → webhooks.organizationId`. |
 | `poc_scoped` | 7 | public demo surface, per-POC tokens | Isolated from tenant data by design. |
 | `mirror_single_tenant` | 13 | `wc_*` Fineract mirror (Woodcore POC) | **Known caveat** — see finding F2. |
-| `global` | 9 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |
+| `global` | 10 | reference data, platform ops, anonymized pool | Intentionally cross-tenant. |
 | `token` | 4 | random-secret keyed | Entropy-gated, not org-gated. |
 
 ## 3. Findings & remediation plan
@@ -189,4 +189,5 @@ unclassified. The ratchet now also asserts that every schema file listed in
 | `shopify_privacy_artifacts` | `tenant_required` | Metadata for a private org-scoped data-request object: key, digest, size, expiry and delivery evidence. It never persists a presigned URL or selector. Download additionally requires the active store-claiming tenant admin. |
 | `shopify_shop_redaction_jobs` | `tenant_required` | Leased work record for a verified `shop/redact` request (`server/connectors/shopify/shopRedaction.ts`). The worker erases only a FENCED tenant (`deletionState = redacting`; a live organisation goes to `manual_review`), refuses (also to `manual_review`) while a bucket-ingestion source reads from the platform's own bucket, waits out the tenant-upload deadline from its first claim and any data-request export still holding a lease, deletes every stored object first — rows' keys plus everything listed under `org/<id>/` and the tenant users' pre-prefix export folders — then, under the organisation lock and after proving no file appeared since, erases every tenant table in one transaction. The erasure is tenant-wide, so every shop/redact job of the tenant is settled with its own receipt and removed with it. |
 | `shopify_shop_redaction_receipts` | `global` | The only record a completed `shop/redact` leaves: run id, keyed request digest, manifest version, fixed numeric counters and completion time. No organisation, store, domain, webhook id or payload, so it outlives the tenant without identifying it. |
+| `shopify_evidence_retention_receipts` | `tenant_required` | Aggregate-only evidence that the scheduled Scope A retention control ran: 90-day cutoff, completion time and bounded deleted/deferred counts. It contains no domain, Shopify identifier, order reference, amount, source-file content, URL, selector or merchant-user identity. It is deliberately deleted with the tenant by `shop/redact`; it is not the permanent post-erasure receipt. |
 | `shopify_install_leases` | `global` | Pre-tenant platform lock serialising installations per shop domain (one token exchange in flight at a time; the authorization-code path is retired). Lease id and expiry only; no tenant data. |

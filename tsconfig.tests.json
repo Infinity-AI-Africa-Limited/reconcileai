@@ -51,6 +51,8 @@
     "server/connectors/shopify/orderBackstop.test.ts",
     "server/connectors/shopify/privacyCompletion.test.ts",
     "server/connectors/shopify/privacyDownloadRoute.test.ts",
+    "server/connectors/shopify/evidenceRetention.test.ts",
+    "server/connectors/shopify/evidenceRetention.db.test.ts",
     "server/connectors/shopify/privacyQueue.test.ts",
     "server/connectors/shopify/privacySelectors.test.ts",
     "server/connectors/shopify/privacySuppression.test.ts",

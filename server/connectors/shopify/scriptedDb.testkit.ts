@@ -170,7 +170,11 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
 
       insert(t: Table) {
         const table = getTableName(t);
-        return {
+        const builder = {
+          // INSERT IGNORE is recorded like any other insert.
+          ignore() {
+            return builder;
+          },
           values(values: Record<string, unknown> | Record<string, unknown>[]) {
             let upsert = false;
             let onDuplicate: Record<string, unknown> | undefined;
@@ -191,6 +195,7 @@ export function scriptedDb(script: Script = {}): ScriptedDb {
             };
           },
         };
+        return builder;
       },
 
       update(t: Table) {
