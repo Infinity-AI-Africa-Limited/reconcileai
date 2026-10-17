@@ -508,6 +508,35 @@ export const shopifyShopRedactionReceipts = mysqlTable(
 export type ShopifyShopRedactionReceipt = typeof shopifyShopRedactionReceipts.$inferSelect;
 
 /**
+ * Aggregate-only proof that the selected Scope A evidence-retention control
+ * ran. Unlike a `shop/redact` receipt, it remains tenant-linked while that
+ * merchant workspace exists so its audit trail can be inspected; the
+ * shop-redact executor removes it with every other tenant record.
+ *
+ * `summary` must contain counts and bounded machine-state only. It is never a
+ * container for a domain, provider id, order reference, amount, URL, selector,
+ * payload, or merchant-user identity.
+ */
+export const shopifyEvidenceRetentionReceipts = mysqlTable(
+  "shopify_evidence_retention_receipts",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    storeId: int("storeId").notNull(),
+    retentionDays: int("retentionDays").notNull(),
+    cutoffAt: timestamp("cutoffAt").notNull(),
+    summary: json("summary").notNull(),
+    completedAt: timestamp("completedAt").notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+  },
+  (t) => [
+    index("idx_shopify_retention_receipt_store_completed").on(t.organizationId, t.storeId, t.completedAt),
+    index("idx_shopify_retention_receipt_completed").on(t.completedAt),
+  ],
+);
+export type ShopifyEvidenceRetentionReceipt = typeof shopifyEvidenceRetentionReceipts.$inferSelect;
+
+/**
  * Versioned sync cursor/evidence reserved for the next order-led sync phase.
  * Creating this small record now means the future corrective-sync job has a
  * tenant-owned, auditable cursor rather than inferring progress from webhooks.
