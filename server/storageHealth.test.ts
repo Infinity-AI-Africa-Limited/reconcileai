@@ -2,7 +2,22 @@ import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { checkStorageHealth, STORAGE_LIST_PROBE_TIMEOUT_MS, type StorageHealthDeps } from "./storageHealth";
+import { checkStorageHealth, STORAGE_PROBE_STEP_TIMEOUT_MS, type StorageHealthDeps } from "./storageHealth";
+
+/** A step that never answers on its own — only its abort signal can end it, as with the S3 client. */
+const stalled =
+  <T,>() =>
+  (...args: unknown[]) =>
+    new Promise<T>((_resolve, reject) => {
+      const { abortSignal } = args[args.length - 1] as { abortSignal: AbortSignal };
+      abortSignal.addEventListener("abort", () => reject(abortSignal.reason));
+    });
+
+/** The abort signal a mocked step received, from the options argument at `index`. */
+function signalOf(step: unknown, index: number): AbortSignal {
+  const [call] = vi.mocked(step as (...args: unknown[]) => unknown).mock.calls;
+  return (call[index] as { abortSignal: AbortSignal }).abortSignal;
+}
 
 /** In-memory storage that lists like S3, with each step replaceable. */
 function storage(overrides: Partial<StorageHealthDeps> = {}) {
@@ -103,15 +118,62 @@ describe("when storage can write but not list", () => {
     expect(await checkStorageHealth(deps)).toMatchObject({ list: "failed", listError: "error" });
   });
 
-  it("should stop waiting for a listing that does not answer in time", async () => {
+  it("should cancel a listing that does not answer in time, not merely stop waiting for it", async () => {
     vi.useFakeTimers();
-    const { deps } = storage({ list: vi.fn(() => new Promise<string[]>(() => undefined)) });
+    const { deps } = storage({ list: vi.fn(stalled<string[]>()) });
 
     const health = checkStorageHealth(deps);
-    await vi.advanceTimersByTimeAsync(STORAGE_LIST_PROBE_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(STORAGE_PROBE_STEP_TIMEOUT_MS);
 
     await expect(health).resolves.toMatchObject({ status: "degraded", list: "failed", listError: "TimeoutError" });
+    const signal = signalOf(deps.list, 1);
+    expect(signal.aborted).toBe(true);
+    expect((signal.reason as Error).name).toBe("TimeoutError");
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe("when a step of the probe stalls", () => {
+  it("should cancel an upload that does not answer in time, report error, and go no further", async () => {
+    vi.useFakeTimers();
+    const { deps } = storage({ put: vi.fn(stalled<{ key: string }>()) });
+
+    const health = checkStorageHealth(deps);
+    await vi.advanceTimersByTimeAsync(STORAGE_PROBE_STEP_TIMEOUT_MS);
+
+    await expect(health).resolves.toEqual({ status: "error", message: "storage probe step timed out" });
+    expect(signalOf(deps.put, 3).aborted).toBe(true);
+    expect(deps.list).not.toHaveBeenCalled();
+    expect(deps.remove).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("should cancel a cleanup that does not answer in time, without holding up the result", async () => {
+    vi.useFakeTimers();
+    const { deps } = storage({ remove: vi.fn(stalled<void>()) });
+
+    await expect(checkStorageHealth(deps)).resolves.toMatchObject({ status: "ok", list: "ok" });
+    const signal = signalOf(deps.remove, 1);
+    expect(signal.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(STORAGE_PROBE_STEP_TIMEOUT_MS);
+
+    expect(signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("should give each step its own deadline, so a slow upload does not cut the listing short", async () => {
+    vi.useFakeTimers();
+    const slowUpload = vi.fn(
+      (key: string) => new Promise<{ key: string }>((resolve) => setTimeout(() => resolve({ key }), STORAGE_PROBE_STEP_TIMEOUT_MS - 1))
+    );
+    const { deps } = storage({ put: slowUpload, list: vi.fn(async (prefix: string) => [`${prefix}probe.txt`]) });
+
+    const health = checkStorageHealth(deps);
+    await vi.advanceTimersByTimeAsync(STORAGE_PROBE_STEP_TIMEOUT_MS - 1);
+
+    await expect(health).resolves.toMatchObject({ status: "ok", list: "ok" });
+    expect(signalOf(deps.list, 1).aborted).toBe(false);
   });
 });
 

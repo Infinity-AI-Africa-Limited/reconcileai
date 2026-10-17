@@ -30,12 +30,43 @@ vi.mock("@aws-sdk/client-s3", async (importOriginal) => {
   return { ...actual, S3Client };
 });
 
-import { sameStorageBucket, storageListKeys, storagePut } from "./storage";
+import { sameStorageBucket, storageDelete, storageListKeys, storagePut } from "./storage";
 
 beforeEach(() => {
   s3.pages = [];
   s3.requests = [];
   s3.options = [];
+});
+
+describe("when a listing or a delete is given an abort signal", () => {
+  it("should hand it to the S3 client on every page of a listing", async () => {
+    s3.pages = [
+      { Contents: [{ Key: "org/42/a" }], IsTruncated: true, NextContinuationToken: "t1" },
+      { Contents: [{ Key: "org/42/b" }], IsTruncated: false },
+    ];
+    const deadline = new AbortController();
+
+    await storageListKeys("org/42/", { abortSignal: deadline.signal });
+
+    expect(s3.options).toEqual([{ abortSignal: deadline.signal }, { abortSignal: deadline.signal }]);
+  });
+
+  it("should send no further request once the signal has aborted", async () => {
+    const deadline = new AbortController();
+    deadline.abort(new Error("deadline passed"));
+
+    await expect(storageListKeys("org/42/", { abortSignal: deadline.signal })).rejects.toThrow("deadline passed");
+    expect(s3.requests).toEqual([]);
+  });
+
+  it("should hand it to the S3 client on a delete", async () => {
+    s3.pages = [{}];
+    const deadline = new AbortController();
+
+    await storageDelete("org/42/a", { abortSignal: deadline.signal });
+
+    expect(s3.options).toEqual([{ abortSignal: deadline.signal }]);
+  });
 });
 
 describe("when an object is uploaded with a deadline", () => {

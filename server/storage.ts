@@ -232,16 +232,23 @@ const MAX_LIST_PAGES = 1_000;
  * can never also match `org/12/…`, and no caller can list the bucket. A
  * listing that cannot be completed throws rather than return part of the
  * folder: callers use it to prove a folder is empty.
+ *
+ * `abortSignal` cancels the request in flight and any further page.
  */
-export async function storageListKeys(prefix: string): Promise<string[]> {
+export async function storageListKeys(
+  prefix: string,
+  options: { abortSignal?: AbortSignal } = {}
+): Promise<string[]> {
   const folder = normalizeKey(prefix);
   if (folder.length < 2 || !folder.endsWith("/")) throw new Error("storage_list_prefix_invalid");
   const { s3, bucket } = getClient();
   const keys: string[] = [];
   let token: string | undefined;
   for (let page = 0; page < MAX_LIST_PAGES; page++) {
+    options.abortSignal?.throwIfAborted();
     const out = await s3.send(
-      new ListObjectsV2Command({ Bucket: bucket, Prefix: folder, ContinuationToken: token })
+      new ListObjectsV2Command({ Bucket: bucket, Prefix: folder, ContinuationToken: token }),
+      { abortSignal: options.abortSignal }
     );
     for (const item of out.Contents ?? []) if (item.Key?.startsWith(folder)) keys.push(item.Key);
     if (!out.IsTruncated) return keys;
@@ -254,13 +261,19 @@ export async function storageListKeys(prefix: string): Promise<string[]> {
 }
 
 /**
- * Delete an object. Missing objects are treated as success.
+ * Delete an object. Missing objects are treated as success. `abortSignal`
+ * cancels the request in flight.
  */
-export async function storageDelete(relKey: string): Promise<void> {
+export async function storageDelete(
+  relKey: string,
+  options: { abortSignal?: AbortSignal } = {}
+): Promise<void> {
   const { s3, bucket } = getClient();
   const key = normalizeKey(relKey);
   try {
-    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+    await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }), {
+      abortSignal: options.abortSignal,
+    });
   } catch (err) {
     const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata
       ?.httpStatusCode;

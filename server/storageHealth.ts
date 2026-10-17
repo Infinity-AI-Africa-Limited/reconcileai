@@ -9,6 +9,12 @@
  * merchant's request stalled. Listing here makes the permission visible on
  * every health read, including after a credential is rotated.
  *
+ * Every network step — upload, listing, cleanup — runs under its own deadline,
+ * and the deadline ABORTS the request rather than only ceasing to wait for it.
+ * Health is read repeatedly; a stalled step that merely stopped being awaited
+ * would leave its request and connection running, and a slow storage service
+ * would accumulate them read after read.
+ *
  * The endpoint is public, so the result carries timings and fixed codes only:
  * never the bucket, a key or an error's text.
  */
@@ -16,8 +22,8 @@ import crypto from "node:crypto";
 import { errorSummary } from "./errorText";
 import { storageDelete, storageGet, storageListKeys, storagePut } from "./storage";
 
-/** A listing that has not answered by now is reported as failed, not waited for. */
-export const STORAGE_LIST_PROBE_TIMEOUT_MS = 5_000;
+/** How long any one network step of the probe may take before it is aborted. */
+export const STORAGE_PROBE_STEP_TIMEOUT_MS = 5_000;
 
 /**
  * - `ok`      — the folder listed, and the listing held the probe just written;
@@ -40,19 +46,22 @@ export type StorageHealth =
     }
   | { status: "error"; message: string };
 
+type Abortable = { abortSignal: AbortSignal };
+
 export interface StorageHealthDeps {
-  put: (key: string, data: string, contentType: string) => Promise<{ key: string }>;
+  put: (key: string, data: string, contentType: string, options: Abortable) => Promise<{ key: string }>;
+  /** Signs a URL locally; makes no request, so it needs no deadline. */
   get: (key: string) => Promise<unknown>;
-  list: (prefix: string) => Promise<string[]>;
-  remove: (key: string) => Promise<void>;
+  list: (prefix: string, options: Abortable) => Promise<string[]>;
+  remove: (key: string, options: Abortable) => Promise<void>;
   now: () => number;
 }
 
 const defaultDeps: StorageHealthDeps = {
-  put: (key, data, contentType) => storagePut(key, data, contentType),
+  put: (key, data, contentType, options) => storagePut(key, data, contentType, options),
   get: (key) => storageGet(key),
-  list: storageListKeys,
-  remove: storageDelete,
+  list: (prefix, options) => storageListKeys(prefix, options),
+  remove: (key, options) => storageDelete(key, options),
   now: () => Date.now(),
 };
 
@@ -68,22 +77,30 @@ function isAccessDenied(error: unknown): boolean {
   return status === 403 || name === "AccessDenied";
 }
 
-class ListProbeTimeoutError extends Error {
+class ProbeStepTimeoutError extends Error {
   constructor() {
-    super("storage list probe timed out");
+    super("storage probe step timed out");
     this.name = "TimeoutError";
   }
 }
 
-async function withinDeadline<T>(work: Promise<T>): Promise<T> {
+/**
+ * Run one step with a signal that aborts it after the step timeout. The step's
+ * request is cancelled through the signal; the race only guarantees the probe
+ * answers on time even if a step ignored it.
+ */
+async function withDeadline<T>(step: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const timeout = new ProbeStepTimeoutError();
+      controller.abort(timeout);
+      reject(timeout);
+    }, STORAGE_PROBE_STEP_TIMEOUT_MS);
+  });
   try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new ListProbeTimeoutError()), STORAGE_LIST_PROBE_TIMEOUT_MS);
-      }),
-    ]);
+    return await Promise.race([step(controller.signal), expired]);
   } finally {
     clearTimeout(timer);
   }
@@ -95,7 +112,10 @@ export async function checkStorageHealth(deps: StorageHealthDeps = defaultDeps):
   let written: string | null = null;
   try {
     const uploadStart = deps.now();
-    written = (await deps.put(`${folder}probe.txt`, `reconcileai-health-probe ${new Date().toISOString()}`, "text/plain")).key;
+    const probe = `reconcileai-health-probe ${new Date().toISOString()}`;
+    written = (
+      await withDeadline((abortSignal) => deps.put(`${folder}probe.txt`, probe, "text/plain", { abortSignal }))
+    ).key;
     const uploadMs = deps.now() - uploadStart;
 
     const downloadStart = deps.now();
@@ -106,7 +126,7 @@ export async function checkStorageHealth(deps: StorageHealthDeps = defaultDeps):
     let list: StorageListResult;
     let listError: string | undefined;
     try {
-      const keys = await withinDeadline(deps.list(folder));
+      const keys = await withDeadline((abortSignal) => deps.list(folder, { abortSignal }));
       list = keys.includes(written) ? "ok" : "missing";
     } catch (error) {
       list = isAccessDenied(error) ? "denied" : "failed";
@@ -125,7 +145,8 @@ export async function checkStorageHealth(deps: StorageHealthDeps = defaultDeps):
   } catch (error) {
     return { status: "error", message: errorSummary(error) };
   } finally {
-    // Never fail the health check over cleanup.
-    if (written) deps.remove(written).catch(() => undefined);
+    // Never fail the health check over cleanup, and never leave it running.
+    const key = written;
+    if (key) withDeadline((abortSignal) => deps.remove(key, { abortSignal })).catch(() => undefined);
   }
 }
