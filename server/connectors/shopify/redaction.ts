@@ -17,9 +17,10 @@ import { isLiveShopRedactionJobStatus } from "./privacyJobState";
  * Durable admission for Shopify's `shop/redact` compliance webhook.
  *
  * This deliberately performs only the reversible, safety-critical first stage:
- * create an idempotent job and queue intent, fence the tenant, revoke Shopify
- * credentials and deactivate merchant identities. The separate processor is
- * report-only and must never claim redaction is complete.
+ * create an idempotent job and durable queue intent, fence the tenant, revoke
+ * Shopify credentials and deactivate merchant identities. The separate guarded
+ * processor may complete deletion only after storage, scope, fence and
+ * inventory checks pass. Admission itself never claims redaction is complete.
  */
 /** Legacy (pre-0102) job states that still owe the inventory gate its run. */
 const LEGACY_OWED_STATUSES: readonly string[] = ["admitted", "redacting", "failed"];

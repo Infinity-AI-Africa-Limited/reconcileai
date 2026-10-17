@@ -27,6 +27,8 @@
     "client/src/lib/useExceptionWorkflow.test.ts",
     "client/src/lib/useDailyControlReadiness.test.ts",
     "client/src/lib/shopifyAppBridge.test.ts",
+    "client/src/lib/shopifyAppIdentity.test.ts",
+    "client/src/lib/shopifyExceptionHandoff.test.ts",
     "client/src/lib/shopifyConnection.test.ts",
     "client/src/lib/shopifyOrderSyncProgress.test.ts",
     "client/src/lib/shopifyPrivacyDeliveries.test.ts",
@@ -150,6 +152,7 @@
     "server/webhookTenancy.db.test.ts",
     "server/outboundDestination.test.ts",
     "server/webhookDestination.db.test.ts",
-    "tools/publicPolicyClaims.test.ts"
+    "tools/publicPolicyClaims.test.ts",
+    "tools/shopifyAppHomeHandoff.test.ts"
   ]
 }

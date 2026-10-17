@@ -122,7 +122,7 @@ export function describeShopifyPrivacyAttention(
       "",
       ...lines,
       "",
-      "Shop redaction is report-only: deleting a shop's data needs an operator.",
+      "Shop redaction completes through a guarded durable worker; jobs that cannot pass its safety checks need manual review.",
       "Details are in the shopify_privacy_requests table and its job tables.",
     ].join("\n"),
     requests,

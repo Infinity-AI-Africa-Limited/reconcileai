@@ -74,7 +74,7 @@ describe("when a delivery finds a job admitted before jobs carried their request
 });
 
 describe("when a delivery finds a job already bound to its request", () => {
-  it("should not requeue a terminal report-only job", async () => {
+  it("should not requeue a terminal shop-redaction job", async () => {
     const { fake, result } = await admit(
       { select: { [JOBS]: [[{ jobId: 903, runId: RUN_ID, privacyRequestId: 904, requestHash: DELIVERY_HASH, status: "blocked_dependency" }]] } },
     );

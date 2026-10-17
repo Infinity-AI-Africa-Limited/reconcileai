@@ -46,10 +46,10 @@ describe("Shopify settlement evidence rules", () => {
   });
 });
 
-describe("when rows name orders ReconcileAI has not synced", () => {
+describe("when rows name orders ReconcileAI Dev Store has not synced", () => {
   it("should warn before import, while syncing first can still link them", () => {
     const notice = unalignedRowsNotice({ committed: false, unalignedRows: 3 });
-    expect(notice).toContain("3 rows name Shopify orders ReconcileAI has not synced");
+    expect(notice).toContain("3 rows name Shopify orders ReconcileAI Dev Store has not synced");
     expect(notice).toContain("refresh order evidence before importing");
     expect(notice).toContain("will not link them");
   });
@@ -60,7 +60,7 @@ describe("when rows name orders ReconcileAI has not synced", () => {
 
   it("should explain the exceptions after import, and that re-importing will not fix them", () => {
     expect(unalignedRowsNotice({ committed: true, unalignedRows: 1 })).toBe(
-      "1 imported row names no Shopify order ReconcileAI has synced, so it was flagged as an exception. Importing the file again will not link it to its order.",
+      "1 imported row names no Shopify order ReconcileAI Dev Store has synced, so it was flagged as an exception. Importing the file again will not link it to its order.",
     );
   });
 
