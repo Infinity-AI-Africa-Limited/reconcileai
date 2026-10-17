@@ -265,10 +265,12 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
           await settle("ignored", "stale_shop_redact");
           return res.status(200).json({ received: true, status: "ignored_stale" });
         }
-        // Shopify's 2xx acknowledgement means this request and its report-only
-        // queue intent were durably admitted, not that the tenant was deleted.
+        // Shopify's 2xx acknowledgement means this request and its guarded
+        // durable queue intent were admitted, not that the tenant was deleted.
         // Admission fences new work, revokes credentials, and fails closed on
-        // any DB error; automatic destructive completion is not enabled.
+        // any DB error. The worker completes only after scope, storage, fence
+        // and inventory checks pass; otherwise the request stays for retry or
+        // manual review.
         const admission = await db.transaction(async (tx) => {
           await tx
             .insert(shopifyPrivacyRequests)

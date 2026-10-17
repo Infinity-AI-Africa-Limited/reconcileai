@@ -47,7 +47,7 @@ export type ShopifyManagedInstallResult = {
 
 /**
  * Completes Shopify-managed installation only when a verified App Bridge request
- * names a store without an active ReconcileAI connection.
+ * names a store without an active ReconcileAI Dev Store connection.
  *
  * It intentionally keeps the bearer token, provider tokens, contact email,
  * tenant ids and store ids inside server boundaries. A current active connection

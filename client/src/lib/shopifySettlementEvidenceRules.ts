@@ -2,6 +2,7 @@ import type {
   ShopifySettlementEvidenceCommitted,
   ShopifySettlementEvidenceDryRun,
 } from "./shopifyAppBridge";
+import { SHOPIFY_APP_DISPLAY_NAME } from "./shopifyAppIdentity";
 import type { SettlementMapping } from "./shopifySettlementMapping";
 
 /** The merchant-facing file cap for the embedded Scope A evidence workflow. */
@@ -63,7 +64,7 @@ export function canImportSettlementEvidence(input: SettlementEvidenceEligibility
 
 /**
  * What the merchant needs to know about rows that name no Shopify order
- * ReconcileAI has synced, or null when there are none.
+ * the Shopify app has synced, or null when there are none.
  *
  * Before import the answer is still actionable — sync first. After it, it is
  * an explanation: such rows are recorded against the file's own reference and
@@ -78,10 +79,10 @@ export function unalignedRowsNotice(
   if (count === null || count === 0) return null;
   if (!report.committed) {
     return count === 1
-      ? "1 row names a Shopify order ReconcileAI has not synced. If it is a recent order, refresh order evidence before importing. Otherwise the row will be imported unmatched and flagged as an exception, and importing it again later will not link it to its order."
-      : `${count} rows name Shopify orders ReconcileAI has not synced. If they are recent orders, refresh order evidence before importing. Otherwise the rows will be imported unmatched and flagged as exceptions, and importing them again later will not link them to their orders.`;
+      ? `1 row names a Shopify order ${SHOPIFY_APP_DISPLAY_NAME} has not synced. If it is a recent order, refresh order evidence before importing. Otherwise the row will be imported unmatched and flagged as an exception, and importing it again later will not link it to its order.`
+      : `${count} rows name Shopify orders ${SHOPIFY_APP_DISPLAY_NAME} has not synced. If they are recent orders, refresh order evidence before importing. Otherwise the rows will be imported unmatched and flagged as exceptions, and importing them again later will not link them to their orders.`;
   }
   return count === 1
-    ? "1 imported row names no Shopify order ReconcileAI has synced, so it was flagged as an exception. Importing the file again will not link it to its order."
-    : `${count} imported rows name no Shopify order ReconcileAI has synced, so they were flagged as exceptions. Importing the file again will not link them to their orders.`;
+    ? `1 imported row names no Shopify order ${SHOPIFY_APP_DISPLAY_NAME} has synced, so it was flagged as an exception. Importing the file again will not link it to its order.`
+    : `${count} imported rows name no Shopify order ${SHOPIFY_APP_DISPLAY_NAME} has synced, so they were flagged as exceptions. Importing the file again will not link them to their orders.`;
 }

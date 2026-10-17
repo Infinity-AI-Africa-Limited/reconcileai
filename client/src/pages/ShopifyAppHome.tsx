@@ -13,6 +13,8 @@ import {
   type ShopifyAppBridgeContext,
   type ShopifySettlementField,
 } from "@/lib/shopifyAppBridge";
+import { SHOPIFY_APP_DISPLAY_NAME } from "@/lib/shopifyAppIdentity";
+import { SHOPIFY_EXCEPTION_WORKSPACE_HANDOFF } from "@/lib/shopifyExceptionHandoff";
 import { SETTLEMENT_MAPPING_FIELDS } from "@/lib/shopifySettlementMapping";
 import { useShopifySettlementEvidence } from "@/hooks/useShopifySettlementEvidence";
 import { useShopifyOrderSync } from "@/hooks/useShopifyOrderSync";
@@ -75,7 +77,7 @@ export default function ShopifyAppHome() {
       <main className="min-h-screen bg-slate-50 px-5 py-8 text-slate-950">
         <div className="mx-auto flex max-w-3xl items-center gap-3 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
           <LoaderCircle className="h-5 w-5 animate-spin text-[#F47458]" />
-          <p className="text-sm">Verifying your Shopify session and ReconcileAI workspace…</p>
+          <p className="text-sm">Verifying your Shopify session and {SHOPIFY_APP_DISPLAY_NAME} workspace…</p>
         </div>
       </main>
     );
@@ -89,7 +91,7 @@ export default function ShopifyAppHome() {
             <CircleAlert className="h-8 w-8 text-amber-700" />
             <CardTitle className="text-2xl text-[#1B365D]">This Shopify workspace is not ready</CardTitle>
             <CardDescription className="text-base leading-relaxed text-slate-600">
-              {error ?? "ReconcileAI could not verify this Shopify session."}
+              {error ?? `${SHOPIFY_APP_DISPLAY_NAME} could not verify this Shopify session.`}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -108,10 +110,10 @@ export default function ShopifyAppHome() {
       <div className="mx-auto max-w-6xl space-y-6">
         <header className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-5 sm:flex-row sm:items-end">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#F47458]">ReconcileAI × Shopify</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#F47458]">{SHOPIFY_APP_DISPLAY_NAME} × Shopify</p>
             <h1 className="mt-2 text-3xl font-bold tracking-tight text-[#1B365D]">Order-evidence workspace</h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              Compare recent Shopify order evidence with settlement evidence you control, then route any differences through ReconcileAI’s human-approved workflow.
+              Compare recent Shopify order evidence with settlement evidence you control. Any difference is reviewed in {SHOPIFY_APP_DISPLAY_NAME}’s separately authenticated exception workspace.
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
@@ -125,7 +127,7 @@ export default function ShopifyAppHome() {
             <CardHeader className="space-y-2 pb-4">
               <ShieldCheck className="h-5 w-5 text-[#1B365D]" />
               <CardTitle className="text-base">Read-only Shopify access</CardTitle>
-              <CardDescription>ReconcileAI reads minimal recent order evidence only. It cannot edit orders, issue refunds, move money, or change store settings.</CardDescription>
+              <CardDescription>{SHOPIFY_APP_DISPLAY_NAME} reads minimal recent order evidence only. It cannot edit orders, issue refunds, move money, or change store settings.</CardDescription>
             </CardHeader>
           </Card>
           <Card className="border-slate-200 shadow-sm">
@@ -153,7 +155,7 @@ export default function ShopifyAppHome() {
 
         {hasPriorSyncIssue ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950">
-            The last order-evidence sync needs attention. Run a new sync below; ReconcileAI will use Shopify’s current record and will not change anything in Shopify.
+            The last order-evidence sync needs attention. Run a new sync below; {SHOPIFY_APP_DISPLAY_NAME} will use Shopify’s current record and will not change anything in Shopify.
           </div>
         ) : null}
 
@@ -197,7 +199,7 @@ export default function ShopifyAppHome() {
           <CardHeader>
             <CardTitle className="text-xl text-[#1B365D]">2. Add settlement evidence</CardTitle>
             <CardDescription>
-              Upload a payout, settlement, payment-provider or courier export you obtained from your provider. ReconcileAI checks the columns before it writes any evidence.
+              Upload a payout, settlement, payment-provider or courier export you obtained from your provider. {SHOPIFY_APP_DISPLAY_NAME} checks the columns before it writes any evidence.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-5">
@@ -269,7 +271,7 @@ export default function ShopifyAppHome() {
                     </p>
                     {settlement.preview.missingRequired.length > 0 ? (
                       <p className="mt-1 text-slate-600">
-                        ReconcileAI needs {settlement.preview.missingRequired.map((field) => FIELD_LABELS[field]).join(" and ")}.
+                        {SHOPIFY_APP_DISPLAY_NAME} needs {settlement.preview.missingRequired.map((field) => FIELD_LABELS[field]).join(" and ")}.
                       </p>
                     ) : null}
                   </div>
@@ -278,7 +280,7 @@ export default function ShopifyAppHome() {
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Column mapping</p>
                   <p className="mt-1 text-xs text-slate-500">
-                    Confirm which column holds each value, or correct one ReconcileAI detected wrongly. Fields marked Required must be mapped.
+                    Confirm which column holds each value, or correct one {SHOPIFY_APP_DISPLAY_NAME} detected wrongly. Fields marked Required must be mapped.
                   </p>
                   <div className="mt-2 grid gap-2 sm:grid-cols-2">
                     {SETTLEMENT_MAPPING_FIELDS.map(({ field, required }) => (
@@ -349,13 +351,21 @@ export default function ShopifyAppHome() {
           <CardHeader>
             <CardTitle className="text-xl text-[#1B365D]">3. Investigate, approve and evidence</CardTitle>
             <CardDescription>
-              Once both sources are present, ReconcileAI identifies differences. A person remains responsible for reviewing and approving every resolution; ReconcileAI never posts a financial decision to Shopify.
+              Once both sources are present, {SHOPIFY_APP_DISPLAY_NAME} identifies differences. A person remains responsible for reviewing and approving every resolution; {SHOPIFY_APP_DISPLAY_NAME} never posts a financial decision to Shopify.
             </CardDescription>
           </CardHeader>
+          <CardContent className="space-y-3">
+            <Button asChild variant="outline" className="border-[#1B365D] text-[#1B365D] hover:bg-slate-50">
+              <a {...SHOPIFY_EXCEPTION_WORKSPACE_HANDOFF}>Open Payment Exceptions in {SHOPIFY_APP_DISPLAY_NAME}</a>
+            </Button>
+            <p className="text-xs leading-5 text-slate-500">
+              This opens outside Shopify Admin and requires your normal {SHOPIFY_APP_DISPLAY_NAME} sign-in. Shopify session details and store context are not passed to the exception workspace.
+            </p>
+          </CardContent>
         </Card>
 
         <footer className="pb-4 text-xs leading-5 text-slate-500">
-          This embedded workspace uses a fresh Shopify session token for each ReconcileAI request. ReconcileAI processes only the minimum order evidence needed for the stated reconciliation purpose. <a className="font-medium text-[#1B365D] underline underline-offset-2" href="/privacy">Privacy</a> · <a className="font-medium text-[#1B365D] underline underline-offset-2" href="/support">Support</a>
+          This embedded workspace uses a fresh Shopify session token for each {SHOPIFY_APP_DISPLAY_NAME} request. {SHOPIFY_APP_DISPLAY_NAME} processes only the minimum order evidence needed for the stated reconciliation purpose. <a className="font-medium text-[#1B365D] underline underline-offset-2" href="/privacy">Privacy</a> · <a className="font-medium text-[#1B365D] underline underline-offset-2" href="/support">Support</a>
         </footer>
       </div>
     </main>

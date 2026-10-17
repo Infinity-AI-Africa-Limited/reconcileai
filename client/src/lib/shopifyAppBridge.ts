@@ -1,6 +1,7 @@
 import { createTRPCClient, httpLink, TRPCClientError } from "@trpc/client";
 import superjson from "superjson";
 import type { AppRouter } from "../../../server/routers";
+import { SHOPIFY_APP_DISPLAY_NAME } from "./shopifyAppIdentity";
 import { shopifyInstallErrorMessage } from "./shopifyConnection";
 
 export type ShopifyAppBridgeContext = {
@@ -63,7 +64,7 @@ export type ShopifySettlementEvidenceDryRun = {
   missingRequired: ShopifySettlementField[];
   totalRows: number;
   parseErrors: string[];
-  /** Rows naming no Shopify order ReconcileAI has synced; null when rows could not be read. */
+  /** Rows naming no Shopify order ReconcileAI Dev Store has synced; null when rows could not be read. */
   unalignedRows: number | null;
 };
 
@@ -299,11 +300,11 @@ export async function submitShopifySettlementEvidence(
 
 export function shopifyAppHomeErrorMessage(error: unknown): string {
   if (!(error instanceof ShopifyAppHomeClientError)) {
-    return "ReconcileAI could not load this Shopify workspace. Please try again.";
+    return `${SHOPIFY_APP_DISPLAY_NAME} could not load this Shopify workspace. Please try again.`;
   }
   switch (error.code) {
     case "CONFIGURATION_UNAVAILABLE":
-      return "The Shopify connection is not configured for this environment yet. Please contact ReconcileAI support.";
+      return `The Shopify connection is not configured for this environment yet. Please contact ${SHOPIFY_APP_DISPLAY_NAME} support.`;
     case "APP_BRIDGE_UNAVAILABLE":
       return "Shopify App Bridge could not load. Disable any ad blocker, refresh this App Home, and try again.";
     case "AUTHENTICATION_REQUIRED":
@@ -313,17 +314,17 @@ export function shopifyAppHomeErrorMessage(error: unknown): string {
     case "REQUIRED_PERMISSIONS_NOT_GRANTED":
       return "ReconcileAI Dev Store needs read-only order access to continue. Reopen the app from Shopify Admin and approve the requested permission.";
     case "STORE_ACTION_REQUIRED":
-      return "This store needs to be reconnected before ReconcileAI can read order evidence.";
+      return `This store needs to be reconnected before ${SHOPIFY_APP_DISPLAY_NAME} can read order evidence.`;
     case "ORDER_SYNC_REQUIRED":
       return "Sync Shopify order evidence once before importing settlement evidence.";
     case "ACTIVE_ADMIN_REQUIRED":
-      return "An active ReconcileAI administrator for this store is required before evidence can be imported.";
+      return `An active ${SHOPIFY_APP_DISPLAY_NAME} administrator for this store is required before evidence can be imported.`;
     case "INVALID_REQUEST":
-      return "ReconcileAI could not check this file. Confirm it is a supported CSV or Excel export under 10MB and try again.";
+      return `${SHOPIFY_APP_DISPLAY_NAME} could not check this file. Confirm it is a supported CSV or Excel export under 10MB and try again.`;
     case "SYNC_IN_PROGRESS":
       return "A reconciliation sync is already running for this store. Wait a moment, then refresh this page.";
     case "SERVICE_UNAVAILABLE":
-      return "ReconcileAI is temporarily unavailable. Please try again shortly.";
+      return `${SHOPIFY_APP_DISPLAY_NAME} is temporarily unavailable. Please try again shortly.`;
     case "OWNERSHIP_VERIFICATION_REQUIRED":
       return shopifyInstallErrorMessage("ownership_verification_required");
     case "EMAIL_ALREADY_REGISTERED":

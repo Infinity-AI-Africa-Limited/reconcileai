@@ -88,6 +88,7 @@ describe("when the owner's message is written", () => {
     expect(message?.requests).toBe(5);
     expect(message?.content).toContain("- customers/redact · failed_terminal: 2 request(s); oldest received 2026-08-26, OVERDUE since 2026-09-25");
     expect(message?.content).toContain("- shop/redact · manual_review: 3 request(s); oldest received 2026-09-30, due by 2026-10-30 (25 days left)");
+    expect(message?.content).toContain("Shop redaction completes through a guarded durable worker; jobs that cannot pass its safety checks need manual review.");
   });
 
   it("should carry counts and dates only — no field from any request", () => {
