@@ -64,7 +64,7 @@ export type ShopifySettlementEvidenceDryRun = {
   missingRequired: ShopifySettlementField[];
   totalRows: number;
   parseErrors: string[];
-  /** Rows naming no Shopify order ReconcileAI Dev Store has synced; null when rows could not be read. */
+  /** Rows naming no Shopify order this app has synced; null when rows could not be read. */
   unalignedRows: number | null;
 };
 

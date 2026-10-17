@@ -150,7 +150,7 @@ function emailEquals(email: string) {
 }
 
 /**
- * Create or reconnect one merchant-owned ReconcileAI Dev Store tenant after Shopify has
+ * Create or reconnect one merchant-owned ReconcileAI tenant after Shopify has
  * authenticated the shop. It does not create any reconciliation data or run a
  * sync: the first data cycle belongs to the separately reviewed sync phase.
  *
@@ -391,7 +391,7 @@ async function reauthorizeExistingStore(
     // workspace's connection is dead either way; this records it as such.
     const failClosedState = await failClosed(db, store, "ownership_unverified", params.reauthorization.retiring, params.lease);
     throw new ShopifyOnboardingError(
-        "The Shopify store's contact email does not match an administrator of its ReconcileAI Dev Store workspace",
+      "The Shopify store's contact email does not match an administrator of its ReconcileAI workspace",
       "OWNERSHIP_UNVERIFIED",
       failClosedState,
     );

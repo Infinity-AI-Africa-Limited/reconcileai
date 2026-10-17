@@ -771,7 +771,7 @@ function artifactDocument(
     result: "zero_record_attestation",
     recordsFound: 0,
     reasonCode: "no_customer_profile_fields_and_no_requested_orders_found",
-    statement: "ReconcileAI Dev Store found no stored financial order evidence for the exact orders selected by this request.",
+    statement: "ReconcileAI found no stored financial order evidence for the exact orders selected by this request.",
     selectorDisposition: "deleted_after_authenticated_delivery",
     dataClassesNotStored: [
       "customer_profile",

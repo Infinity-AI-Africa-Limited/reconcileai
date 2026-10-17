@@ -24,8 +24,8 @@ import { importShopifySettlementEvidence } from "../connectors/shopify/settlemen
  * Shopify App Home: the workspace embedded in Shopify Admin.
  *
  * Its authority is a Shopify App Bridge ID token, sent fresh with every call as
- * `Authorization: Bearer …` — NOT the ReconcileAI Dev Store session. So these procedures
- * never read `ctx.user`: a browser that also holds a ReconcileAI Dev Store cookie gains
+ * `Authorization: Bearer …` — NOT the ReconcileAI session. So these procedures
+ * never read `ctx.user`: a browser that also holds a ReconcileAI cookie gains
  * nothing here, and the tenant and store come only from the verified token.
  */
 const embeddedProcedure = publicProcedure.use(async ({ ctx, next }) => {
@@ -60,7 +60,7 @@ export const shopifyAppHomeRouter = router({
   /**
    * Shopify-managed installation happens from App Home, not a callback URL.
    * A fresh App Bridge token is verified and exchanged only when this shop has
-   * no active ReconcileAI Dev Store connection; repeated opens do not rotate credentials.
+   * no active ReconcileAI connection; repeated opens do not rotate credentials.
    */
   initialize: publicProcedure.mutation(async ({ ctx }) => {
     const origin = ENV.appUrl.trim().replace(/\/+$/, "");

@@ -26,7 +26,7 @@ use_legacy_install_flow = false
 redirect_urls = ["https://www.reconcileaiafrica.com/api/shopify/callback"]
 
 [webhooks]
-# Match the Admin API version stored for every ReconcileAI Dev Store Shopify connection.
+# Match the Admin API version stored for every Shopify connection in ReconcileAI.
 api_version = "2026-07"
 
 [[webhooks.subscriptions]]

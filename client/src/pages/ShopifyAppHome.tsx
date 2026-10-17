@@ -14,7 +14,7 @@ import {
   type ShopifySettlementField,
 } from "@/lib/shopifyAppBridge";
 import { SHOPIFY_APP_DISPLAY_NAME } from "@/lib/shopifyAppIdentity";
-import { SHOPIFY_EXCEPTION_WORKSPACE_HANDOFF } from "@/lib/shopifyExceptionHandoff";
+import { shopifyExceptionWorkspaceHandoff } from "@/lib/shopifyExceptionHandoff";
 import { SETTLEMENT_MAPPING_FIELDS } from "@/lib/shopifySettlementMapping";
 import { useShopifySettlementEvidence } from "@/hooks/useShopifySettlementEvidence";
 import { useShopifyOrderSync } from "@/hooks/useShopifyOrderSync";
@@ -54,6 +54,8 @@ export default function ShopifyAppHome() {
     }
   }, []);
   const orderSync = useShopifyOrderSync(context?.sync ?? null, refreshContext);
+  // This page's own origin: the platform serves App Home, so the workspace is here too.
+  const exceptionWorkspace = shopifyExceptionWorkspaceHandoff(window.location.origin);
 
   const load = async () => {
     setLoading(true);
@@ -113,7 +115,7 @@ export default function ShopifyAppHome() {
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#F47458]">{SHOPIFY_APP_DISPLAY_NAME} × Shopify</p>
             <h1 className="mt-2 text-3xl font-bold tracking-tight text-[#1B365D]">Order-evidence workspace</h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              Compare recent Shopify order evidence with settlement evidence you control. Any difference is reviewed in {SHOPIFY_APP_DISPLAY_NAME}’s separately authenticated exception workspace.
+              Compare recent Shopify order evidence with settlement evidence you control. Any difference is reviewed in ReconcileAI’s Payment Exceptions workspace, which has its own sign-in.
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
@@ -354,14 +356,18 @@ export default function ShopifyAppHome() {
               Once both sources are present, {SHOPIFY_APP_DISPLAY_NAME} identifies differences. A person remains responsible for reviewing and approving every resolution; {SHOPIFY_APP_DISPLAY_NAME} never posts a financial decision to Shopify.
             </CardDescription>
           </CardHeader>
-          <CardContent className="space-y-3">
-            <Button asChild variant="outline" className="border-[#1B365D] text-[#1B365D] hover:bg-slate-50">
-              <a {...SHOPIFY_EXCEPTION_WORKSPACE_HANDOFF}>Open Payment Exceptions in {SHOPIFY_APP_DISPLAY_NAME}</a>
-            </Button>
-            <p className="text-xs leading-5 text-slate-500">
-              This opens outside Shopify Admin and requires your normal {SHOPIFY_APP_DISPLAY_NAME} sign-in. Shopify session details and store context are not passed to the exception workspace.
-            </p>
-          </CardContent>
+          {exceptionWorkspace ? (
+            <CardContent className="space-y-3">
+              <Button asChild variant="outline" className="border-[#1B365D] text-[#1B365D] hover:bg-slate-50">
+                <a {...exceptionWorkspace}>Open Payment Exceptions in ReconcileAI</a>
+              </Button>
+              <p className="text-xs leading-5 text-slate-500">
+                Opens in a new tab, outside Shopify Admin. ReconcileAI asks you to sign in there with your ReconcileAI
+                account; if it opens on the dashboard, choose Payment Exceptions from the menu. No Shopify session or
+                store details are passed to it.
+              </p>
+            </CardContent>
+          ) : null}
         </Card>
 
         <footer className="pb-4 text-xs leading-5 text-slate-500">
