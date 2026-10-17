@@ -4,8 +4,8 @@ import {
   SHOPIFY_EXCEPTION_WORKSPACE_PATH,
 } from "./shopifyExceptionHandoff";
 
-describe("Shopify exception workspace handoff", () => {
-  it("opens only the fixed top-level exception workspace without a Shopify identity or tenant context", () => {
+describe("when a merchant leaves Shopify App Home for the exception workspace", () => {
+  it("should target only the fixed top-level exception workspace without Shopify identity or tenant context", () => {
     expect(SHOPIFY_EXCEPTION_WORKSPACE_PATH).toBe("/exceptions");
     expect(SHOPIFY_EXCEPTION_WORKSPACE_HANDOFF).toEqual({
       href: "/exceptions",
