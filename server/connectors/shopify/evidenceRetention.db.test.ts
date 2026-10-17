@@ -824,5 +824,41 @@ describe.runIf(localDatabase)(
       expect(second).toMatchObject({ transactionsDeleted: 1 });
       expect(await transactionIds([laterRow])).toEqual([]);
     });
+
+    it("should finish a day while another audit writer holds the tenant's chain, without a deadlock", async () => {
+      const t = await seedTenant();
+      const expired = await seedTransaction(t, OLD);
+      // Keeps the shared upload, so the finishing run has only its receipt left.
+      await seedTransaction(t, RECENT);
+      let tick = 0;
+      const partial = await sweep([t], { budgetMs: 3, elapsed: () => tick++ });
+      expect(partial).toMatchObject({ storesIncomplete: 1, transactionsDeleted: 1 });
+
+      // An audit write takes the chain lock, then locks the chain's newest row,
+      // which is now this store's batch entry. Do exactly that, in two steps.
+      const writer = await pool.getConnection();
+      try {
+        await writer.beginTransaction();
+        await writer.query("INSERT IGNORE INTO audit_chain_locks (chainKey) VALUES (?)", [t.organizationId]);
+        await writer.query("SELECT chainKey FROM audit_chain_locks WHERE chainKey = ? FOR UPDATE", [t.organizationId]);
+        const finishing = sweep([t]);
+        // Give the finishing run time to reach the chain lock and wait on it.
+        await new Promise(resolve => setTimeout(resolve, 1_000));
+        // A receipt that had locked the batch rows first would deadlock here.
+        await writer.query(
+          "SELECT id FROM audit_logs WHERE organizationId = ? ORDER BY sequenceNumber DESC LIMIT 1 FOR UPDATE",
+          [t.organizationId]
+        );
+        await writer.commit();
+        expect(await finishing).toMatchObject({ storesCompleted: 1, storesFailed: 0 });
+      } catch (error) {
+        await writer.rollback().catch(() => undefined);
+        throw error;
+      } finally {
+        writer.release();
+      }
+      expect((await receiptsFor(t))[0]?.summary).toMatchObject({ transactionsDeleted: 1 });
+      expect(await transactionIds([expired])).toEqual([]);
+    });
   }
 );

@@ -74,6 +74,7 @@ import {
 import {
   createAuditLog,
   getDb,
+  lockAuditChain,
   type DbExecutor,
   type DbTransaction,
 } from "../../db";
@@ -1366,11 +1367,17 @@ async function countDeferred(
  * Locking reads: on TiDB a plain read sees the snapshot from BEGIN, which
  * would miss a batch another instance committed just before this one took the
  * tenant lock.
+ *
+ * The tenant's audit-chain lock comes first, as it does for every audit write.
+ * Those writers take it and then lock the chain's newest row, which may be one
+ * of the batch entries read here. Reading them under lock before taking it
+ * would let each side hold what the other waits for.
  */
 async function deletionsSinceLastReceipt(
   tx: DbTransaction,
   scope: StoreScope
 ): Promise<Partial<ShopifyEvidenceRetentionCounts>> {
+  await lockAuditChain(tx, scope.organizationId);
   const [previous] = await tx
     .select({
       id: shopifyEvidenceRetentionReceipts.id,

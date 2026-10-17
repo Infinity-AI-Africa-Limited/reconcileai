@@ -1488,6 +1488,25 @@ const auditRefusesPool: AuditAcceptsPool = false;
 void auditRefusesPool;
 
 /**
+ * Take an organisation's audit-chain lock (null: the global chain) inside `db`.
+ *
+ * Every audit write takes this first and then locks the chain's newest row. A
+ * transaction that also reads the chain's rows under lock must take it BEFORE
+ * those reads, or it can hold the newest row while a writer holding this lock
+ * waits for it, and each waits on the other. Taking it again later in the same
+ * transaction, as the audit write itself will, is free.
+ */
+export async function lockAuditChain(db: DbTransaction, organizationId: number | null): Promise<void> {
+  const chainKey = organizationId ?? 0;
+  await db.insert(auditChainLocks).ignore().values({ chainKey });
+  await db
+    .select({ chainKey: auditChainLocks.chainKey })
+    .from(auditChainLocks)
+    .where(eq(auditChainLocks.chainKey, chainKey))
+    .for("update");
+}
+
+/**
  * Append one entry to its organisation's hash chain, serialised per chain.
  *
  * This read the chain's head and appended to it with nothing stopping a second
@@ -1506,13 +1525,7 @@ void auditRefusesPool;
  */
 async function appendToAuditChain(db: DbTransaction, data: InsertAuditLog) {
   const orgScope = data.organizationId ?? null;
-  const chainKey = orgScope ?? 0;
-  await db.insert(auditChainLocks).ignore().values({ chainKey });
-  await db
-    .select({ chainKey: auditChainLocks.chainKey })
-    .from(auditChainLocks)
-    .where(eq(auditChainLocks.chainKey, chainKey))
-    .for("update");
+  await lockAuditChain(db, orgScope);
   const [prev] = await db
     .select({ seq: auditLogs.sequenceNumber, hash: auditLogs.recordHash })
     .from(auditLogs)

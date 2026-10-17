@@ -299,6 +299,23 @@ describe("when Shopify Scope A evidence reaches its retention cutoff", () => {
     );
   });
 
+  it("should take the tenant's audit-chain lock before it reads any audit row under lock", async () => {
+    // Every audit write takes the chain lock and then locks the newest row. A
+    // receipt that locked rows first could hold that row while waiting for the
+    // chain: each side holding what the other needs.
+    const fake = oneCandidate({
+      auditTrail: [{ details: { phase: "evidence", storeId: STORE_ID, transactionsDeleted: 1 } }],
+    });
+    await sweep(fake);
+    const receiptTx = fake.writes("insert", RECEIPTS)[0]?.txId;
+    expect(receiptTx).toBeDefined();
+    const inReceiptTx = fake.ops.filter(op => op.txId === receiptTx && op.kind === "select" && op.locked);
+    const chain = inReceiptTx.findIndex(op => op.table === "audit_chain_locks");
+    const firstAuditRow = inReceiptTx.findIndex(op => op.table === "audit_logs");
+    expect(chain).toBeGreaterThanOrEqual(0);
+    expect(firstAuditRow).toBeGreaterThan(chain);
+  });
+
   describe("when scheduling the sweep", () => {
     it("should run at most daily after a sweep that finished", async () => {
       const first = await runShopifyScopeAEvidenceRetentionIfDue({
