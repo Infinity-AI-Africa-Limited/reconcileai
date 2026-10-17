@@ -15,7 +15,7 @@ import { verifyGitHubOidcToken, describeOidcFailure } from "./githubOidc";
 import { getDb } from "../db";
 import { seedDefaultResolutionTemplates, seedNigerianExceptionDefaults } from "../seedResolutionTemplates";
 import { sql } from "drizzle-orm";
-import { storagePut, storageGet, storageDelete } from "../storage";
+import { checkStorageHealth } from "../storageHealth";
 import { sdk } from "./sdk";
 import { applyPortalView } from "./portalView";
 import { asyncHandler } from "./asyncHandler";
@@ -109,26 +109,12 @@ async function startServer() {
       };
     }
 
-    // 2. Storage (S3) — write a tiny probe file then verify a download URL is returned
+    // 2. Storage (S3) — write a probe, make its download URL, and LIST its
+    // folder: shop redaction deletes a tenant's files by listing, so a write-only
+    // credential must show here rather than in a stalled privacy request.
+    // A failed listing is "degraded", not "error" (see 5. below).
     try {
-      const probeKey = `health-checks/probe-${Date.now()}.txt`;
-      const probeData = `reconcileai-health-probe ${new Date().toISOString()}`;
-      const uploadStart = Date.now();
-      const { key, url: uploadedUrl } = await storagePut(probeKey, probeData, "text/plain");
-      const uploadMs = Date.now() - uploadStart;
-
-      const downloadStart = Date.now();
-      const { url: downloadUrl } = await storageGet(key);
-      const downloadMs = Date.now() - downloadStart;
-
-      // Clean up probe file — fire-and-forget, never fail the health check over it
-      storageDelete(key).catch(() => undefined);
-
-      checks.storage = {
-        status: "ok",
-        uploadMs,
-        downloadMs,
-      };
+      checks.storage = await checkStorageHealth();
     } catch (err) {
       checks.storage = {
         status: "error",
