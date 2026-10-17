@@ -10,7 +10,7 @@
 import { and, eq, inArray } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
 import type { Pool } from "mysql2/promise";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   agentActionDrafts,
   agentMemory,
@@ -41,6 +41,7 @@ import { classifyDatabaseTarget } from "../../dbTarget";
 import { createAppPool } from "../../dbSession";
 import {
   purgeExpiredShopifyScopeAEvidence,
+  resetShopifyScopeAEvidenceRetentionScheduleForTest,
   SHOPIFY_SCOPE_A_EVIDENCE_RETENTION_DAYS,
   type ShopifyEvidenceRetentionDeps,
 } from "./evidenceRetention";
@@ -83,6 +84,9 @@ describe.runIf(localDatabase)(
       pool = createAppPool(url!).promise();
       db = drizzle(pool);
     });
+
+    // Where an unfinished sweep stopped is process memory; no case inherits it.
+    beforeEach(() => resetShopifyScopeAEvidenceRetentionScheduleForTest());
 
     afterAll(async () => {
       if (db && orgIds.length) {
@@ -416,6 +420,22 @@ describe.runIf(localDatabase)(
           createdAt: OLD,
         })
       );
+      // A finished run whose report points at a stored file: deleting the rows
+      // would orphan an object this control does not manage, so both stay.
+      const fileJobId = await seedJob(t);
+      const fileReportId = insertId(
+        await db.insert(reconciliationReports).values({
+          organizationId: t.organizationId,
+          userId: t.userId,
+          jobId: fileJobId,
+          reportType: "daily",
+          title: "Masked report with a stored file",
+          summary: { only: "aggregates" },
+          format: "pdf",
+          fileUrl: "https://storage.invalid/masked-report",
+          createdAt: OLD,
+        })
+      );
       await db.insert(sharedReportTokens).values({
         reportId,
         token: `masked-share-${tag()}`,
@@ -454,9 +474,12 @@ describe.runIf(localDatabase)(
         jobsDeleted: 1,
         batchesDeleted: 1,
         blockedUploadFiles: 1,
+        blockedReportFiles: 1,
         webhookEventsDeleted: 1,
         deferredUnprocessedWebhooks: 1,
         deferredActiveExceptions: 1,
+        // The row kept here is kept for its open exception, not for a pairing.
+        deferredPairedTransactions: 0,
       });
       expect(await transactionIds([order, settlement, terminal, live])).toEqual([live]);
       expect(await db.select().from(matches).where(eq(matches.id, matchId))).toEqual([]);
@@ -467,6 +490,10 @@ describe.runIf(localDatabase)(
       expect(await db.select().from(reconciliationJobs).where(eq(reconciliationJobs.id, jobId))).toEqual([]);
       expect(await db.select().from(reconciliationReports).where(eq(reconciliationReports.id, reportId))).toEqual([]);
       expect(await db.select().from(sharedReportTokens).where(eq(sharedReportTokens.reportId, reportId))).toEqual([]);
+      expect(await db.select({ id: reconciliationJobs.id }).from(reconciliationJobs).where(eq(reconciliationJobs.id, fileJobId))).toHaveLength(1);
+      expect(
+        await db.select({ id: reconciliationReports.id }).from(reconciliationReports).where(eq(reconciliationReports.id, fileReportId))
+      ).toHaveLength(1);
       expect(
         (
           await db
@@ -498,9 +525,10 @@ describe.runIf(localDatabase)(
       expect(batchAudits.length).toBeGreaterThan(0);
       expect(JSON.stringify(batchAudits.map(row => row.details))).not.toMatch(/order-|example\.invalid/i);
 
-      // The durable receipt makes a same-day re-run a no-op across restarts.
+      // The durable receipt makes a same-day re-run a no-op across restarts:
+      // a store finished today is not even locked again.
       const second = await sweep([t]);
-      expect(second).toMatchObject({ storesConsidered: 1, storesSkipped: 1, transactionsDeleted: 0 });
+      expect(second).toMatchObject({ storesConsidered: 0, storesSkipped: 0, transactionsDeleted: 0 });
       expect(await receiptsFor(t)).toHaveLength(1);
       expect(await auditsFor(t, "shopify_scope_a_retention_sweep")).toHaveLength(1);
       expect(await transactionIds([live])).toEqual([live]);
@@ -746,6 +774,55 @@ describe.runIf(localDatabase)(
       expect(receipts).toHaveLength(1);
       // The receipt reports the whole day's pass, both runs of it.
       expect(receipts[0]?.summary).toMatchObject({ transactionsDeleted: 2, deferredPairedTransactions: 3 });
+    });
+
+    it("should report a whole day's deletions on its receipt when another process finishes the day, and only that day's", async () => {
+      const t = await seedTenant();
+      const rows: number[] = [];
+      for (let i = 0; i < 3; i += 1) rows.push(await seedTransaction(t, OLD));
+
+      // This process deletes one batch and stops.
+      let tick = 0;
+      const partial = await sweep([t], { batchSize: 1, budgetMs: 3, elapsed: () => tick++ });
+      expect(partial).toMatchObject({ storesIncomplete: 1, transactionsDeleted: 1 });
+
+      // A restart, or another instance: nothing of that run survives in memory.
+      resetShopifyScopeAEvidenceRetentionScheduleForTest();
+      const finish = await sweep([t]);
+      expect(finish).toMatchObject({ storesCompleted: 1, transactionsDeleted: 2 });
+      const [first] = await receiptsFor(t);
+      // The receipt counts all three: it reads the batch entries, not memory.
+      expect(first?.summary).toMatchObject({ transactionsDeleted: 3 });
+
+      // The next day's receipt counts the next day's deletions, not these.
+      const nextDayRow = await seedTransaction(t, OLD);
+      const nextDay = await sweep([t], { now: () => new Date(NOW.getTime() + DAY) });
+      expect(nextDay).toMatchObject({ storesCompleted: 1, transactionsDeleted: 1 });
+      expect(await transactionIds([...rows, nextDayRow])).toEqual([]);
+      const receipts = (await receiptsFor(t)).sort((a, b) => a.id - b.id);
+      expect(receipts.map(receipt => (receipt.summary as { transactionsDeleted: number }).transactionsDeleted)).toEqual([3, 1]);
+    });
+
+    it("should start the next sweep with the stores after the one its budget stopped in", async () => {
+      const earlier = await seedTenant();
+      const later = await seedTenant();
+      const earlierRow = await seedTransaction(earlier, OLD);
+      const laterRow = await seedTransaction(later, OLD);
+
+      // Room for the earlier store's evidence and runs, then the budget is out:
+      // it stops inside the earlier store and never reaches the later one.
+      let tick = 0;
+      const clock = () => tick++;
+      const first = await sweep([earlier, later], { budgetMs: 4, elapsed: clock });
+      expect(first).toMatchObject({ storesIncomplete: 2, storesCompleted: 0, transactionsDeleted: 1 });
+      expect(await transactionIds([earlierRow, laterRow])).toEqual([laterRow]);
+
+      // The same budget again. Starting from the lowest id would finish the
+      // earlier store and stop before the later one, every time.
+      tick = 0;
+      const second = await sweep([earlier, later], { budgetMs: 4, elapsed: clock });
+      expect(second).toMatchObject({ transactionsDeleted: 1 });
+      expect(await transactionIds([laterRow])).toEqual([]);
     });
   }
 );

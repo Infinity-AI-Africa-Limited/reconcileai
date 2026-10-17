@@ -30,6 +30,7 @@ import {
   exists,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lt,
   ne,
@@ -45,6 +46,7 @@ import {
   agentActionDrafts,
   agentMemory,
   anomalyScores,
+  auditLogs,
   channels,
   controlBatchManifests,
   exceptionWorkflowEvents,
@@ -107,6 +109,12 @@ export const SHOPIFY_SCOPE_A_RETENTION_RUN_BUDGET_MS = 20_000;
 const LINKED_GROUP_LIMIT_IN_BATCHES = 5;
 /** Webhook ledger rows are small and have no dependants, so they go in larger batches. */
 const WEBHOOK_BATCH_FACTOR = 10;
+
+/** One audit entry per batch that deleted anything, in the batch's own transaction. */
+const BATCH_AUDIT_ACTION = "shopify_scope_a_retention_batch";
+/** One audit entry per finished day, next to its receipt. */
+const SWEEP_AUDIT_ACTION = "shopify_scope_a_retention_sweep";
+const RETENTION_AUDIT_ENTITY = "shopify_evidence_retention";
 
 type JobStatus = (typeof reconciliationJobs.$inferSelect)["status"];
 type MatchStatus = (typeof matches.$inferSelect)["status"];
@@ -286,6 +294,42 @@ function deletedCounts(
       ([key, value]) => key.endsWith("Deleted") && typeof value === "number" && value > 0
     )
   ) as Record<string, number>;
+}
+
+const DELETED_COUNT_KEYS = (
+  Object.keys(emptyCounts()) as (keyof ShopifyEvidenceRetentionCounts)[]
+).filter(key => key.endsWith("Deleted"));
+
+/**
+ * Add up the deletions that batch audit entries recorded for one store.
+ * Anything that is not one of this store's entries, or not a finite positive
+ * count, is ignored rather than trusted. Exported for tests.
+ */
+export function sumBatchDeletions(
+  entries: readonly unknown[],
+  storeId: number
+): Partial<ShopifyEvidenceRetentionCounts> {
+  const totals: Partial<ShopifyEvidenceRetentionCounts> = {};
+  for (const raw of entries) {
+    let entry: unknown = raw;
+    if (typeof entry === "string") {
+      try {
+        entry = JSON.parse(entry);
+      } catch {
+        continue;
+      }
+    }
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    if (record.storeId !== storeId) continue;
+    for (const key of DELETED_COUNT_KEYS) {
+      const value = record[key];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        totals[key] = (totals[key] ?? 0) + value;
+      }
+    }
+  }
+  return totals;
 }
 
 export function shopifyScopeAEvidenceRetentionCutoff(now: Date): Date {
@@ -948,37 +992,72 @@ function jobAnchor(): SQL {
 /**
  * Finished runs whose two channels are both this store's and that no match or
  * exception still names. A run against another channel is also that channel's
- * record and is not Scope A's to delete. A report pointing at a stored file
- * keeps its run: deleting the row would orphan an object this control does not
- * manage.
+ * record and is not Scope A's to delete. Callers must check `channelIds` is
+ * not empty first.
+ */
+function expiredRuns(scope: StoreScope): SQL {
+  return and(
+    eq(reconciliationJobs.organizationId, scope.organizationId),
+    inArray(reconciliationJobs.sourceChannelId, scope.channelIds),
+    inArray(reconciliationJobs.targetChannelId, scope.channelIds),
+    inArray(reconciliationJobs.status, [...TERMINAL_JOB_STATUSES]),
+    lt(jobAnchor(), scope.cutoff),
+    notExists(
+      qb()
+        .select({ id: matches.id })
+        .from(matches)
+        .where(eq(matches.jobId, reconciliationJobs.id))
+    ),
+    notExists(
+      qb()
+        .select({ id: exceptions.id })
+        .from(exceptions)
+        .where(eq(exceptions.jobId, reconciliationJobs.id))
+    )
+  )!;
+}
+
+/**
+ * Finished uploads on this store's channels, past their own anchor, that no
+ * transaction and no governed control manifest still names. Callers must check
+ * `channelIds` is not empty first.
+ */
+function expiredUploads(scope: StoreScope): SQL {
+  return and(
+    eq(uploadBatches.organizationId, scope.organizationId),
+    inArray(uploadBatches.channelId, scope.channelIds),
+    inArray(uploadBatches.status, [...FINISHED_UPLOAD_STATUSES]),
+    lt(uploadBatches.createdAt, scope.cutoff),
+    lt(
+      sql`GREATEST(${uploadBatches.createdAt}, COALESCE(${uploadBatches.completedAt}, ${uploadBatches.createdAt}))`,
+      scope.cutoff
+    ),
+    notExists(
+      qb()
+        .select({ id: transactions.id })
+        .from(transactions)
+        .where(eq(transactions.batchId, uploadBatches.id))
+    ),
+    notExists(
+      qb()
+        .select({ id: controlBatchManifests.id })
+        .from(controlBatchManifests)
+        .where(eq(controlBatchManifests.uploadBatchId, uploadBatches.id))
+    )
+  )!;
+}
+
+/**
+ * Expired runs, with their reports and share links. A report pointing at a
+ * stored file keeps its run: deleting the row would orphan an object this
+ * control does not manage.
  */
 const purgeJobBatch: Phase = async (tx, scope, cursor, batchSize) => {
   if (scope.channelIds.length === 0) return { cursor, exhausted: true, counts: {} };
   const jobs = await tx
     .select({ id: reconciliationJobs.id })
     .from(reconciliationJobs)
-    .where(
-      and(
-        eq(reconciliationJobs.organizationId, scope.organizationId),
-        gt(reconciliationJobs.id, cursor),
-        inArray(reconciliationJobs.sourceChannelId, scope.channelIds),
-        inArray(reconciliationJobs.targetChannelId, scope.channelIds),
-        inArray(reconciliationJobs.status, [...TERMINAL_JOB_STATUSES]),
-        lt(jobAnchor(), scope.cutoff),
-        notExists(
-          qb()
-            .select({ id: matches.id })
-            .from(matches)
-            .where(eq(matches.jobId, reconciliationJobs.id))
-        ),
-        notExists(
-          qb()
-            .select({ id: exceptions.id })
-            .from(exceptions)
-            .where(eq(exceptions.jobId, reconciliationJobs.id))
-        )
-      )
-    )
+    .where(and(expiredRuns(scope), gt(reconciliationJobs.id, cursor)))
     .orderBy(asc(reconciliationJobs.id))
     .limit(batchSize)
     .for("update");
@@ -1050,40 +1129,13 @@ const purgeJobBatch: Phase = async (tx, scope, cursor, batchSize) => {
   return { ...next, counts };
 };
 
-/**
- * Finished uploads on this store's channels that no transaction and no
- * governed control manifest still names, and that point at no stored file.
- */
+/** Expired uploads that point at no stored file. */
 const purgeUploadBatch: Phase = async (tx, scope, cursor, batchSize) => {
   if (scope.channelIds.length === 0) return { cursor, exhausted: true, counts: {} };
   const uploads = await tx
     .select({ id: uploadBatches.id, fileUrl: uploadBatches.fileUrl })
     .from(uploadBatches)
-    .where(
-      and(
-        eq(uploadBatches.organizationId, scope.organizationId),
-        gt(uploadBatches.id, cursor),
-        inArray(uploadBatches.channelId, scope.channelIds),
-        inArray(uploadBatches.status, [...FINISHED_UPLOAD_STATUSES]),
-        lt(uploadBatches.createdAt, scope.cutoff),
-        lt(
-          sql`GREATEST(${uploadBatches.createdAt}, COALESCE(${uploadBatches.completedAt}, ${uploadBatches.createdAt}))`,
-          scope.cutoff
-        ),
-        notExists(
-          qb()
-            .select({ id: transactions.id })
-            .from(transactions)
-            .where(eq(transactions.batchId, uploadBatches.id))
-        ),
-        notExists(
-          qb()
-            .select({ id: controlBatchManifests.id })
-            .from(controlBatchManifests)
-            .where(eq(controlBatchManifests.uploadBatchId, uploadBatches.id))
-        )
-      )
-    )
+    .where(and(expiredUploads(scope), gt(uploadBatches.id, cursor)))
     .orderBy(asc(uploadBatches.id))
     .limit(batchSize)
     .for("update");
@@ -1162,7 +1214,11 @@ async function countOne(query: Promise<Array<{ n: number }>>): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
-/** What is still being held, for the receipt. Counts only. */
+/**
+ * What is still being held, for the receipt. Counts only, and all of them
+ * measured here from the database rather than added up by the sweep, so a day
+ * finished by another instance or after a restart reports the same thing.
+ */
 async function countDeferred(
   tx: DbExecutor,
   scope: StoreScope
@@ -1178,6 +1234,9 @@ async function countDeferred(
     deferredGovernedEvidence,
     deferredPrivacyRequests,
     deferredUnprocessedWebhooks,
+    unheldPastRetention,
+    blockedReportFiles,
+    blockedUploadFiles,
   ] = await Promise.all([
     countOne(
       tx
@@ -1261,6 +1320,26 @@ async function countDeferred(
           )
         )
     ),
+    // Past retention and held by no record of its own, yet still here once the
+    // pass is done: kept because a transaction linked to it is kept.
+    countOne(tx.select({ n: count() }).from(transactions).where(purgeable(scope))),
+    scope.channelIds.length
+      ? countOne(
+          tx
+            .select({ n: countDistinct(reconciliationReports.id) })
+            .from(reconciliationReports)
+            .innerJoin(reconciliationJobs, eq(reconciliationJobs.id, reconciliationReports.jobId))
+            .where(and(expiredRuns(scope), isNotNull(reconciliationReports.fileUrl)))
+        )
+      : Promise.resolve(0),
+    scope.channelIds.length
+      ? countOne(
+          tx
+            .select({ n: count() })
+            .from(uploadBatches)
+            .where(and(expiredUploads(scope), isNotNull(uploadBatches.fileUrl)))
+        )
+      : Promise.resolve(0),
   ]);
   return {
     deferredActiveExceptions,
@@ -1271,7 +1350,80 @@ async function countDeferred(
     deferredGovernedEvidence,
     deferredPrivacyRequests,
     deferredUnprocessedWebhooks,
+    // A store held for a data request keeps every row for that reason instead.
+    deferredPairedTransactions: deferredPrivacyRequests > 0 ? 0 : unheldPastRetention,
+    blockedReportFiles,
+    blockedUploadFiles,
   };
+}
+
+/**
+ * The deletions of the pass this receipt closes, rebuilt from the batch audit
+ * entries written since the store's previous receipt. They are durable and
+ * commit with each deletion, so the total is the same whichever instance, or
+ * whichever run after a restart, finishes the day.
+ *
+ * Locking reads: on TiDB a plain read sees the snapshot from BEGIN, which
+ * would miss a batch another instance committed just before this one took the
+ * tenant lock.
+ */
+async function deletionsSinceLastReceipt(
+  tx: DbTransaction,
+  scope: StoreScope
+): Promise<Partial<ShopifyEvidenceRetentionCounts>> {
+  const [previous] = await tx
+    .select({
+      id: shopifyEvidenceRetentionReceipts.id,
+      createdAt: shopifyEvidenceRetentionReceipts.createdAt,
+    })
+    .from(shopifyEvidenceRetentionReceipts)
+    .where(
+      and(
+        eq(shopifyEvidenceRetentionReceipts.organizationId, scope.organizationId),
+        eq(shopifyEvidenceRetentionReceipts.storeId, scope.storeId)
+      )
+    )
+    .orderBy(desc(shopifyEvidenceRetentionReceipts.id))
+    .limit(1)
+    .for("update");
+  let since: SQL | undefined;
+  if (previous) {
+    // A receipt and its sweep entry commit together, so the entry is the exact
+    // boundary in the tenant's audit chain. The receipt's own time is only a
+    // fallback, and a strict one: never count a batch twice.
+    const [marker] = await tx
+      .select({ sequenceNumber: auditLogs.sequenceNumber })
+      .from(auditLogs)
+      .where(
+        and(
+          eq(auditLogs.organizationId, scope.organizationId),
+          eq(auditLogs.action, SWEEP_AUDIT_ACTION),
+          eq(auditLogs.entityType, RETENTION_AUDIT_ENTITY),
+          eq(auditLogs.entityId, previous.id)
+        )
+      )
+      .limit(1)
+      .for("update");
+    since =
+      marker?.sequenceNumber != null
+        ? gt(auditLogs.sequenceNumber, marker.sequenceNumber)
+        : gt(auditLogs.createdAt, previous.createdAt);
+  }
+  const entries = await tx
+    .select({ details: auditLogs.details })
+    .from(auditLogs)
+    .where(
+      and(
+        eq(auditLogs.organizationId, scope.organizationId),
+        eq(auditLogs.action, BATCH_AUDIT_ACTION),
+        since
+      )
+    )
+    .for("update");
+  return sumBatchDeletions(
+    entries.map(row => row.details),
+    scope.storeId
+  );
 }
 
 type StoreOutcome = {
@@ -1284,18 +1436,19 @@ type StoreOutcome = {
  * Where an unfinished pass over a store stopped, so the next sweep continues
  * from there instead of re-reading what it already settled. Without it, a
  * store holding more kept rows than one budget can read would be re-scanned
- * from the top every minute and never finish. Process-local on purpose: another
- * instance, or this one after a restart, starts the pass again from the top,
- * which costs time and never correctness.
+ * from the top every minute and never finish. Process-local on purpose:
+ * another instance, or this one after a restart, starts the pass again from
+ * the top, which costs time and never correctness. The receipt does not depend
+ * on it: its totals are rebuilt from the batch audit entries.
  */
 interface UnfinishedPass {
   startedAt: number;
   phase: number;
   cursor: number;
-  /** The pass's totals so far, so its receipt reports the whole day. */
-  totals: ShopifyEvidenceRetentionCounts;
 }
 const unfinishedPasses = new Map<string, UnfinishedPass>();
+/** The store a budget-stopped sweep last entered; the next sweep starts after it. */
+let resumeAfterStoreId = 0;
 
 async function sweepStore(
   db: Db,
@@ -1333,7 +1486,6 @@ async function sweepStore(
       ? saved
       : undefined;
   const startedAt = resumed?.startedAt ?? params.now.getTime();
-  const totals = resumed ? { ...resumed.totals } : emptyCounts();
   const thisRun = emptyCounts();
 
   for (let phaseIndex = resumed?.phase ?? 0; phaseIndex < PHASES.length; phaseIndex += 1) {
@@ -1341,7 +1493,7 @@ async function sweepStore(
     let cursor = phaseIndex === resumed?.phase ? resumed.cursor : 0;
     for (;;) {
       if (params.budgetSpent()) {
-        unfinishedPasses.set(passKey, { startedAt, phase: phaseIndex, cursor, totals });
+        unfinishedPasses.set(passKey, { startedAt, phase: phaseIndex, cursor });
         return { status: "incomplete", counts: thisRun };
       }
       const step = await db.transaction(async tx => {
@@ -1356,10 +1508,13 @@ async function sweepStore(
             {
               userId: null,
               organizationId: scope.organizationId,
-              action: "shopify_scope_a_retention_batch",
-              entityType: "shopify_evidence_retention",
+              action: BATCH_AUDIT_ACTION,
+              entityType: RETENTION_AUDIT_ENTITY,
               details: {
                 phase: phaseName,
+                // The internal store row, so the receipt can add up its own
+                // store's batches. Not a Shopify identifier.
+                storeId: scope.storeId,
                 retentionDays: SHOPIFY_SCOPE_A_EVIDENCE_RETENTION_DAYS,
                 ...deleted,
               },
@@ -1372,7 +1527,6 @@ async function sweepStore(
       if (step === "fenced" || step === "done_today") {
         return { status: "skipped", counts: thisRun };
       }
-      addCounts(totals, step.counts);
       addCounts(thisRun, step.counts);
       if (step.exhausted) break;
       cursor = step.cursor;
@@ -1382,7 +1536,11 @@ async function sweepStore(
   const completed = await db.transaction(async tx => {
     const lock = await lockStoreForRetention(tx, scope);
     if (lock !== "ready") return null;
-    const summary = { ...totals, ...(await countDeferred(tx, scope)) };
+    const summary: ShopifyEvidenceRetentionCounts = {
+      ...emptyCounts(),
+      ...(await deletionsSinceLastReceipt(tx, scope)),
+      ...(await countDeferred(tx, scope)),
+    };
     // The receipt is aggregate-only: no Shopify IDs, domains, order
     // references, amounts, URLs or user identifiers. It records that a day's
     // pass finished; the batch audit entries record each deletion.
@@ -1401,8 +1559,8 @@ async function sweepStore(
       {
         userId: null,
         organizationId: scope.organizationId,
-        action: "shopify_scope_a_retention_sweep",
-        entityType: "shopify_evidence_retention",
+        action: SWEEP_AUDIT_ACTION,
+        entityType: RETENTION_AUDIT_ENTITY,
         entityId: receiptId,
         details: {
           retentionDays: SHOPIFY_SCOPE_A_EVIDENCE_RETENTION_DAYS,
@@ -1450,6 +1608,23 @@ export async function purgeExpiredShopifyScopeAEvidence(
   const batchSize = Math.max(1, Math.floor(deps.batchSize ?? SHOPIFY_SCOPE_A_RETENTION_BATCH_SIZE));
   const report = emptyReport();
 
+  // A store whose day is already finished costs nothing here: it is left out
+  // of the list rather than locked and skipped, so finished stores can never
+  // use up the budget that later stores need. The check under the store lock
+  // stays the authority; this only keeps the budget for real work.
+  const finishedToday = qb()
+    .select({ id: shopifyEvidenceRetentionReceipts.id })
+    .from(shopifyEvidenceRetentionReceipts)
+    .where(
+      and(
+        eq(shopifyEvidenceRetentionReceipts.organizationId, shopifyConnectorStores.organizationId),
+        eq(shopifyEvidenceRetentionReceipts.storeId, shopifyConnectorStores.id),
+        gt(
+          shopifyEvidenceRetentionReceipts.completedAt,
+          new Date(now.getTime() - SHOPIFY_SCOPE_A_RETENTION_SWEEP_INTERVAL_MS)
+        )
+      )
+    );
   const stores = await db
     .select({
       id: shopifyConnectorStores.id,
@@ -1461,17 +1636,26 @@ export async function purgeExpiredShopifyScopeAEvidence(
       and(
         eq(organizations.deletionState, "active"),
         ne(shopifyConnectorStores.status, "redacting"),
+        notExists(finishedToday),
         deps.onlyStoreIds ? inArray(shopifyConnectorStores.id, [...deps.onlyStoreIds]) : undefined
       )
     )
     .orderBy(asc(shopifyConnectorStores.id));
 
+  // A sweep the budget stopped starts the next one with the stores after the
+  // one it stopped in, so no store waits behind the same others every time.
+  const ordered = [
+    ...stores.filter(store => store.id > resumeAfterStoreId),
+    ...stores.filter(store => store.id <= resumeAfterStoreId),
+  ];
+  let lastEntered: number | null = null;
   report.storesConsidered = stores.length;
-  for (const store of stores) {
+  for (const store of ordered) {
     if (budgetSpent()) {
       report.storesIncomplete += 1;
       continue;
     }
+    lastEntered = store.id;
     try {
       const outcome = await sweepStore(db, {
         storeId: store.id,
@@ -1494,6 +1678,8 @@ export async function purgeExpiredShopifyScopeAEvidence(
       });
     }
   }
+  if (report.storesIncomplete === 0) resumeAfterStoreId = 0;
+  else if (lastEntered !== null) resumeAfterStoreId = lastEntered;
   if (report.storesIncomplete > 0) {
     console.warn("[shopify-retention] sweep stopped at its time budget", {
       code: "shopify_scope_a_retention_incomplete",
@@ -1539,4 +1725,5 @@ export async function runShopifyScopeAEvidenceRetentionIfDue(
 export function resetShopifyScopeAEvidenceRetentionScheduleForTest(): void {
   nextScheduledSweepAt = 0;
   unfinishedPasses.clear();
+  resumeAfterStoreId = 0;
 }

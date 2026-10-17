@@ -7,6 +7,7 @@ import {
   resetShopifyScopeAEvidenceRetentionScheduleForTest,
   runShopifyScopeAEvidenceRetentionIfDue,
   scopeAEvidenceHolds,
+  sumBatchDeletions,
   SHOPIFY_SCOPE_A_RETENTION_CONTINUE_INTERVAL_MS,
   SHOPIFY_SCOPE_A_RETENTION_RETRY_INTERVAL_MS,
   SHOPIFY_SCOPE_A_RETENTION_SWEEP_INTERVAL_MS,
@@ -28,7 +29,9 @@ const render = (condition: Parameters<MySqlDialect["sqlToQuery"]>[0]) => dialect
  * One expired, unlinked transaction (id 801) that the SQL filter admitted.
  * `locked` is what the batch's second pass reads back under its locks.
  */
-function oneCandidate(locked: { exceptions?: unknown[]; workflows?: unknown[]; anomalies?: unknown[] } = {}) {
+function oneCandidate(
+  locked: { exceptions?: unknown[]; workflows?: unknown[]; anomalies?: unknown[]; auditTrail?: unknown[] } = {}
+) {
   return scriptedDb({
     standing: {
       organizations: [{ deletionState: "active" }],
@@ -41,7 +44,9 @@ function oneCandidate(locked: { exceptions?: unknown[]; workflows?: unknown[]; a
       exception_workflows: locked.workflows ?? [],
       anomaly_scores: locked.anomalies ?? [],
       audit_chain_locks: [],
-      audit_logs: [],
+      // What the receipt reads back: the batch entries the audit wrote. The
+      // audit itself is a stub here, so a test that needs them scripts them.
+      audit_logs: locked.auditTrail ?? [],
     },
     // The batch's seeds, then the rows whose matchId points at them.
     select: { [TRANSACTIONS]: [[{ id: 801, matchId: null }], []] },
@@ -199,6 +204,64 @@ describe("when Shopify Scope A evidence reaches its retention cutoff", () => {
     expect(privacyRead?.where?.sql).toMatch(/`status` not in/i);
   });
 
+  it("should skip a store another sweep finished today, rechecked under the store lock", async () => {
+    // The store list leaves out stores with a receipt today; this is the race
+    // where a receipt landed after the list was read.
+    const fake = scriptedDb({
+      standing: {
+        organizations: [{ deletionState: "active" }],
+        [STORES]: [{ id: STORE_ID, organizationId: ORG_ID, status: "active" }],
+        [RECEIPTS]: [{ completedAt: new Date(NOW.getTime() - 60 * 60 * 1_000) }],
+      },
+    });
+    const report = await sweep(fake);
+    expect(report).toMatchObject({ storesSkipped: 1, storesCompleted: 0 });
+    expect(fake.writes("insert", RECEIPTS)).toEqual([]);
+    expect(fake.committed().filter(op => op.kind === "delete")).toEqual([]);
+  });
+
+  it("should leave stores finished today out of the list it spends its budget on", async () => {
+    const fake = scriptedDb();
+    await sweep(fake);
+    const list = fake.ops.find(op => op.kind === "select" && op.table === STORES);
+    expect(list?.where?.sql).toMatch(
+      /not exists \(select .* from `shopify_evidence_retention_receipts` where .*`shopify_evidence_retention_receipts`\.`completedAt` > /i
+    );
+    // A day before now, as the driver will receive it.
+    const params = (list?.where?.params ?? []).map(value => (value instanceof Date ? value.toISOString() : String(value)));
+    expect(params.some(value => /^2026-10-15[ T]12:00:00/.test(value))).toBe(true);
+  });
+
+  describe("when a receipt adds up the batches that came before it", () => {
+    it("should count only this store's entries and only their deletion counts", () => {
+      expect(
+        sumBatchDeletions(
+          [
+            { storeId: STORE_ID, transactionsDeleted: 2, matchesDeleted: 1, phase: "evidence" },
+            { storeId: STORE_ID, transactionsDeleted: 3, deferredPairedTransactions: 9 },
+            { storeId: STORE_ID + 1, transactionsDeleted: 100 },
+            JSON.stringify({ storeId: STORE_ID, jobsDeleted: 4 }),
+          ],
+          STORE_ID
+        )
+      ).toEqual({ transactionsDeleted: 5, matchesDeleted: 1, jobsDeleted: 4 });
+    });
+
+    it("should ignore entries it cannot trust instead of failing the receipt", () => {
+      expect(
+        sumBatchDeletions(
+          [
+            null,
+            "not json",
+            { storeId: String(STORE_ID), transactionsDeleted: 1 },
+            { storeId: STORE_ID, transactionsDeleted: -4, matchesDeleted: Number.NaN, jobsDeleted: "7" },
+          ],
+          STORE_ID
+        )
+      ).toEqual({});
+    });
+  });
+
   it("should skip a fenced tenant without writing a receipt", async () => {
     const fake = scriptedDb({
       standing: {
@@ -214,7 +277,9 @@ describe("when Shopify Scope A evidence reaches its retention cutoff", () => {
   });
 
   it("should write an aggregate-only receipt when a store completes", async () => {
-    const fake = oneCandidate();
+    const fake = oneCandidate({
+      auditTrail: [{ details: { phase: "evidence", storeId: STORE_ID, transactionsDeleted: 1 } }],
+    });
     const audit = vi.fn(async () => undefined);
     await sweep(fake, audit);
     const receipt = fake.writes("insert", RECEIPTS)[0];
