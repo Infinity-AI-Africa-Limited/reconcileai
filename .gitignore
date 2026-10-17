@@ -110,3 +110,7 @@ temp/
 # Webdev artifacts (checkpoint zips, migrations, etc.)
 .webdev/
 .project-config.json
+
+# Internal Manus database diagnostics may contain operational metadata or query output.
+# They are local-only and must never be committed.
+.manus/db/*.json
