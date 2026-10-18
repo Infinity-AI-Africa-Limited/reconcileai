@@ -137,6 +137,7 @@
     "server/routers/shopifyConnector.test.ts",
     "server/sanitizeRef.test.ts",
     "server/sessionCookie.test.ts",
+    "server/slaMonitoring.test.ts",
     "server/shoplineCallbackUrl.test.ts",
     "server/shoplineE2E.test.ts",
     "server/shoplineRealtimeSync.bullmq.test.ts",
