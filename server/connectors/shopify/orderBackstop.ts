@@ -25,6 +25,7 @@ import { ENV } from "../../_core/env";
 import { getDb, type DbExecutor } from "../../db";
 import { loggableError } from "../../dbErrors";
 import { singleFlight } from "../../singleFlight";
+import { recheckShopifyStoreClassifications } from "./storeClassification";
 import { runShopifyOrderSyncToNow } from "./syncOrchestrator";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
@@ -192,7 +193,13 @@ export function startShopifyOrderBackstopLoop(
   }
   const intervalMs = options.intervalMs ?? SHOPIFY_ORDER_BACKSTOP_INTERVAL_MS;
   const tick = singleFlight(async () => {
-    await (options.run ?? (() => runShopifyOrderBackstop({ intervalMs })))();
+    await (options.run ?? (async () => {
+      await runShopifyOrderBackstop({ intervalMs });
+      // Then ask Shopify again whether development stores are still development
+      // stores. Its own interval governs how often each store is asked; both
+      // functions are self-contained and never throw.
+      await recheckShopifyStoreClassifications();
+    }))();
   });
   firstRun = setTimeout(() => {
     firstRun = null;

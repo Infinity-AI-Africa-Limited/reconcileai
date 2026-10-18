@@ -2,6 +2,7 @@ import { assertEgressAllowed } from "../../_core/egress";
 import { SHOPIFY_API_VERSION } from "../../../drizzle/shopify_schema";
 import { normalizeShopDomain } from "./auth";
 import type { ShopifyShopMetadata } from "./onboarding";
+import { fetchShopifyPartnerDevelopment } from "./storeClassification";
 
 interface GraphqlResponse<T> {
   data?: T;
@@ -19,10 +20,13 @@ function endpointFor(shopDomain: string): string {
  * fields. It obtains a store-owned contact address for the initial invited
  * administrator, rather than trusting a request's query parameter.
  */
-export async function fetchShopifyShopMetadata(params: {
-  shopDomain: string;
-  accessToken: string;
-}): Promise<ShopifyShopMetadata> {
+export async function fetchShopifyShopMetadata(
+  params: {
+    shopDomain: string;
+    accessToken: string;
+  },
+  deps: { fetchPartnerDevelopment?: typeof fetchShopifyPartnerDevelopment } = {},
+): Promise<ShopifyShopMetadata> {
   const endpoint = endpointFor(params.shopDomain);
   assertEgressAllowed(endpoint, "Shopify shop metadata lookup");
   const response = await fetch(endpoint, {
@@ -69,5 +73,10 @@ export async function fetchShopifyShopMetadata(params: {
     primaryDomain: body.data.shop.primaryDomain?.host ?? null,
     currencyCode: body.data.shop.currencyCode ?? null,
     ianaTimezone: body.data.shop.ianaTimezone ?? null,
+    // A separate request that cannot fail the installation: unknown is null.
+    partnerDevelopment: await (deps.fetchPartnerDevelopment ?? fetchShopifyPartnerDevelopment)({
+      shopDomain: params.shopDomain,
+      accessToken: params.accessToken,
+    }),
   };
 }

@@ -53,6 +53,17 @@ export const shopifyConnectorStores = mysqlTable(
      * failed credential write — each of which needs a different response.
      */
     statusReason: varchar("statusReason", { length: 64 }),
+    /**
+     * Shopify's last answer to `shop.plan.partnerDevelopment`: whether this is a
+     * partner development store, Shopify's own test store, which cannot take
+     * real payments. NULL until Shopify has answered. It decides whether the
+     * tenant is a test tenant (organizations.isDemo), and a change from true to
+     * false — a development store handed to a merchant and taken live — makes
+     * it a monitored client again (storeClassification.ts).
+     */
+    planPartnerDevelopment: boolean("planPartnerDevelopment"),
+    /** When ReconcileAI last asked Shopify for the plan, answered or not. */
+    planCheckedAt: timestamp("planCheckedAt"),
     /** An authorised ReconcileAI administrator who claimed the merchant workspace. */
     claimedByUserId: int("claimedByUserId"),
     claimedAt: timestamp("claimedAt"),
