@@ -20,7 +20,7 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import { OPERATOR_ORG_CODE, realOrganizations } from "./slaMonitoringService";
+import { OPERATOR_ORG_CODE, formatSLABreachNotification, organizationLabel, realOrganizations, type SLABreach } from "./slaMonitoringService";
 
 const org = (id: number, name: string, isDemo: boolean, code: string | null = null) =>
   ({ id, name, isDemo, code });
@@ -193,26 +193,84 @@ describe("the service no longer guesses demo-ness from job names", () => {
   });
 });
 
-describe("the alert email states its scope honestly", () => {
-  const SRC = fs.readFileSync(path.join(__dirname, "slaMonitoringService.ts"), "utf8");
+describe("when the alert names an organisation", () => {
+  it("should add the code and onboarding channel, so two tenants sharing a name can be told apart", () => {
+    // The incident: the Shopify app on our own development store provisioned a
+    // second "ReconcileAI Dev Store" (2026-10-16). The alert named only that,
+    // and the tenant everyone knew by the name is a flagged demo.
+    expect(organizationLabel({ name: "ReconcileAI Dev Store", code: "SHP_8A95F8DFB46562", onboardingChannel: "shopify_public_app" }))
+      .toBe("ReconcileAI Dev Store (SHP_8A95F8DFB46562 · shopify_public_app)");
+  });
+
+  it("should fall back to the name when there is nothing else to show", () => {
+    expect(organizationLabel({ name: "TAJBank Limited", code: null, onboardingChannel: "  " })).toBe("TAJBank Limited");
+  });
+});
+
+describe("when the alert email is written", () => {
+  const breach = (overrides: Partial<SLABreach> = {}): SLABreach => ({
+    exceptionId: 930001,
+    organizationId: 180001,
+    organizationLabel: "ReconcileAI Dev Store (SHP_8A95F8DFB46562 · shopify_public_app)",
+    hoursOpen: 21.6,
+    severity: "warning",
+    ...overrides,
+  });
+  const APP = "https://www.reconcileaiafrica.com/";
 
   it("should name the mechanism rather than assert exclusion happened", () => {
     // The old footer promised "Demo data exceptions are excluded from this
     // alert" while the alert was made almost entirely OF demo data. A promise
     // the reader cannot check is worse than none.
-    expect(SRC).not.toContain("Note: Demo data exceptions are excluded from this alert.");
-    expect(SRC).toMatch(/organizations\.isDemo\) are excluded/);
+    const { content } = formatSLABreachNotification([breach()], APP);
+    expect(content).not.toContain("Demo data exceptions are excluded from this alert.");
+    expect(content).toContain("(organizations.isDemo) are excluded");
   });
 
-  it("should attribute every breach to its organisation", () => {
-    expect(SRC).toMatch(/\$\{b\.organizationName\} · Exception #\$\{b\.exceptionId\}/);
+  it("should attribute every breach to the exact tenant, not only its name", () => {
+    const { content } = formatSLABreachNotification([breach()], APP);
+    expect(content).toContain("ReconcileAI Dev Store (SHP_8A95F8DFB46562 · shopify_public_app) · Exception #930001");
+  });
+
+  it("should count two same-named organisations separately", () => {
+    // Keyed by name, these two breaches were added into one line, under a
+    // name that matched neither tenant's identity.
+    const { content } = formatSLABreachNotification([
+      breach({ organizationId: 180001, organizationLabel: "ReconcileAI Dev Store (SHP_1 · shopify_public_app)", severity: "warning" }),
+      breach({ exceptionId: 2, organizationId: 60001, organizationLabel: "ReconcileAI Dev Store (SL_RECONCILEAI_DEV · shopline_app_store)", severity: "critical", hoursOpen: 30 }),
+    ], APP);
+    expect(content).toContain("ReconcileAI Dev Store (SHP_1 · shopify_public_app) — 0 breached, 1 approaching");
+    expect(content).toContain("ReconcileAI Dev Store (SL_RECONCILEAI_DEV · shopline_app_store) — 1 breached, 0 approaching");
   });
 
   it("should summarise per organisation before listing ids", () => {
-    expect(SRC).toContain("By organisation:");
+    const { content } = formatSLABreachNotification([breach()], APP);
+    expect(content.indexOf("By organisation:")).toBeLessThan(content.indexOf("Exception #930001"));
   });
 
   it("should show the oldest breaches first, not the lowest ids", () => {
-    expect(SRC).toMatch(/\.sort\(\(a, b\) => b\.hoursOpen - a\.hoursOpen\)/);
+    const { content } = formatSLABreachNotification([
+      breach({ exceptionId: 1, hoursOpen: 25, severity: "critical" }),
+      breach({ exceptionId: 2, hoursOpen: 40, severity: "critical" }),
+    ], APP);
+    expect(content.indexOf("Exception #2")).toBeLessThan(content.indexOf("Exception #1 "));
+  });
+
+  it("should say where to take a test store out of the alert, on the configured origin", () => {
+    const { content } = formatSLABreachNotification([breach()], APP);
+    expect(content).toContain("mark it as a demo tenant in POC Hub → Reviewer access links (https://www.reconcileaiafrica.com/admin/poc)");
+    expect(content).toContain("Never do this for a paying client.");
+  });
+
+  it("should still name the page when no origin is configured", () => {
+    // Never a guessed or request-supplied host: the path alone still finds it.
+    const { content } = formatSLABreachNotification([breach()], "");
+    expect(content).toContain("Reviewer access links (/admin/poc)");
+  });
+
+  it("should agree the title with the count", () => {
+    expect(formatSLABreachNotification([breach()], APP).title).toBe("⚠️ SLA Breach Alert: 1 Exception Requires Attention");
+    expect(formatSLABreachNotification([breach(), breach({ exceptionId: 2 })], APP).title)
+      .toBe("⚠️ SLA Breach Alert: 2 Exceptions Require Attention");
   });
 });

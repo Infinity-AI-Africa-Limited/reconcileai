@@ -30,16 +30,19 @@ import { getDb, getAllUsers } from "./db";
 import { and, eq, or, inArray } from "drizzle-orm";
 import { exceptions, organizations } from "../drizzle/schema";
 import { OPERATOR_ORG_CODE } from "@shared/operatorOrg";
+import { normalizeOrigin } from "@shared/appOrigin";
+import { ENV } from "./_core/env";
 import { loggableError } from "./dbErrors";
 
 // SLA thresholds in hours
 const SLA_WARNING_THRESHOLD = 20; // Yellow alert
 const SLA_BREACH_THRESHOLD = 24; // Red alert
 
-interface SLABreach {
+export interface SLABreach {
   exceptionId: number;
-  organizationId: number | null;
-  organizationName: string;
+  organizationId: number;
+  /** See `organizationLabel`: the name, plus what tells same-named tenants apart. */
+  organizationLabel: string;
   hoursOpen: number;
   severity: 'warning' | 'critical';
   assignedTo?: number;
@@ -98,6 +101,22 @@ export function realOrganizations(
 }
 
 /**
+ * How the alert names an organisation: its name, then its code and how it was
+ * onboarded.
+ *
+ * A name alone is not an identity. The Shopify app installed on our own
+ * development store (2026-10-16) provisioned a tenant called "ReconcileAI Dev
+ * Store", the same name as the SHOPLINE dev store, which is flagged as a demo.
+ * The alert said only "ReconcileAI Dev Store" above a footer promising that demo
+ * tenants are excluded. Read against the tenant everyone knew, the footer looked
+ * false, and nothing in the email said which tenant was meant.
+ */
+export function organizationLabel(org: { name: string; code: string | null; onboardingChannel: string | null }): string {
+  const parts = [org.code, org.onboardingChannel].filter((part): part is string => Boolean(part && part.trim()));
+  return parts.length > 0 ? `${org.name} (${parts.join(" · ")})` : org.name;
+}
+
+/**
  * Check open exceptions for SLA breaches and notify the platform operator.
  *
  * Demo tenants are excluded by `organizations.isDemo`, not by guessing from job
@@ -116,9 +135,11 @@ export async function checkSLABreaches(): Promise<void> {
         name: organizations.name,
         isDemo: organizations.isDemo,
         code: organizations.code,
+        onboardingChannel: organizations.onboardingChannel,
       })
       .from(organizations);
     const real = realOrganizations(orgs);
+    const labels = new Map(orgs.map((o) => [o.id, organizationLabel(o)]));
 
     if (real.size === 0) {
       console.log('[SLA Monitor] No client organisations (demo and operator excluded) — nothing to check.');
@@ -144,8 +165,9 @@ export async function checkSLABreaches(): Promise<void> {
 
     for (const exception of openExceptions) {
       if (!exception.createdAt) continue;
-      const orgName = exception.organizationId === null ? null : real.get(exception.organizationId);
-      if (!orgName) continue; // belt and braces; the query already excluded these
+      const organizationId = exception.organizationId;
+      // Belt and braces; the query already excluded these.
+      if (organizationId === null || !real.has(organizationId)) continue;
 
       const hoursOpen = (now.getTime() - exception.createdAt.getTime()) / (1000 * 60 * 60);
       const severity =
@@ -156,8 +178,8 @@ export async function checkSLABreaches(): Promise<void> {
 
       breaches.push({
         exceptionId: exception.id,
-        organizationId: exception.organizationId,
-        organizationName: orgName,
+        organizationId,
+        organizationLabel: labels.get(organizationId) ?? real.get(organizationId) ?? `Organisation ${organizationId}`,
         hoursOpen: Math.round(hoursOpen * 10) / 10,
         severity,
         assignedTo: exception.assignedTo || undefined,
@@ -190,9 +212,13 @@ export async function checkSLABreaches(): Promise<void> {
 }
 
 /**
- * Send SLA breach notification to the owner
+ * The alert's title and body. Pure, so what the owner reads is tested directly
+ * rather than inferred from the source text.
  */
-async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
+export function formatSLABreachNotification(
+  breaches: SLABreach[],
+  appUrl: string = ENV.appUrl,
+): { title: string; content: string } {
   const criticalBreaches = breaches.filter(b => b.severity === 'critical');
   const warningBreaches = breaches.filter(b => b.severity === 'warning');
 
@@ -201,22 +227,26 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
   // Lead with the per-organisation split. 374 bare exception ids told the reader
   // nothing about who was affected or where to start; once more than one client
   // exists, the tenant is the first thing that matters.
-  const byOrg = new Map<string, { critical: number; warning: number }>();
+  //
+  // Counted per organisation ID, never per name: two tenants can share a name
+  // (two "ReconcileAI Dev Store"s exist today), and keyed by name their
+  // breaches would be added together into one line.
+  const byOrg = new Map<number, { label: string; critical: number; warning: number }>();
   for (const b of breaches) {
-    const row = byOrg.get(b.organizationName) ?? { critical: 0, warning: 0 };
+    const row = byOrg.get(b.organizationId) ?? { label: b.organizationLabel, critical: 0, warning: 0 };
     row[b.severity]++;
-    byOrg.set(b.organizationName, row);
+    byOrg.set(b.organizationId, row);
   }
   if (byOrg.size > 0) {
     lines.push('By organisation:');
-    for (const [name, c] of Array.from(byOrg.entries()).sort((a, b) => (b[1].critical + b[1].warning) - (a[1].critical + a[1].warning))) {
-      lines.push(`  ${name} — ${c.critical} breached, ${c.warning} approaching`);
+    for (const c of Array.from(byOrg.values()).sort((a, b) => (b.critical + b.warning) - (a.critical + a.warning))) {
+      lines.push(`  ${c.label} — ${c.critical} breached, ${c.warning} approaching`);
     }
     lines.push('');
   }
 
   const describe = (b: SLABreach) =>
-    `${b.organizationName} · Exception #${b.exceptionId} — ${b.hoursOpen}hrs open — ` +
+    `${b.organizationLabel} · Exception #${b.exceptionId} — ${b.hoursOpen}hrs open — ` +
     (b.assignedUserName ? `Assigned to: ${b.assignedUserName}` : 'Unassigned');
 
   if (criticalBreaches.length > 0) {
@@ -257,13 +287,27 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
   // of demo data — a claim the reader could not check and that happened to be
   // false. Naming the rule makes the promise falsifiable.
   lines.push('Scope: organisations flagged as demo tenants (organizations.isDemo) are excluded from this alert.');
+  // A connector provisions a tenant for every store that installs the app, test
+  // stores included — our own development stores and app-store reviewers'. Each
+  // arrives as a client until someone says otherwise, and the email is where the
+  // owner first finds out, so it says where that is done. The origin comes from
+  // APP_URL only; without it the path is still enough to find the page.
+  const origin = normalizeOrigin(appUrl);
+  lines.push(
+    `A test or development store is not a client: mark it as a demo tenant in POC Hub → Reviewer access links ` +
+    `(${origin ? `${origin}/admin/poc` : '/admin/poc'}) to take it out of this alert. Never do this for a paying client.`,
+  );
 
-  const content = lines.join('\n');
+  const count = breaches.length;
+  return {
+    title: `⚠️ SLA Breach Alert: ${count} Exception${count !== 1 ? 's' : ''} ${count === 1 ? 'Requires' : 'Require'} Attention`,
+    content: lines.join('\n'),
+  };
+}
 
-  await notifyOwner({
-    title: `⚠️ SLA Breach Alert: ${breaches.length} Exception${breaches.length !== 1 ? 's' : ''} Require Attention`,
-    content,
-  });
+/** Send the SLA breach notification to the owner. */
+async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
+  await notifyOwner(formatSLABreachNotification(breaches));
 }
 
 /**
