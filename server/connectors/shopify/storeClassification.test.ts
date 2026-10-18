@@ -30,6 +30,7 @@ import {
   applyShopifyStoreClassification,
   fetchShopifyPartnerDevelopment,
   recheckShopifyStoreClassifications,
+  shopifyAnswerAdvances,
   shopifyClassificationChange,
 } from "./storeClassification";
 import { rowOf, scriptedDb, type RecordedOp } from "./scriptedDb.testkit";
@@ -127,7 +128,9 @@ describe("when the shop metadata for an installation is fetched", () => {
 describe("when deciding what Shopify's answer changes", () => {
   it.each([
     [null, true, "test_tenant", "a development store seen for the first time"],
-    [false, true, "test_tenant", "a store recorded live now reporting development (never demoted by us)"],
+    // A live store never becomes a development store: this is a stale read that
+    // lost a race, and accepting it would silence a live merchant (Greptile, #206).
+    [false, true, null, "a store recorded live, then a stale development answer"],
     [true, false, "client", "a development store taken live"],
     [true, true, null, "a development store still a development store"],
     [null, false, null, "a live store, never seen as a development store"],
@@ -139,7 +142,34 @@ describe("when deciding what Shopify's answer changes", () => {
   });
 });
 
+describe("when deciding whether an answer is newer than the recorded one", () => {
+  it.each([
+    [null, true, true],
+    [null, false, true],
+    [true, false, true],
+    [true, true, false],
+    [false, false, false],
+    [false, true, false],
+    [true, null, false],
+    [false, null, false],
+  ] as const)("should treat %s then %s as %s", (previous, observed, advances) => {
+    expect(shopifyAnswerAdvances(previous, observed)).toBe(advances);
+  });
+});
+
 describe("when Shopify's answer is applied to a store's tenant", () => {
+  it("should ignore a development answer that arrives after the store was recorded live", async () => {
+    // The race: the sweep read "development", a reauthorization then recorded
+    // "live", and the sweep's transaction arrives holding the older answer.
+    // Neither the tenant nor the recorded answer may move backwards.
+    const fake = scriptedDb({ select: { [ORGS]: [[activeOrg(false)]], [STORES]: [[storeRow(false)]] } });
+    await expect(apply(fake, true)).resolves.toEqual({ changedTo: null });
+
+    expect(writes(fake, STORES)).toEqual([{ planCheckedAt: NOW }]);
+    expect(writes(fake, ORGS)).toEqual([]);
+    expect(createAuditLog).not.toHaveBeenCalled();
+  });
+
   it("should make a development store's tenant a test tenant, attributed to Shopify, not a person", async () => {
     const fake = scriptedDb({ select: { [ORGS]: [[activeOrg(false)]], [STORES]: [[storeRow(null)]] } });
     await expect(apply(fake, true)).resolves.toEqual({ changedTo: "test_tenant" });
@@ -247,6 +277,21 @@ describe("when the stores are re-checked on a schedule", () => {
     expect(writes(fake, ORGS)).toEqual([{ isDemo: false }]);
     expect(announce).toHaveBeenCalledTimes(1);
     expect(announce).toHaveBeenCalledWith(due);
+  });
+
+  it("should not undo a live answer recorded while its own question was in flight", async () => {
+    // The sweep asks Shopify outside any transaction. By the time it locks the
+    // store, a reauthorization has recorded the store live. The sweep's older
+    // "development" answer must lose.
+    const fake = sweepDb({ [STORES]: [[due], [storeRow(false)]], [ORGS]: [[activeOrg(false)]] });
+    const report = await recheckShopifyStoreClassifications({
+      now: () => NOW,
+      getAccessToken: async () => "token",
+      fetchPartnerDevelopment: async () => true,
+    });
+    expect(report).toEqual({ scanned: 1, changed: 0, unknown: 0, failed: 0 });
+    expect(writes(fake, ORGS)).toEqual([]);
+    expect(writes(fake, STORES)).toEqual([{ planCheckedAt: NOW }]);
   });
 
   it("should tell the owner nothing when nothing changed", async () => {

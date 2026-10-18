@@ -23,6 +23,11 @@
  * the order backstop). A store seen going from development to live becomes a
  * client at once, and the owner is told.
  *
+ * Answers only move FORWARD: unknown, then development store, then live. A
+ * live store never becomes a development store again, so an answer behind the
+ * recorded one is a stale read that lost a race, and is ignored — never
+ * applied, never recorded (`shopifyAnswerAdvances`).
+ *
  * Only that TRANSITION is acted on. A store Shopify reports as live and an
  * operator chose to mark a demo keeps that choice, which is theirs and audited;
  * the re-check exists to correct OUR classification when its basis changes, not
@@ -106,11 +111,38 @@ export async function fetchShopifyPartnerDevelopment(params: {
 export type ShopifyTenantClassification = "test_tenant" | "client";
 
 /**
+ * How far along its one-way life a store's recorded answer is. A store is
+ * unknown, then may be a development store, then may go live — and a live
+ * store never becomes a development store again.
+ */
+function lifecycleRank(answer: boolean | null): number {
+  if (answer === null) return 0;
+  return answer ? 1 : 2;
+}
+
+/**
+ * Whether an answer moves the store FORWARD from what is recorded. Anything
+ * else is stale and is ignored, recorded value included.
+ *
+ * This is what makes a late answer harmless. Every answer is fetched before
+ * the transaction that applies it, so another writer can record a newer one
+ * in between: the sweep reads "development store", a reauthorization records
+ * "live", and the sweep's transaction then arrives holding the older answer.
+ * Accepted, it would mark a live merchant a test tenant — silencing their SLA
+ * alerts and opening their data to platform reviewer links — and overwrite
+ * the newer answer for the next six hours. (Greptile, #206: the first version
+ * accepted live → development as though it were news.)
+ */
+export function shopifyAnswerAdvances(previous: boolean | null, observed: boolean | null): boolean {
+  return lifecycleRank(observed) > lifecycleRank(previous);
+}
+
+/**
  * What a fresh answer from Shopify changes, given the last one recorded.
  *
- *   - unknown            → nothing;
- *   - development store  → test tenant, the first time it is seen;
- *   - live, after having been a development store → client.
+ *   - unknown, or not newer than the recorded answer → nothing;
+ *   - development store, seen for the first time     → test tenant;
+ *   - live, after having been a development store    → client.
  *
  * A live store never seen as a development store changes nothing: the tenant
  * was created a client, and if an operator has since marked it a demo, that is
@@ -120,9 +152,9 @@ export function shopifyClassificationChange(
   previous: boolean | null,
   observed: boolean | null,
 ): ShopifyTenantClassification | null {
-  if (observed === null) return null;
-  if (observed && previous !== true) return "test_tenant";
-  if (!observed && previous === true) return "client";
+  if (!shopifyAnswerAdvances(previous, observed)) return null;
+  if (observed === true) return "test_tenant";
+  if (observed === false && previous === true) return "client";
   return null;
 }
 
@@ -177,9 +209,11 @@ export async function applyShopifyStoreClassification(
   }
 
   const previous = current.planPartnerDevelopment;
+  // Only an answer newer than the recorded one is kept: a stale one must not
+  // overwrite it (see shopifyAnswerAdvances).
   await tx
     .update(shopifyConnectorStores)
-    .set({ planCheckedAt: now, ...(observed === null ? {} : { planPartnerDevelopment: observed }) })
+    .set({ planCheckedAt: now, ...(shopifyAnswerAdvances(previous, observed) ? { planPartnerDevelopment: observed } : {}) })
     .where(and(eq(shopifyConnectorStores.id, store.id), eq(shopifyConnectorStores.organizationId, store.organizationId)));
 
   const change = shopifyClassificationChange(previous, observed);

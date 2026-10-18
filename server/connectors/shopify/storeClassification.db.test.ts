@@ -130,6 +130,15 @@ describe.runIf(localDatabase)("when a Shopify store's development-store answer i
     expect(await classificationAudits()).toHaveLength(2);
   });
 
+  it("should ignore a development answer that lost a race with the live one", async () => {
+    // The sweep fetched "development" before a reauthorization recorded "live";
+    // its transaction arrives second, holding the older answer (Greptile, #206).
+    await expect(applyAnswer(true)).resolves.toEqual({ changedTo: null });
+    expect(await tenantIsDemo()).toBe(false);
+    expect((await storePlan())?.planPartnerDevelopment).toBe(false);
+    expect(await classificationAudits()).toHaveLength(2);
+  });
+
   it("should leave an operator's later demo mark on the live store alone", async () => {
     await db.update(organizations).set({ isDemo: true }).where(eq(organizations.id, organizationId));
     await expect(applyAnswer(false)).resolves.toEqual({ changedTo: null });
