@@ -22,6 +22,7 @@ import {
 } from "./tokenStore";
 import { holdsInstallLease, renewInstallLease, type InstallLease } from "./installLease";
 import { shopifyOrdersChannelCode } from "./channelCodes";
+import { announceShopifyStoreWentLive, applyShopifyStoreClassification } from "./storeClassification";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -32,6 +33,11 @@ export interface ShopifyShopMetadata {
   primaryDomain: string | null;
   currencyCode: string | null;
   ianaTimezone: string | null;
+  /**
+   * Shopify's `shop.plan.partnerDevelopment`: true for a partner development
+   * store. Null when it could not be had — which classifies nothing.
+   */
+  partnerDevelopment: boolean | null;
 }
 
 export interface ShopifyOnboardingResult {
@@ -398,9 +404,10 @@ async function reauthorizeExistingStore(
   }
 
   let ordersChannelId = 0;
+  let classifiedAs: Awaited<ReturnType<typeof applyShopifyStoreClassification>>["changedTo"] = null;
   try {
     const tokens = await encryptShopifyTokens(store.organizationId, params.tokenResponse);
-    ordersChannelId = await db.transaction(async (tx) => {
+    const committed = await db.transaction(async (tx) => {
       await assertLeaseHeld(tx, params.lease);
       await assertTenantNotFenced(tx, store);
       // Store state, credentials and the record of both commit together. The
@@ -451,8 +458,18 @@ async function reauthorizeExistingStore(
         },
         tx,
       );
-      return channelId;
+      // A reinstall is a fresh look at the plan: a development store handed to
+      // a merchant and taken live becomes a client here, with the grant.
+      const { changedTo } = await applyShopifyStoreClassification(tx, {
+        store: { id: store.id, organizationId: store.organizationId, shopDomain: params.shopDomain },
+        observed: params.metadata.partnerDevelopment,
+        now: new Date(),
+        trigger: "reauthorization",
+      });
+      return { channelId, changedTo };
     });
+    ordersChannelId = committed.channelId;
+    classifiedAs = committed.changedTo;
   } catch (error) {
     // Nothing was written, and the fence owns the store's state: leave it be.
     if (isLeaseLost(error) || isRedactionFenced(error)) throw error;
@@ -460,6 +477,10 @@ async function reauthorizeExistingStore(
     throw new ShopifyOnboardingError("Could not secure Shopify access tokens", "TOKEN_STORE_FAILED", failClosedState, {
       cause: error,
     });
+  }
+  // After the commit, so the owner is never told about a change that rolled back.
+  if (classifiedAs === "client") {
+    await announceShopifyStoreWentLive({ organizationId: store.organizationId, shopDomain: params.shopDomain });
   }
 
   const [organization] = await db
@@ -560,6 +581,15 @@ async function createMerchantWorkspace(
         },
         tx,
       );
+    // In the transaction that creates the tenant, so a development store's
+    // tenant is never visible — to the SLA monitor or the reviewer-link check —
+    // as a client, even for a moment.
+    await applyShopifyStoreClassification(tx, {
+      store: { id: storeId, organizationId, shopDomain: params.shopDomain },
+      observed: params.metadata.partnerDevelopment,
+      now: new Date(),
+      trigger: "install",
+    });
     return { organizationId, userId, storeId, ordersChannelId };
   });
 

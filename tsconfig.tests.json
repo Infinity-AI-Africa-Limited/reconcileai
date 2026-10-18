@@ -64,6 +64,8 @@
     "server/connectors/shopify/scriptedDb.testkit.test.ts",
     "server/connectors/shopify/settlementEvidence.test.ts",
     "server/connectors/shopify/shopRedaction.test.ts",
+    "server/connectors/shopify/storeClassification.db.test.ts",
+    "server/connectors/shopify/storeClassification.test.ts",
     "server/connectors/shopify/shopRedaction.db.test.ts",
     "server/tenantStorage.test.ts",
     "server/storageList.test.ts",

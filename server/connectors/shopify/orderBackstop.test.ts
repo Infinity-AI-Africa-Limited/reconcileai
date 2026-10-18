@@ -27,6 +27,23 @@ vi.mock("./syncOrchestrator", async (importOriginal) => ({
   ...orchestrator,
 }));
 
+// Every test here passes its database explicitly. The loop's default tick finds
+// none through getDb, so its backstop returns at once whether or not the
+// environment holds a DATABASE_URL — otherwise a real query would still be in
+// flight when the fake clock moves, and the test would depend on the machine.
+vi.mock("../../db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../db")>()),
+  getDb: vi.fn(async () => null),
+}));
+
+const classification = vi.hoisted(() => ({
+  recheckShopifyStoreClassifications: vi.fn(async () => ({ scanned: 0, changed: 0, unknown: 0, failed: 0 })),
+}));
+vi.mock("./storeClassification", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./storeClassification")>()),
+  ...classification,
+}));
+
 import {
   runShopifyOrderBackstop,
   SHOPIFY_ORDER_BACKSTOP_BATCH,
@@ -297,6 +314,22 @@ describe("when the backstop loop starts", () => {
     release();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it("should ask Shopify again about development stores on every tick", async () => {
+    // Without this a development store taken live would stay a test tenant
+    // until someone reinstalled it — a paying client's SLA alerts silenced.
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    classification.recheckShopifyStoreClassifications.mockClear();
+
+    expect(startShopifyOrderBackstopLoop({ firstDelayMs: 1_000, intervalMs: 10_000 })).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(classification.recheckShopifyStoreClassifications).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(classification.recheckShopifyStoreClassifications).toHaveBeenCalledTimes(2);
+    vi.restoreAllMocks();
   });
 });
 

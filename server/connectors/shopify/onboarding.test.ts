@@ -26,6 +26,7 @@ vi.mock("../../_core/tenantKeys", async (importOriginal) => ({
 vi.mock("../../magicLinkService", () => ({
   sendWelcomeEmail: vi.fn(async () => ({ success: true, magicLink: "https://example.invalid/magic-login?token=x" })),
 }));
+vi.mock("../../_core/notification", () => ({ notifyOwner: vi.fn(async () => true) }));
 vi.mock("../../provisioning", () => ({
   provisionTenantBaseline: vi.fn(async (organizationId: number) => ({ organizationId, ok: true, steps: [] })),
 }));
@@ -34,6 +35,8 @@ vi.mock("../../exceptions/retail-commerce", async (importOriginal) => ({
   seedRetailResolutionTemplates: vi.fn(async () => ({ inserted: 25, existing: 0 })),
 }));
 
+import { createAuditLog } from "../../db";
+import { notifyOwner } from "../../_core/notification";
 import { encryptForTenant } from "../../_core/tenantKeys";
 import { sendWelcomeEmail } from "../../magicLinkService";
 import { provisionTenantBaseline } from "../../provisioning";
@@ -59,6 +62,8 @@ const metadata = {
   primaryDomain: "merchant.com",
   currencyCode: "USD",
   ianaTimezone: "Africa/Lagos",
+  // A live merchant store, so the classification changes nothing in these cases.
+  partnerDevelopment: false,
 };
 const tokenResponse = {
   access_token: "fresh-access",
@@ -297,7 +302,9 @@ describe("when a shop redaction fences the tenant after the early check", () => 
 
   it("should refuse to finish a first install whose new tenant was fenced before its credentials were stored", async () => {
     const fake = held({
-      select: { [STORES]: [[]], [USERS]: [[]], [ORGS]: [[fenced]] },
+      // The creation transaction reads the new tenant once, to classify it, and
+      // finds it active; the fence lands after that, before the credentials.
+      select: { [STORES]: [[]], [USERS]: [[]], [ORGS]: [[{ deletionState: "active", isDemo: false }], [fenced]] },
       insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7] },
     });
     state.db = fake.db;
@@ -661,5 +668,89 @@ describe("when storing credentials fails with a database error", () => {
     const logged = { code: error.code, ...loggableError(error) };
     expect(logged).toEqual({ code: "TOKEN_STORE_FAILED", error: "database", errorCode: "ER_LOCK_WAIT_TIMEOUT" });
     expect(JSON.stringify(logged)).not.toMatch(/owner@merchant\.com|Lock wait|insert into/);
+  });
+});
+
+describe("when Shopify reports whether the store is a development store", () => {
+  const isDemoWrites = (fake: ReturnType<typeof scriptedDb>) =>
+    fake.writes("update", ORGS).map((op) => op.data);
+
+  it("should create a development store's tenant as a test tenant, in the transaction that creates it", async () => {
+    // Our own development store arrived as a client (2026-10-16) and paged the
+    // owner. Created in one commit with its classification, it never is.
+    const fake = held({
+      select: {
+        [STORES]: [[], [{ planPartnerDevelopment: null, status: "pending_claim", privacyRedactionState: "active" }]],
+        [USERS]: [[]],
+        [ORGS]: [[{ isDemo: false, deletionState: "active" }]],
+      },
+      insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7] },
+    });
+    state.db = fake.db;
+
+    await onboardShopifyMerchant({
+      shopDomain: SHOP,
+      metadata: { ...metadata, partnerDevelopment: true },
+      tokenResponse,
+      origin: "https://www.reconcileaiafrica.com",
+      reauthorization: { retiring: "none" },
+      lease: LEASE,
+    });
+
+    expect(isDemoWrites(fake)).toEqual([{ isDemo: true }]);
+    const created = fake.writes("insert", ORGS)[0];
+    expect(fake.writes("update", ORGS)[0]?.txId).toBe(created?.txId);
+    expect(createAuditLog).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "update_org_is_demo", userId: null, details: expect.objectContaining({ isDemo: true, trigger: "install" }) }),
+      expect.anything(),
+    );
+  });
+
+  it("should create a client when Shopify cannot say", async () => {
+    // Unknown is never "test": the safe failure is an alert about a test store.
+    const fake = held({
+      select: {
+        [STORES]: [[], [{ planPartnerDevelopment: null, status: "pending_claim", privacyRedactionState: "active" }]],
+        [USERS]: [[]],
+        [ORGS]: [[{ isDemo: false, deletionState: "active" }]],
+      },
+      insert: { [ORGS]: [42], [USERS]: [9], [STORES]: [7] },
+    });
+    state.db = fake.db;
+
+    await onboardShopifyMerchant({
+      shopDomain: SHOP,
+      metadata: { ...metadata, partnerDevelopment: null },
+      tokenResponse,
+      origin: "https://www.reconcileaiafrica.com",
+      reauthorization: { retiring: "none" },
+      lease: LEASE,
+    });
+
+    expect(isDemoWrites(fake)).toEqual([]);
+  });
+
+  it("should make a development store that went live a client on its reinstall, and tell the owner", async () => {
+    const fake = held({
+      select: {
+        [STORES]: [
+          [existingStore],
+          [{ status: "active", privacyRedactionState: "active" }],
+          [{ planPartnerDevelopment: true, status: "active", privacyRedactionState: "active" }],
+        ],
+        [USERS]: [[{ id: 9 }]],
+        // Read in this order: the pre-check, the fence (locked), the classification (locked).
+        [ORGS]: [[{ deletionState: "active", code: "SHP_ABC" }], [{ deletionState: "active" }], [{ isDemo: true, deletionState: "active" }]],
+      },
+    });
+    state.db = fake.db;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await onboard();
+
+    expect(isDemoWrites(fake)).toEqual([{ isDemo: false }]);
+    expect(notifyOwner).toHaveBeenCalledTimes(1);
+    expect(notifyOwner).toHaveBeenCalledWith(expect.objectContaining({ title: `Shopify store went live: ${SHOP}` }));
+    vi.mocked(console.warn).mockRestore();
   });
 });
