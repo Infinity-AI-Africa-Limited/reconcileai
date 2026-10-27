@@ -11,9 +11,14 @@ section once the check passes.** An incident note that outlives its incident mis
 later session as badly as a missing one. Until then, it overrides any statement below that
 production is healthy.
 
-**Exit check:** `GET https://www.reconcileaiafrica.com/api/health` reports
-`checks.database.status: "ok"`, **and** the latest `SHOPLINE scheduled sync` run on `main`
-is green.
+**Exit check:** both of these must hold:
+- `GET https://www.reconcileaiafrica.com/api/health` reports
+  `checks.database.status: "ok"`;
+- the latest `syncCycle` run of `SHOPLINE scheduled sync` printed a response with
+  `failCount: 0`.
+
+A green run is not enough. The workflow checks only for HTTP 200, and `syncCycle`
+answers 200 even when stores failed to sync.
 
 **Verified from this repository's own evidence (2026-10-27):**
 - **Every `SHOPLINE scheduled sync` run since 2026-10-26 08:07 UTC has failed.** That is
@@ -40,6 +45,8 @@ is green.
   SHOPLINE retries an order webhook for only 48h (§2B.3). So **SHOPLINE data more than 24h
   older than the recovery is not guaranteed to arrive.** Shopify is not affected: its
   backstop walks forward from each store's watermark in 7-day steps until it reaches now.
+  - The fix is #209, held until recovery. Once it is merged, this bullet is no longer
+    true.
 
 **Reported by the provider, not verified here:** Manus Support says production's database
 is a Manus-managed TiDB instance. Manus changed its password on 2026-10-23 during a security
@@ -60,14 +67,23 @@ update, which left Railway's `DATABASE_URL` stale.
    migration run; nobody runs migrations by hand.
 3. **Validate:**
    - Run the exit check.
-   - Dispatch `SHOPLINE scheduled sync` with `webhookReconciler`. SHOPLINE deletes a
-     subscription after 19 consecutive failed deliveries (§2B.3), so subscriptions may need
-     re-registering.
-   - Dispatch `syncCycle` next. It resumes from each store's watermark, capped at 24h.
-   - If any SHOPLINE store took orders or payments more than 24h before recovery, they
-     need a backfill that no current handler can do. Raise it rather than assume the safety
-     net covered it.
-   - Run the Woodcore mirror, then confirm `GET /api/woodcore/sync` reports no error.
+   - Dispatch `SHOPLINE scheduled sync` with `webhookReconciler`, and confirm its response
+     shows `totalErrors: 0`. SHOPLINE deletes a subscription after 19 consecutive failed
+     deliveries (§2B.3), so subscriptions may need re-registering.
+   - Dispatch `syncCycle` next, and confirm `failCount: 0`. It resumes from each store's
+     watermark, capped at 24h.
+   - Backfill the outage's start. The old code cannot do it; #209 adds the way.
+     - Merge #209 only after the steps above pass.
+     - Then dispatch `syncCycle` with `catch_up_from` set to `2026-10-26T02:35:00Z`, just
+       before the last green run.
+     - Confirm that `catchUpRewind` is present and that every store's report ends with
+       `caughtUp: true`. A store not yet caught up continues on the next poll.
+   - Run the Woodcore mirror. Then poll `GET /api/woodcore/sync` until it shows
+     `running: false` and a `finishedAt` after you started it.
+     - Confirm `error` is null and that no entry in `tables` has `status: "error"`.
+     - `skipped` is normal: it marks a table the Woodcore user cannot read.
+     - `error` alone is not enough. It stays null while the sync is still running, and
+       a single table's failure appears only in `tables`.
 
 **Freeze until the exit check passes:**
 - No database password rotation, schema change, manual migration, reset or restore, or
