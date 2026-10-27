@@ -33,12 +33,16 @@ is green.
   writes through a new app-database connection, which the database is refusing. Only the
   server log would show that failure; the workflow cannot. Treat the mirror as stale since
   2026-10-26.
-- **The SHOPLINE safety net cannot backfill more than 24 hours.** The catch-up window is
-  capped at 24h (`MAX_CATCHUP_MS` in `server/connectors/shopline/scheduledSync.ts`), and the
-  daily batch and "Sync Now" are fixed 24h windows too. The comment there that "the daily
-  batch covers anything older" is false. Payments and payouts have no webhook at all, and
-  SHOPLINE retries an order webhook for only 48h (§2B.3). So **SHOPLINE data more than 24h
-  older than the recovery is not guaranteed to arrive.** Shopify is not affected: its
+- **The SHOPLINE safety net could not backfill more than 24 hours, until #209.**
+  - Every path read at most the last day.
+  - Every success wrote the clock as the watermark, so a sync after the outage moved past
+    the gap.
+  - Payments and payouts have no webhook at all, and SHOPLINE retries an order webhook
+    for only 48h (§2B.3).
+
+  Since #209, the poll walks a gap forward from the watermark (§2B.7). **But recovery
+  deploys the old code first**, and its syncs will write the clock past this outage. So
+  the outage must be re-read on purpose (Recovery, step 3). Shopify is not affected: its
   backstop walks forward from each store's watermark in 7-day steps until it reaches now.
 
 **Reported by the provider, not verified here:** Manus Support says production's database
@@ -63,10 +67,13 @@ update, which left Railway's `DATABASE_URL` stale.
    - Dispatch `SHOPLINE scheduled sync` with `webhookReconciler`. SHOPLINE deletes a
      subscription after 19 consecutive failed deliveries (§2B.3), so subscriptions may need
      re-registering.
-   - Dispatch `syncCycle` next. It resumes from each store's watermark, capped at 24h.
-   - If any SHOPLINE store took orders or payments more than 24h before recovery, they
-     need a backfill that no current handler can do. Raise it rather than assume the safety
-     net covered it.
+   - Dispatch `syncCycle` next.
+   - **Re-read the outage itself, once #209 is deployed** (merge it only after the
+     steps above pass).
+     - Dispatch `syncCycle` with `catch_up_from` set to `2026-10-26T02:35:00Z`, just
+       before the last green run.
+     - Confirm that `catchUpRewind` is present and that every store's report ends with
+       `caughtUp: true`. A store not yet caught up continues on the next poll.
    - Run the Woodcore mirror, then confirm `GET /api/woodcore/sync` reports no error.
 
 **Freeze until the exit check passes:**
