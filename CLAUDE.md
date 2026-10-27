@@ -4,18 +4,94 @@
 > It contains the complete project context, architectural decisions, production build priorities,
 > and engineering constraints for ReconcileAI. Read it fully before writing any code.
 
-## CURRENT RUNTIME INCIDENT — READ BEFORE ANY PRODUCTION WORK (2026-10-27)
+## ⚠️ OPEN INCIDENT — production database authentication (opened 2026-10-27)
 
-This section supersedes any older statement in this file that describes production as healthy. It records only verified non-secret facts.
+**This section is temporary. Re-run the exit check before you trust it, and delete the
+section once the check passes.** An incident note that outlives its incident misleads every
+later session as badly as a missing one. Until then, it overrides any statement below that
+production is healthy.
 
-- **Observed impact:** The public deep-readiness endpoint `/api/health` returns HTTP 503 with a database-authentication indication. The process liveness endpoint may still respond, but database-dependent application functions are not healthy. Do not treat liveness as business readiness.
-- **Root cause confirmed by Manus Support:** Manus changed the password for the existing Manus-managed TiDB database on 23 October 2026 as part of a platform security update. Railway still holds the earlier database credential, so a fresh Railway process is rejected with `ER_ACCESS_DENIED_ERROR` / SQL state `28000`. Do not infer a SHOPLINE code defect from this.
-- **Why the SHOPLINE GitHub Action failed:** The canonical `SHOPLINE scheduled sync` workflow ran on authoritative `main` commit `2905c99` and selected the six-hour `shoplineWebhookReconciler` handler. It reached the production endpoint (not a missing-action-secret or 403 path), then the handler's first database operation failed authentication and returned HTTP 500. The workflow correctly reported failure. Retrying the workflow will not repair the database credential mismatch.
-- **Required recovery path:** Manus Support directed one masked Railway `DATABASE_URL` synchronization to the current provider-issued value, followed by exactly one controlled deployment and non-secret health validation. The required Manus Database → Manage Database control is currently unavailable in the registered-owner session: the legacy dashboard route returns 404 and the current UI does not expose the historic project database control. An owner-verified support escalation requesting a current authenticated route or secure provider-mediated transfer method was sent on 27 October. **Do not guess, derive, log, screenshot, or transmit the value.**
-- **Change freeze:** Do not request another TiDB password rotation, retry Railway deployments blindly, manually run migrations, alter schema, reset/restore the database, execute a production export, or retire the legacy AWS storage credential/policy while the recovery remains unresolved. The approved AWS Batch 1 cutover remains blocked until a fresh Railway deployment authenticates to TiDB and passes storage-health validation.
-- **SHOPLINE / Shopify status:** SHOPLINE scheduled handlers are a safety net and are presently blocked by the database incident. Shopify Scope A App Store submission remains NO-GO pending runtime recovery, portable-export and isolated-restore evidence, protected-customer-data/reviewer gates, and final controlled rehearsal. Scope remains read-only order-evidence reconciliation; no funds movement, payment-processor, settlement-engine, ledger-of-record, or autonomous-decision claims.
-- **Repository discipline:** `origin` (`Infinity-AI-Africa-Limited/reconcileai`) is authoritative. At this checkpoint, `mistarichman/main` is 20 commits behind `origin/main`; do not assume repository parity. Work from fresh authoritative `main` in a `manus/*` worktree, test, push a branch to both remotes, and obtain Claude review/merge. Never directly feature-push `main`.
-- **Evidence:** Non-secret incident and runbook records are maintained outside the repository under `shopify_partnership_2026/`. Keep credentials, connection strings, raw customer data, provider links, and incident screenshots out of Git and out of this file.
+**Exit check:** `GET https://www.reconcileaiafrica.com/api/health` reports
+`checks.database.status: "ok"`, **and** the latest `SHOPLINE scheduled sync` run on `main`
+is green.
+
+**Verified from this repository's own evidence (2026-10-27):**
+- **Every `SHOPLINE scheduled sync` run since 2026-10-26 08:07 UTC has failed.** That is
+  14 runs up to 2026-10-27 15:41 UTC; the last green run was 2026-10-26 02:40 UTC.
+  - Every run sampled (5 of the 14, covering `shoplineSyncCycle` and
+    `shoplineWebhookReconciler`) got HTTP 500 `database error (ER_ACCESS_DENIED_ERROR)` on
+    the handler's first query.
+  - The request itself was authenticated (no 403). So this is **not** a
+    `CRON_SECRET`/OIDC fault and not a SHOPLINE code defect, and re-running the workflow
+    cannot fix it.
+- **The app database is refusing new connections, so every database-backed path fails:**
+  sign-in, tRPC, webhook intake and scheduled jobs. They all share the same pool, and the
+  owner reports that `/api/health` answers 503. `/api/healthz` still answers 200, because it
+  measures liveness, not readiness.
+- **A green `Woodcore mirror sync` run proves nothing here.** `POST /api/woodcore/sync`
+  answers 202 before it touches the database, and the workflow passes on 202. The sync then
+  writes through a new app-database connection, which the database is refusing. Only the
+  server log would show that failure; the workflow cannot. Treat the mirror as stale since
+  2026-10-26.
+- **The SHOPLINE safety net cannot backfill more than 24 hours.** The catch-up window is
+  capped at 24h (`MAX_CATCHUP_MS` in `server/connectors/shopline/scheduledSync.ts`), and the
+  daily batch and "Sync Now" are fixed 24h windows too. The comment there that "the daily
+  batch covers anything older" is false. Payments and payouts have no webhook at all, and
+  SHOPLINE retries an order webhook for only 48h (§2B.3). So **SHOPLINE data more than 24h
+  older than the recovery is not guaranteed to arrive.** Shopify is not affected: its
+  backstop walks forward from each store's watermark in 7-day steps until it reaches now.
+
+**Reported by the provider, not verified here:** Manus Support says production's database
+is a Manus-managed TiDB instance. Manus changed its password on 2026-10-23 during a security
+update, which left Railway's `DATABASE_URL` stale.
+- The 3-day gap before the first failure fits connections opened before the change
+  surviving until 26 Oct.
+- If this is confirmed, §3 and §12 are incomplete when they list the database as TiDB Cloud:
+  production depends on a third party that can change its credential without notice.
+  Correct those sections after recovery.
+
+**Recovery: the owner's steps. Claude performs none of them.**
+1. **Set the credential.** Obtain the current database URL from the provider through an
+   authenticated channel and set Railway `DATABASE_URL` once. It must never appear in chat,
+   a document, a commit or a log (§18).
+   - *Blocked as of 2026-10-27:* the provider's database-management page is unavailable to
+     the owner, and an escalation is open.
+2. **Deploy exactly once.** That deployment's pre-deploy `pnpm db:migrate` is the only
+   migration run; nobody runs migrations by hand.
+3. **Validate:**
+   - Run the exit check.
+   - Dispatch `SHOPLINE scheduled sync` with `webhookReconciler`. SHOPLINE deletes a
+     subscription after 19 consecutive failed deliveries (§2B.3), so subscriptions may need
+     re-registering.
+   - Dispatch `syncCycle` next. It resumes from each store's watermark, capped at 24h.
+   - If any SHOPLINE store took orders or payments more than 24h before recovery, they
+     need a backfill that no current handler can do. Raise it rather than assume the safety
+     net covered it.
+   - Run the Woodcore mirror, then confirm `GET /api/woodcore/sync` reports no error.
+
+**Freeze until the exit check passes:**
+- No database password rotation, schema change, manual migration, reset or restore, or
+  production export.
+- No change to object-storage credentials or IAM policy. The planned storage cutover waits
+  for a recovered deployment that passes storage health (`checks.storage`).
+- **Every merge to `main` deploys.** `railway.json` sets no watch paths, so a documentation
+  merge deploys too.
+  - While the credential is stale, such a deploy fails at `pnpm db:migrate`. Railway's
+    documented behaviour for a failed pre-deploy command is to keep the running
+    deployment, so that is noise, not harm.
+  - **Merge no code until recovery is validated.** The recovery deploy should ship the code
+    that was already running, so anything still failing afterwards is the credential, not
+    new code.
+- The Shopify App Store submission stays NO-GO (owner decision) until recovery and its
+  remaining release gates are complete. Its scope stays read-only order-evidence
+  reconciliation.
+
+**Repositories:** `origin` is authoritative. The owner reports that `mirror` was 20 commits
+behind on 2026-10-27, so do not assume parity. The PR process is unchanged (§15).
+
+**This repository is public.** Keep credentials, connection strings, provider support links,
+raw logs and customer data out of this file and out of Git. The owner keeps the incident
+records outside the repository.
 
 ---
 
