@@ -479,6 +479,13 @@ read_orders, read_payment, read_store_information, read_returns, read_gift_card
 **API Versioning:** Pinned to `v20260601` (stable, 12-month support). URL shape:
 `https://{handle}.myshopline.com/admin/openapi/v20260601/{endpoint}.json`
 
+> ⏳ **Migration deadline: `v20260601` is deprecated from 2027-06-01 at the
+> earliest.** The latest stable is `v20260901` (stable 2026-08-14, supported
+> until at least 2027-09-01). Consecutive stable versions overlap by 9 months.
+> Plan the move for early 2027, as its own PR with a live test on
+> `reconcileai-dev`, and read the changelog for every endpoint in §2B.14 first.
+> Versions before `v20250301` were retired on 2026-09-30. See §2B.14.
+
 **Rate Limiting:** Leaky bucket — burst 40, drain 4 req/s per store. Implementation
 uses a conservative 3 req/s ceiling with exponential backoff on 429.
 
@@ -891,6 +898,36 @@ Containment is structural:
 > two ways this feature could have shipped looking correct while failing at the
 > exact moment it mattered: an operator revoking during an incident, and a
 > reviewer trying to leave.
+
+### 2B.14 SHOPLINE platform notices — reviewed 2026-10-27
+
+The Partner Portal's notification page
+(https://developer.myshopline.com/notify/list) carries SHOPLINE's platform
+changes. Each one below was checked against the connector. None required a code
+change. Re-check this table when a new notice arrives, and add a row for it.
+
+**What the connector depends on**, the surface a notice has to touch to matter:
+
+- **OpenAPI calls**, all on `SHOPLINE_API_VERSION` (`shared/shoplineConstants.ts`):
+  `/orders.json`, `/webhooks.json`, `/merchants/shop.json`, and SHOPLINE
+  Payments `/payments/store/{transactions,payouts,balance_transactions,balance}.json`.
+- **OAuth token create/refresh**, which are unversioned. Only `accessToken`,
+  `expireTime` and `scope` are read.
+- **Webhook subscriptions**, created with `api_version: SHOPLINE_API_VERSION`.
+- `sl_connector_stores.apiVersion` is stored but **never used to build a
+  request**. Do not start reading it without migrating every row.
+- **Nothing on storefronts:** no theme app extension, script tag or app embed,
+  no SHOPLINE CLI, no product endpoints or product scope.
+
+| Notice | Applies? | Why |
+|---|---|---|
+| OpenAPI versions before `v20250301` retired (2026-09-30; their docs removed 2026-10-22) | **No** | Pinned `v20260601`. The real deadline is its own deprecation, ≥ 2027-06-01 (§2B.3) |
+| Order attribution fields dropped from `v20261201` (`landing_site`, `referring_site`, `source_url`, `utm_parameters`, plugin values of `source_name`, codes in `source_identifier`) | **No** | The connector reads none of them, so adopting `v20261201` or later is safe on this point |
+| `v20270301` (unstable): product image and variant field changes; access-token `id` changes from long to string | **No** | No product endpoints; token parsing never reads `id` |
+| Checkout and order page URL format (2026-09-19) | **No** | No storefront URL parsing. The only path parsing is the API's `page_info` pagination header |
+| Storefront accessibility, by 2026-10-30 | **No** | ReconcileAI renders nothing on storefronts |
+| App extensions deletable only via CLI or support ticket | **No** | The app has no extensions |
+| Theme CLI ≥ 1.3.2 | **No** | No theme development |
 
 ---
 
