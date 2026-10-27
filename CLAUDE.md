@@ -4,6 +4,19 @@
 > It contains the complete project context, architectural decisions, production build priorities,
 > and engineering constraints for ReconcileAI. Read it fully before writing any code.
 
+## CURRENT RUNTIME INCIDENT — READ BEFORE ANY PRODUCTION WORK (2026-10-27)
+
+This section supersedes any older statement in this file that describes production as healthy. It records only verified non-secret facts.
+
+- **Observed impact:** The public deep-readiness endpoint `/api/health` returns HTTP 503 with a database-authentication indication. The process liveness endpoint may still respond, but database-dependent application functions are not healthy. Do not treat liveness as business readiness.
+- **Root cause confirmed by Manus Support:** Manus changed the password for the existing Manus-managed TiDB database on 23 October 2026 as part of a platform security update. Railway still holds the earlier database credential, so a fresh Railway process is rejected with `ER_ACCESS_DENIED_ERROR` / SQL state `28000`. Do not infer a SHOPLINE code defect from this.
+- **Why the SHOPLINE GitHub Action failed:** The canonical `SHOPLINE scheduled sync` workflow ran on authoritative `main` commit `2905c99` and selected the six-hour `shoplineWebhookReconciler` handler. It reached the production endpoint (not a missing-action-secret or 403 path), then the handler's first database operation failed authentication and returned HTTP 500. The workflow correctly reported failure. Retrying the workflow will not repair the database credential mismatch.
+- **Required recovery path:** Manus Support directed one masked Railway `DATABASE_URL` synchronization to the current provider-issued value, followed by exactly one controlled deployment and non-secret health validation. The required Manus Database → Manage Database control is currently unavailable in the registered-owner session: the legacy dashboard route returns 404 and the current UI does not expose the historic project database control. An owner-verified support escalation requesting a current authenticated route or secure provider-mediated transfer method was sent on 27 October. **Do not guess, derive, log, screenshot, or transmit the value.**
+- **Change freeze:** Do not request another TiDB password rotation, retry Railway deployments blindly, manually run migrations, alter schema, reset/restore the database, execute a production export, or retire the legacy AWS storage credential/policy while the recovery remains unresolved. The approved AWS Batch 1 cutover remains blocked until a fresh Railway deployment authenticates to TiDB and passes storage-health validation.
+- **SHOPLINE / Shopify status:** SHOPLINE scheduled handlers are a safety net and are presently blocked by the database incident. Shopify Scope A App Store submission remains NO-GO pending runtime recovery, portable-export and isolated-restore evidence, protected-customer-data/reviewer gates, and final controlled rehearsal. Scope remains read-only order-evidence reconciliation; no funds movement, payment-processor, settlement-engine, ledger-of-record, or autonomous-decision claims.
+- **Repository discipline:** `origin` (`Infinity-AI-Africa-Limited/reconcileai`) is authoritative. At this checkpoint, `mistarichman/main` is 20 commits behind `origin/main`; do not assume repository parity. Work from fresh authoritative `main` in a `manus/*` worktree, test, push a branch to both remotes, and obtain Claude review/merge. Never directly feature-push `main`.
+- **Evidence:** Non-secret incident and runbook records are maintained outside the repository under `shopify_partnership_2026/`. Keep credentials, connection strings, raw customer data, provider links, and incident screenshots out of Git and out of this file.
+
 ---
 
 ## 0. Operating Role — Acting Global CTO (applies to EVERY request)
