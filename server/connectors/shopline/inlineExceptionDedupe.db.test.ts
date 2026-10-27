@@ -77,15 +77,29 @@ describe.runIf(localDatabase)("when an unscoped sync reconciles a window it has 
     expect(await openExceptions()).toHaveLength(afterFirst.length);
   });
 
-  it("should file it again once the earlier one has been resolved", async () => {
-    // A resolved exception is a person's closed decision; a row still unmatched
-    // after that is a new fact, and must be raised again rather than hidden.
-    await db.update(exceptions).set({ status: "resolved" }).where(eq(exceptions.organizationId, organizationId));
+  it("should not undo a person's decision when a sync re-reads the row", async () => {
+    // Closing an exception leaves its transaction `unmatched`. A sync re-reading
+    // the same window brings no new evidence, so raising the case again would
+    // reopen what the person resolved or dismissed on every later pass.
+    await db.update(exceptions).set({ status: "dismissed" }).where(eq(exceptions.organizationId, organizationId));
 
-    const again = await runReconciliationOnPersistedData(
+    const reread = await runReconciliationOnPersistedData(
       db as never, organizationId, ORDERS_CHANNEL, PAYMENTS_CHANNEL, from, to, "USD",
     );
 
-    expect(again.exceptionCount).toBeGreaterThan(0);
+    expect(reread.exceptionCount).toBe(0);
+  });
+
+  it("should raise it again for a settlement file that names the order, once a person has closed it", async () => {
+    // A file is new evidence about the orders it names, so a case a person
+    // closed may be raised again. That was the file import's behaviour before,
+    // and it is unchanged.
+    await db.update(exceptions).set({ status: "resolved" }).where(eq(exceptions.organizationId, organizationId));
+
+    const fromFile = await runReconciliationOnPersistedData(
+      db as never, organizationId, ORDERS_CHANNEL, PAYMENTS_CHANNEL, from, to, "USD", { orderRefs: ["50011001"] },
+    );
+
+    expect(fromFile.exceptionCount).toBeGreaterThan(0);
   });
 });

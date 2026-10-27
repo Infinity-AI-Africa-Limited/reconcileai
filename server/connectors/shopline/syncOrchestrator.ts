@@ -71,6 +71,27 @@ export interface SyncOptions {
   triggeredBy?: number;
   /** If true, skip reconciliation (just ingest) */
   ingestOnly?: boolean;
+  /**
+   * Reconcile against unmatched rows from this earlier instant, while still
+   * fetching only [from, to].
+   *
+   * A catch-up step sets it, so a pair split by the seam between two steps
+   * still meets: the order fetched by one step, its payment by the next.
+   *
+   * With it set, reconciliation runs even when this cycle stored nothing new.
+   * An earlier step may have held orders back for it (`holdOrdersFrom`), and a
+   * held order that is never reconciled is never matched or raised.
+   */
+  reconcileFrom?: Date;
+  /**
+   * Raise no exception for an ORDER dated at or after this. The next step,
+   * whose `reconcileFrom` reaches back over it, matches it or raises it.
+   *
+   * Set on every step of a catch-up walk except the one that ends at now. At a
+   * step's end an order's payment may simply not have been fetched yet, and an
+   * exception raised for it stays open after the payment matches.
+   */
+  holdOrdersFrom?: Date;
 }
 
 export interface SyncReport {
@@ -628,21 +649,24 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       console.info(
         `[SHOPLINE] Reconciliation skipped for store=${storeHandle} — payments feed unavailable; ingested ${allRows.length} row(s) only`,
       );
-    } else if (!opts.ingestOnly && allRows.length > 0) {
+    } else if (!opts.ingestOnly && (allRows.length > 0 || opts.reconcileFrom)) {
+      // No `orderRefs`: this pass restricts nothing. It only holds back the
+      // broken pairs, and on a catch-up step the orders the next step will
+      // judge. Passing `orderRefs: []` would mean "no refs qualify" and match
+      // nothing at all.
+      const scope: ReconciliationScope = {
+        ...(brokenPairRefs.length > 0 ? { excludeOrderRefs: brokenPairRefs } : {}),
+        ...(opts.holdOrdersFrom ? { flag: { orderSideBefore: opts.holdOrdersFrom } } : {}),
+      };
       const result = await runReconciliationOnPersistedData(
         db,
         opts.organizationId,
         ordersChannelId,
         paymentsChannelId,
-        from,
+        opts.reconcileFrom ?? from,
         to,
         store.currency ?? "USD",
-        // No `orderRefs`: this pass restricts nothing and only holds back the
-        // broken pairs. Passing `orderRefs: []` would mean "no refs qualify"
-        // and match nothing at all.
-        brokenPairRefs.length > 0
-          ? { excludeOrderRefs: brokenPairRefs }
-          : undefined,
+        Object.keys(scope).length > 0 ? scope : undefined,
       );
       matchedCount = result.matchedCount;
       exceptionCount = result.exceptionCount;
@@ -816,9 +840,9 @@ export async function resolveChannelIds(
  * flags them again on every later import. With a scope, only the named orders
  * (on both legs) are reconciled.
  *
- * With or without a scope, an exception already unresolved for the same
- * transaction and category is not raised a second time (see
- * `runReconciliationOnPersistedData`).
+ * No pass raises an exception that is already raised for the same transaction
+ * and category. A re-read of a window also respects one a person has closed;
+ * see `runReconciliationOnPersistedData`.
  */
 export interface ReconciliationScope {
   /**
@@ -855,6 +879,8 @@ export interface ReconciliationScope {
 
 /** Exception states that still await a person — raising another is a duplicate. */
 const UNRESOLVED_EXCEPTION_STATUSES = ["open", "in_review", "escalated"] as const;
+/** Every state, decided ones included — see runReconciliationOnPersistedData. */
+const ANY_EXCEPTION_STATUS = [...UNRESOLVED_EXCEPTION_STATUSES, "resolved", "dismissed"] as const;
 const SCOPE_LOOKUP_CHUNK = 500;
 
 /** The retail engine's settings for inline reconciliation and its classifications. */
@@ -954,11 +980,12 @@ async function selectUnmatchedLeg(
   return rows;
 }
 
-/** `transactionId::subCategory` for every exception still awaiting a person. */
-async function unresolvedExceptionKeys(
+/** `transactionId::subCategory` for every exception in one of `statuses`. */
+async function exceptionKeys(
   db: DbExecutor,
   organizationId: number,
   transactionIds: number[],
+  statuses: readonly (typeof ANY_EXCEPTION_STATUS)[number][],
 ): Promise<Set<string>> {
   const keys = new Set<string>();
   for (let i = 0; i < transactionIds.length; i += SCOPE_LOOKUP_CHUNK) {
@@ -970,7 +997,7 @@ async function unresolvedExceptionKeys(
         and(
           eq(exceptions.organizationId, organizationId),
           inArray(exceptions.transactionId, chunk),
-          inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
+          inArray(exceptions.status, [...statuses]),
         ),
       );
     for (const row of open) keys.add(`${row.transactionId}::${row.subCategory ?? ""}`);
@@ -1053,23 +1080,31 @@ export async function runReconciliationOnPersistedData(
     );
     raised = raised.filter((ex) => !tooRecent.has(ex.transactionId));
   }
-  // Never raise a second copy of an exception a person has not dealt with yet.
+  // Never raise again what is already raised. Which earlier exceptions count
+  // depends on what this pass is.
   //
-  // This once applied only to scoped (file-import) passes. Unscoped syncs
-  // re-read rows they have read before, all the time:
-  //   - the poll re-reads its seam overlap, at every step of a catch-up walk;
-  //   - the realtime sync, the daily batch and "Sync Now" re-read the whole
-  //     last 24 hours.
-  // So every one of those passes filed another exception for every row still
-  // unmatched. A resolved one is a person's decision; a row still unmatched
-  // after it is raised again.
+  // - A pass naming the orders a new piece of evidence concerns (`orderRefs`:
+  //   a settlement file) skips only exceptions still awaiting a person. A case
+  //   a person closed may be raised again, because the evidence is new.
+  // - A pass re-reading a window (every sync) brings nothing new. Syncs do this
+  //   all the time: the poll re-reads its seam and reconciles a catch-up step
+  //   against the day before it; the realtime sync, the daily batch and "Sync
+  //   Now" re-read the whole last 24 hours. Closing an exception leaves its
+  //   transaction `unmatched`, so a re-read would raise a case a person had
+  //   resolved or dismissed on every later pass, undoing their decision. A
+  //   re-read therefore skips every earlier exception for the same
+  //   transaction and category.
+  //
+  // Until 2026-10-27 only the file pass checked at all, and every sync filed
+  // another copy of each exception for a row still unmatched.
   if (raised.length > 0) {
-    const unresolved = await unresolvedExceptionKeys(
+    const already = await exceptionKeys(
       db,
       organizationId,
       [...new Set(raised.map((ex) => ex.transactionId))],
+      orderRefs ? UNRESOLVED_EXCEPTION_STATUSES : ANY_EXCEPTION_STATUS,
     );
-    raised = raised.filter((ex) => !unresolved.has(`${ex.transactionId}::${ex.category}`));
+    raised = raised.filter((ex) => !already.has(`${ex.transactionId}::${ex.category}`));
   }
 
   await raiseRetailExceptions(db, organizationId, currency, raised);

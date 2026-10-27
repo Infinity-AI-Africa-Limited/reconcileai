@@ -88,6 +88,42 @@ export const CATCH_UP_STEP_MS = 24 * 60 * 60 * 1000;
 export const CATCH_UP_TIME_BUDGET_MS = 60 * 1000;
 
 /**
+ * How far back a catch-up step reconciles, and how much of a step's end it
+ * holds back for the step after it. It is the same 24 hours the realtime sync
+ * and daily batch give a pair in normal operation.
+ *
+ * A step fetches only its own window, so an order fetched near a step's end may
+ * meet its payment only in the next step. Without this the two never shared a
+ * reconciliation (Greptile, #209). The order was raised as unmatched in one
+ * step and its payment in the next, and the walk still reported itself caught
+ * up.
+ *
+ * So:
+ * - every step reconciles against the day before its own window;
+ * - every step but the last raises no exception for an order in its final day,
+ *   and the next step judges it with its payment in view.
+ */
+export const CATCH_UP_RECONCILE_LOOKBACK_MS = CATCH_UP_STEP_MS;
+
+/**
+ * How a catch-up step reconciles (see CATCH_UP_RECONCILE_LOOKBACK_MS).
+ *
+ * Every step, the last included, reaches back a day, because it is the one
+ * that judges what the step before it held back. That holds across polls too:
+ * a walk cut short leaves the next poll's first step to judge them.
+ *
+ * Every step but the one ending at now holds its own last day's orders back.
+ */
+export function stepReconcileOptions(
+  window: { from: Date; to: Date },
+  now: Date,
+): { reconcileFrom: Date; holdOrdersFrom?: Date } {
+  const reconcileFrom = new Date(window.from.getTime() - CATCH_UP_RECONCILE_LOOKBACK_MS);
+  if (window.to.getTime() >= now.getTime()) return { reconcileFrom };
+  return { reconcileFrom, holdOrdersFrom: new Date(window.to.getTime() - CATCH_UP_RECONCILE_LOOKBACK_MS) };
+}
+
+/**
  * The next window the poll reads for a store: from its watermark, less the
  * seam overlap, forward by at most one step, ending no later than now. The poll
  * calls it again with the advanced watermark until a step ends at now.
@@ -140,6 +176,7 @@ async function catchUpStore(store: StoreRow, now: Date, pollStartedAt: number): 
         from: window.from,
         to: window.to,
         triggeredBy: 0, // system
+        ...stepReconcileOptions(window, now),
       });
     } catch (err) {
       step = {
@@ -193,7 +230,7 @@ async function catchUpStore(store: StoreRow, now: Date, pollStartedAt: number): 
 // ─── 1. Incremental Sync (15-min polling fallback) ───────────────────────────
 
 /** `YYYY-MM-DDTHH:MM[:SS[.mmm]]Z` — UTC only, so no offset can be misread. */
-const CATCH_UP_FROM_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?Z$/;
+const CATCH_UP_FROM_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?Z$/;
 
 /**
  * Read an operator's `catchUpFrom` instruction: re-read every active store
@@ -209,11 +246,25 @@ export function parseCatchUpFrom(
   now: Date,
 ): { ok: true; value: Date | null } | { ok: false; error: string } {
   if (raw === undefined || raw === "") return { ok: true, value: null };
-  if (typeof raw !== "string" || !CATCH_UP_FROM_PATTERN.test(raw)) {
+  const fields = typeof raw === "string" ? CATCH_UP_FROM_PATTERN.exec(raw) : null;
+  if (!fields) {
     return { ok: false, error: "catchUpFrom must be a UTC timestamp such as 2026-10-26T02:00:00Z" };
   }
-  const value = new Date(raw);
-  if (Number.isNaN(value.getTime())) return { ok: false, error: "catchUpFrom is not a real date" };
+  // `new Date` does not refuse an impossible date; it rolls it over. 2026-09-31
+  // becomes 1 October and 24:00 becomes the next day, so the operator would be
+  // told it worked for a date they never asked for. Every field must survive the
+  // round trip.
+  const value = new Date(raw as string);
+  const [, year, month, day, hour, minute, second] = fields.map(Number);
+  const real =
+    !Number.isNaN(value.getTime()) &&
+    value.getUTCFullYear() === year &&
+    value.getUTCMonth() + 1 === month &&
+    value.getUTCDate() === day &&
+    value.getUTCHours() === hour &&
+    value.getUTCMinutes() === minute &&
+    (fields[6] === undefined || value.getUTCSeconds() === second);
+  if (!real) return { ok: false, error: "catchUpFrom is not a real date" };
   if (value.getTime() >= now.getTime()) return { ok: false, error: "catchUpFrom must be in the past" };
   const earliest = now.getTime() - SHOPLINE_BACKFILL_DAYS * 24 * 60 * 60 * 1000;
   if (value.getTime() < earliest) {

@@ -195,11 +195,12 @@ describe("reconciling persisted data for a scope", () => {
     expect(legs[0]?.where?.params).not.toContain("ORD-1");
   });
 
-  it("should not raise a second copy on an unscoped run either", async () => {
+  it("should raise nothing already raised on an unscoped run, a closed case included", async () => {
     // Until 2026-10-27 only scoped runs checked. The sync re-reads windows it
     // has read before (the poll's seam overlap; a realtime sync, the daily
     // batch and "Sync Now" re-read the whole last day), so every one of those
-    // passes filed another copy of each exception still awaiting a person.
+    // passes filed another copy of each exception. A re-read brings no new
+    // evidence, so a case a person resolved or dismissed counts too.
     const fake = scriptedDb({
       select: {
         transactions: [[order], [settlement]],
@@ -211,7 +212,7 @@ describe("reconciling persisted data for a scope", () => {
 
     expect(result.exceptionCount).toBe(2);
     const lookup = fake.ops.find((op) => op.kind === "select" && op.table === "exceptions");
-    expect(lookup?.where?.params).toEqual([42, 11, 21, "open", "in_review", "escalated"]);
+    expect(lookup?.where?.params).toEqual([42, 11, 21, "open", "in_review", "escalated", "resolved", "dismissed"]);
   });
 });
 

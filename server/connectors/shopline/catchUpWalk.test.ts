@@ -25,6 +25,8 @@ type StoreFixture = {
 const state = vi.hoisted(() => ({
   stores: [] as StoreFixture[],
   windows: [] as Array<{ store: number; from: Date; to: Date }>,
+  /** Every runSyncCycle call's options, in order. */
+  calls: [] as SyncOptions[],
   /** Called per runSyncCycle; return a failure message to make that step fail. */
   onStep: (() => undefined) as (opts: { slStoreId: number; from: Date; to: Date }, n: number) => string | undefined,
 }));
@@ -57,6 +59,7 @@ vi.mock("./syncOrchestrator", () => ({
   runSyncCycle: vi.fn(async (opts: SyncOptions): Promise<SyncReport> => {
     const window = { from: opts.from as Date, to: opts.to as Date };
     state.windows.push({ store: opts.slStoreId, ...window });
+    state.calls.push(opts);
     const error = state.onStep({ slStoreId: opts.slStoreId, ...window }, state.windows.length);
     return {
       success: !error,
@@ -115,6 +118,7 @@ beforeEach(() => {
   vi.setSystemTime(NOW);
   state.stores = [];
   state.windows = [];
+  state.calls = [];
   state.onStep = () => undefined;
 });
 
@@ -140,6 +144,16 @@ describe("when a store has been dark for three days", () => {
       expect(windows[i].from.getTime()).toBe(windows[i - 1].to.getTime() - 5 * MINUTE);
     }
     expect(windows).toHaveLength(4);
+    // Every step reconciles against the day before its window, so a pair split
+    // by a seam meets. Every step but the last holds back its final day's
+    // orders for the next (catchUpSeam.db.test.ts proves the pair matches).
+    for (const call of state.calls) {
+      expect(call.reconcileFrom).toEqual(new Date((call.from as Date).getTime() - 24 * HOUR));
+    }
+    expect(state.calls.slice(0, -1).map((c) => c.holdOrdersFrom)).toEqual(
+      state.calls.slice(0, -1).map((c) => new Date((c.to as Date).getTime() - 24 * HOUR)),
+    );
+    expect(state.calls.at(-1)?.holdOrdersFrom).toBeUndefined();
     expect(body).toMatchObject({ ok: true, successCount: 1, failCount: 0 });
     expect((body.reports as Array<Record<string, unknown>>)[0]).toMatchObject({
       steps: 4,
@@ -223,6 +237,11 @@ describe("when an operator points the poll back at an earlier instant", () => {
     ["words", "yesterday"],
     ["the future", "2026-10-29T12:00:01Z"],
     ["further back than the install backfill reaches", "2026-07-30T00:00:00Z"],
+    // `new Date` rolls these over rather than refusing them (Greptile, #209):
+    // the first would rewind to 1 October and report success.
+    ["a day the month does not have", "2026-09-31T02:35:00Z"],
+    ["hour 24", "2026-10-26T24:00:00Z"],
+    ["second 60", "2026-10-26T23:59:60Z"],
   ])("should refuse %s before doing anything", async (_label, catchUpFrom) => {
     state.stores = [store(1, new Date(NOW.getTime() - 10 * MINUTE))];
 

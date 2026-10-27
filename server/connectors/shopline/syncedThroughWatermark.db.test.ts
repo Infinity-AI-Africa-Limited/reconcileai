@@ -38,7 +38,7 @@ function report(from: Date, to: Date, error?: string): SyncReport {
   };
 }
 
-describe.runIf(localDatabase)("the SHOPLINE catch-up watermark", () => {
+describe.runIf(localDatabase)("when a sync or an operator writes the SHOPLINE catch-up watermark", () => {
   let pool: mysql.Pool;
   let db: MySql2Database;
   // An organisation no real tenant uses, cleaned up after.

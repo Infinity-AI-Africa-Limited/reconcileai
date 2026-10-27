@@ -83,6 +83,7 @@
     "server/connectors/shopline/settlementImportRequest.test.ts",
     "server/connectors/shopline/syncIngestLock.test.ts",
     "server/connectors/shopline/catchUpWalk.test.ts",
+    "server/connectors/shopline/catchUpSeam.db.test.ts",
     "server/connectors/shopline/syncedThroughWatermark.db.test.ts",
     "server/connectors/shopline/inlineExceptionDedupe.db.test.ts",
     "server/controlCompleteness.test.ts",

@@ -711,18 +711,33 @@ The rules now:
   - Further steps run while the poll is under a 60-second budget, which keeps
     it inside the proxy's 100-second limit.
   - A walk cut short resumes on the next poll.
+  - **A step fetches only its own window, but reconciles against the day before
+    it** (`stepReconcileOptions`). Every step except the last holds back its
+    final day's orders, so the next step judges them with their payments in
+    view.
+    - Without this, an order fetched near a step's end and its payment fetched by
+      the next step never shared a reconciliation. Both were raised as unmatched
+      (Greptile, #209).
+    - A poll step reconciles even when it fetched nothing new. Otherwise a
+      held-back order is never matched or raised.
+    - Proven on real MySQL in `catchUpSeam.db.test.ts`.
 - **To re-read data that older code skipped**, run `SHOPLINE scheduled sync`
   manually: target `syncCycle`, with `catch_up_from` set to a UTC instant within
   the last 90 days. `rewindCatchUp` moves every active store's watermark back to
   that instant; it never moves one forward, and leaves never-synced stores
   alone.
-- **Re-reading is safe.** Ingest skips records it already holds, and inline
-  reconciliation no longer raises a second copy of an exception that is still
-  open.
-  - Until 2026-10-27 only file-import runs checked for an open exception. Every
-    unscoped sync that re-read a window filed another copy of each exception
-    still awaiting a person. Production may hold such duplicates: measure before
-    assuming it does not.
+- **Re-reading is safe.** Ingest skips records it already holds. Inline
+  reconciliation never raises an exception that is already raised for the same
+  transaction and category.
+  - **A sync's re-read also respects one a person resolved or dismissed.**
+    Closing an exception leaves its transaction `unmatched`, and a re-read brings
+    no new evidence. Raising it again would undo the decision on every later
+    pass.
+  - **A settlement file that names the order may raise it again.** The file is
+    new evidence; this is unchanged.
+  - Until 2026-10-27 only file-import runs checked at all. Every unscoped sync
+    that re-read a window filed another copy of each exception. Production may
+    hold such duplicates: measure before assuming it does not.
 
 ### 2B.8 Frontend Pages
 

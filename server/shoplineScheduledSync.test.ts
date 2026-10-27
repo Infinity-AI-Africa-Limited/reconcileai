@@ -228,10 +228,10 @@ describe("SHOPLINE triggerManualSync — Input Validation", () => {
  * fell outside every subsequent poll, permanently. The window is now driven by
  * the store's own watermark.
  */
-describe("SHOPLINE catchUpStep", () => {
+describe("when the poll computes its next catch-up step", () => {
   const now = new Date("2026-08-01T12:00:00Z");
 
-  it("resumes from the watermark, with an overlap for the seam", async () => {
+  it("should resume from the watermark, with an overlap for the seam", async () => {
     const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
     const watermark = new Date("2026-08-01T11:40:00Z");
     const { from, to } = catchUpStep(watermark, now);
@@ -240,7 +240,7 @@ describe("SHOPLINE catchUpStep", () => {
     expect(to).toEqual(now);
   });
 
-  it("recovers a record older than the old fixed 15-minute window", async () => {
+  it("should recover a record older than the old fixed 15-minute window", async () => {
     const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
     // Store last synced 3 hours ago; the missed order landed 2 hours ago.
     const watermark = new Date("2026-08-01T09:00:00Z");
@@ -252,14 +252,14 @@ describe("SHOPLINE catchUpStep", () => {
     expect(from.getTime()).toBeLessThan(now.getTime() - 15 * 60 * 1000);
   });
 
-  it("reads the last day when the store has never synced", async () => {
+  it("should read the last day when the store has never synced", async () => {
     const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
     const { from, to } = catchUpStep(null, now);
     expect(from.toISOString()).toBe("2026-07-31T12:00:00.000Z"); // 24h back
     expect(to).toEqual(now);
   });
 
-  it("bounds one step to a day, starting from the watermark rather than from now", async () => {
+  it("should bound one step to a day, starting from the watermark rather than from now", async () => {
     // A long-dark store must not trigger one unbounded scan, but must not lose
     // its history either: until 2026-10-27 this clamped `from` to now - 24h,
     // and everything older was never read. The poll walks such a store forward
@@ -271,7 +271,7 @@ describe("SHOPLINE catchUpStep", () => {
     expect(to.toISOString()).toBe("2026-06-01T23:55:00.000Z");
   });
 
-  it("reads a watermark ahead of this clock as current", async () => {
+  it("should read a watermark ahead of this clock as current", async () => {
     // Another instance's clock skew must not produce a window that ends before it starts.
     const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
     const { from, to } = catchUpStep(new Date("2026-08-01T12:03:00Z"), now);
