@@ -63,6 +63,10 @@ update, which left Railway's `DATABASE_URL` stale.
    - Dispatch `SHOPLINE scheduled sync` with `webhookReconciler`. SHOPLINE deletes a
      subscription after 19 consecutive failed deliveries (§2B.3), so subscriptions may need
      re-registering.
+   - Inspect the Partner Portal's Webhook delivery dashboard after recovery and before any
+     subscription migration. At 2026-10-27 review it showed a 12.281% seven-day failed-
+     delivery rate. This is a risk signal, not proof of cause; validate a clean post-recovery
+     window with controlled development-store events before changing subscriptions.
    - Dispatch `syncCycle` next. It resumes from each store's watermark, capped at 24h.
    - If any SHOPLINE store took orders or payments more than 24h before recovery, they
      need a backfill that no current handler can do. Raise it rather than assume the safety
@@ -989,11 +993,14 @@ Containment is structural:
 > reviewer trying to leave.
 
 ### 2B.14 SHOPLINE platform notices — reviewed 2026-10-27
-
 The Partner Portal's notification page
 (https://developer.myshopline.com/notify/list) carries SHOPLINE's platform
-changes. Each one below was checked against the connector. None required a code
-change. Re-check this table when a new notice arrives, and add a row for it.
+changes. Each one below was checked against the connector and, on 2026-10-27,
+against the live Partner Portal configuration. The notices did not require an
+immediate source-code change, but the portal review found **legacy existing
+webhook subscriptions**. Do not confuse current code that creates versioned
+subscriptions with proof that already-created portal subscriptions have migrated.
+Re-check this table when a new notice arrives, and add a row for it.
 
 **What the connector depends on**, the surface a notice has to touch to matter:
 
@@ -1002,7 +1009,19 @@ change. Re-check this table when a new notice arrives, and add a row for it.
   Payments `/payments/store/{transactions,payouts,balance_transactions,balance}.json`.
 - **OAuth token create/refresh**, which are unversioned. Only `accessToken`,
   `expireTime` and `scope` are read.
-- **Webhook subscriptions**, created with `api_version: SHOPLINE_API_VERSION`.
+- **Webhook subscriptions**, which the current connector creates with
+  `api_version: SHOPLINE_API_VERSION`.
+  - **Live-portal exception:** the existing subscription inventory is presented by
+    SHOPLINE's pre-`v20240601` legacy page, which explicitly says configuration
+    should move to OpenAPI for compatibility. It lists application lifecycle,
+    billing, order, payment and refund topics but provides no selected event-
+    version field. Treat it as a controlled migration requirement, not an
+    emergency delete/recreate task.
+  - **Freeze condition:** the Portal's seven-day delivery dashboard reported a
+    12.281% failed-delivery rate during the active TiDB authentication incident.
+    Do not create, delete or alter subscriptions until the database recovery exit
+    check passes and a clean controlled development-store rehearsal has proved
+    idempotent delivery and processing.
 - `sl_connector_stores.apiVersion` is stored but **never used to build a
   request**. Do not start reading it without migrating every row.
 - **Nothing on storefronts:** no theme app extension, script tag or app embed,
@@ -1017,6 +1036,7 @@ change. Re-check this table when a new notice arrives, and add a row for it.
 | Storefront accessibility, by 2026-10-30 | **No** | ReconcileAI renders nothing on storefronts |
 | App extensions deletable only via CLI or support ticket | **No** | The app has no extensions |
 | Theme CLI ≥ 1.3.2 | **No** | No theme development |
+| Legacy application webhook configuration page | **Controlled follow-up** | Existing subscriptions are shown in SHOPLINE's pre-`v20240601` legacy interface; inventory/minimize topics, create supported OpenAPI subscriptions with an explicit supported event version, prove delivery in the development store, then retire only after an approved overlap and reconciliation window. Freeze while the TiDB runtime incident remains open. |
 
 ---
 
