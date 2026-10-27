@@ -6,7 +6,8 @@
  * sync cycles (batches 810008/810009/810010/810012, 02:44:53 → 03:40:02).
  *
  * Re-presentation of the same order is the NORMAL path here, not an edge case:
- *   - catchUpWindow deliberately re-reads the 5-minute watermark overlap
+ *   - catchUpStep deliberately re-reads the 5-minute watermark overlap, at
+ *     every step of a catch-up walk
  *   - a webhook realtime sync and a scheduled cycle can overlap by seconds
  *   - the cron fired from both GitHub repos against one endpoint
  *

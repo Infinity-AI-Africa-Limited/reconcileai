@@ -581,9 +581,45 @@ deliveries (SHOPLINE explicitly does not guarantee webhook delivery):
 
 | Handler | Interval | Purpose |
 |---|---|---|
-| 15-minute polling | Every 15 min | Catch-up for missed webhooks, since last watermark |
-| Daily batch sync | Once daily | Full reconciliation run across all active stores |
+| 15-minute polling | Every 15 min | Catch-up from each store's watermark to now, walking a long gap forward a day per step |
+| Daily batch sync | Once daily | Re-read of the last 24h for every active store. **Not** an outage catch-up |
 | Webhook subscription reconciler | Every 6 hours | Verify webhook subscriptions still active (SHOPLINE deletes after 19 failures) |
+
+**The catch-up watermark is `sl_connector_stores.syncedThroughAt`, not
+`lastSyncAt` (since 2026-10-27, migration 0118).** `lastSyncAt` is "the last sync
+that succeeded" and stays the display value.
+
+Until this change every success also wrote `lastSyncAt` as the wall clock, and
+the poll used it as "fetched through here". On top of that, the poll and the
+daily batch never read further back than 24 hours. So after an outage longer
+than a day, anything older than a day was never fetched:
+- every 24h sync (realtime, daily batch, "Sync Now") jumped the watermark past
+  the gap;
+- and the poll could not reach back for it anyway.
+
+The rules now:
+- **The watermark advances only across a window that starts at or before it,
+  and never backwards.** It is advanced by `recordSyncOutcome`, the only code
+  that moves it forward. Those 24h syncs still sync and reconcile; they just
+  cannot hide a gap.
+- **The poll walks a gap in steps of at most a day, each overlapping the last
+  by 5 minutes.**
+  - Every store's first step always runs.
+  - Further steps run while the poll is under a 60-second budget, which keeps
+    it inside the proxy's 100-second limit.
+  - A walk cut short resumes on the next poll.
+- **To re-read data that older code skipped**, run `SHOPLINE scheduled sync`
+  manually: target `syncCycle`, with `catch_up_from` set to a UTC instant within
+  the last 90 days. `rewindCatchUp` moves every active store's watermark back to
+  that instant; it never moves one forward, and leaves never-synced stores
+  alone.
+- **Re-reading is safe.** Ingest skips records it already holds, and inline
+  reconciliation no longer raises a second copy of an exception that is still
+  open.
+  - Until 2026-10-27 only file-import runs checked for an open exception. Every
+    unscoped sync that re-read a window filed another copy of each exception
+    still awaiting a person. Production may hold such duplicates: measure before
+    assuming it does not.
 
 ### 2B.8 Frontend Pages
 

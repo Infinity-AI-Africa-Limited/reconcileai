@@ -17,7 +17,7 @@
  *   - The scheduled polling job (every 15 min)
  *   - Manual "Sync Now" from the merchant dashboard
  */
-import { and, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, eq, gt, gte, inArray, isNull, lte, or } from "drizzle-orm";
 import { getDb, sanitizeRef, type DbExecutor } from "../../db";
 import {
   insertTransactionsWithExecutor,
@@ -127,18 +127,93 @@ async function persistSyncOutcome(slStoreId: number, report: SyncReport): Promis
   try {
     const db = await getDb();
     if (!db) return;
-    const now = new Date();
-    await db
-      .update(slConnectorStores)
-      .set(
-        report.success
-          ? { lastSyncAt: now, lastSyncAttemptAt: now, lastSyncError: null }
-          : { lastSyncAttemptAt: now, lastSyncError: (report.error ?? "unknown error").slice(0, 2000) },
-      )
-      .where(eq(slConnectorStores.id, slStoreId));
+    await recordSyncOutcome(db, slStoreId, report, new Date());
   } catch (err) {
     console.error(`[SHOPLINE] Failed to record sync outcome for store=${slStoreId}:`, loggableError(err));
   }
+}
+
+/**
+ * Write a sync's outcome to its store row: the attempt, and on success the
+ * catch-up watermark (`syncedThroughAt`).
+ *
+ * The watermark moves to the window's end ONLY when the window starts at or
+ * before it. Otherwise there is an unread gap between the two, and moving past
+ * it would hide the gap for good. That is what happened while `lastSyncAt` was
+ * the watermark: every success wrote the wall clock there. A realtime sync, the
+ * daily batch or "Sync Now", each reading the last 24 hours, therefore made
+ * everything older than a day unreachable once a store had been dark that long.
+ * Those windows still sync and reconcile; they just leave the watermark where
+ * it is, and the 15-minute poll walks the gap.
+ *
+ * - It never moves backwards. A slow cycle that finishes after a newer one
+ *   must not reopen ground the newer one covered.
+ * - It takes the window's END, not the clock at completion. A cycle that ran for
+ *   minutes would otherwise claim records that arrived while it ran.
+ * - Both conditions sit in the UPDATE's WHERE, so two cycles finishing together
+ *   cannot interleave a read and a write.
+ * - A store that has never synced takes its first successful window's end as
+ *   its starting point. History before install is the backfill's job
+ *   (`runHistoricalBackfill`).
+ */
+export async function recordSyncOutcome(
+  db: DbExecutor,
+  slStoreId: number,
+  report: SyncReport,
+  now: Date,
+): Promise<void> {
+  if (!report.success) {
+    await db
+      .update(slConnectorStores)
+      .set({ lastSyncAttemptAt: now, lastSyncError: (report.error ?? "unknown error").slice(0, 2000) })
+      .where(eq(slConnectorStores.id, slStoreId));
+    return;
+  }
+  await db
+    .update(slConnectorStores)
+    .set({ lastSyncAt: now, lastSyncAttemptAt: now, lastSyncError: null })
+    .where(eq(slConnectorStores.id, slStoreId));
+  await db
+    .update(slConnectorStores)
+    .set({ syncedThroughAt: report.window.to })
+    .where(
+      and(
+        eq(slConnectorStores.id, slStoreId),
+        or(
+          isNull(slConnectorStores.syncedThroughAt),
+          and(
+            lte(slConnectorStores.syncedThroughAt, report.window.to),
+            gte(slConnectorStores.syncedThroughAt, report.window.from),
+          ),
+        ),
+      ),
+    );
+}
+
+/**
+ * Move every active store's catch-up watermark back to `to`, so the poll
+ * re-reads from there. This is the only write that moves it backwards. It is
+ * an operator's lever, reached through `shoplineSyncCycle?catchUpFrom=`.
+ *
+ * It exists for data that a sync running before the watermark rule existed
+ * skipped. Production recovering from an outage on older code is exactly that:
+ * the old code wrote the clock as the watermark, so the outage's gap is lost
+ * to it until someone points the poll back at its start.
+ *
+ * - Backwards only: a store already behind `to` is left where it is.
+ * - A store that has never synced keeps NULL (its history is the install
+ *   backfill's job).
+ * - Re-reading is safe. Ingest skips records it already holds, and
+ *   reconciliation does not raise an exception that is already open.
+ *
+ * Returns how many stores moved.
+ */
+export async function rewindCatchUp(db: DbExecutor, to: Date): Promise<number> {
+  const result = await db
+    .update(slConnectorStores)
+    .set({ syncedThroughAt: to })
+    .where(and(eq(slConnectorStores.status, "active"), gt(slConnectorStores.syncedThroughAt, to)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 /**
@@ -739,8 +814,11 @@ export async function resolveChannelIds(
  * cover a fraction of one provider's settlements: reconciling every unmatched
  * order in the window flags orders whose evidence simply has not arrived, and
  * flags them again on every later import. With a scope, only the named orders
- * (on both legs) are reconciled, and an exception already unresolved for the
- * same transaction and category is not raised a second time.
+ * (on both legs) are reconciled.
+ *
+ * With or without a scope, an exception already unresolved for the same
+ * transaction and category is not raised a second time (see
+ * `runReconciliationOnPersistedData`).
  */
 export interface ReconciliationScope {
   /**
@@ -975,7 +1053,17 @@ export async function runReconciliationOnPersistedData(
     );
     raised = raised.filter((ex) => !tooRecent.has(ex.transactionId));
   }
-  if (scope && raised.length > 0) {
+  // Never raise a second copy of an exception a person has not dealt with yet.
+  //
+  // This once applied only to scoped (file-import) passes. Unscoped syncs
+  // re-read rows they have read before, all the time:
+  //   - the poll re-reads its seam overlap, at every step of a catch-up walk;
+  //   - the realtime sync, the daily batch and "Sync Now" re-read the whole
+  //     last 24 hours.
+  // So every one of those passes filed another exception for every row still
+  // unmatched. A resolved one is a person's decision; a row still unmatched
+  // after it is raised again.
+  if (raised.length > 0) {
     const unresolved = await unresolvedExceptionKeys(
       db,
       organizationId,
