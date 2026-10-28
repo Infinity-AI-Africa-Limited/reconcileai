@@ -155,6 +155,7 @@
     "server/webhookTenancy.db.test.ts",
     "server/outboundDestination.test.ts",
     "server/webhookDestination.db.test.ts",
+    "server/woodcoreSync.test.ts",
     "tools/publicPolicyClaims.test.ts",
     "tools/shopifyAppHomeHandoff.test.ts"
   ]

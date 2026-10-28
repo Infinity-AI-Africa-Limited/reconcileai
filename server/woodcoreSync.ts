@@ -9,7 +9,9 @@
  * Safety:
  *  - Readability is probed BEFORE truncating, so tables the `reconcileai` user
  *    cannot SELECT (the two acc_to_gl_journal_entry* bridge tables) are skipped
- *    and keep their existing mirror data instead of being wiped.
+ *    and keep their existing mirror data instead of being wiped. Any other
+ *    probe failure (Woodcore unreachable, login refused) is an error, not a
+ *    skip, and also leaves the mirror as it was.
  *  - Only columns that actually exist on the live table are copied (SHOW COLUMNS),
  *    so a renamed/absent Fineract column can't abort an entire table.
  *
@@ -83,6 +85,30 @@ function getTidbPool(): mysql.Pool {
   return tidbPool;
 }
 
+/**
+ * The Woodcore errors that mean "this table is not ours to read", per table.
+ * The two acc_to_gl_journal_entry* bridge tables answer this way today.
+ */
+const TABLE_NOT_READABLE = new Set([
+  "ER_TABLEACCESS_DENIED_ERROR",
+  "ER_COLUMNACCESS_DENIED_ERROR",
+  "ER_NO_SUCH_TABLE",
+]);
+
+/**
+ * What a failed probe means for its table.
+ *
+ * Only a refusal for that table, or a table that does not exist, is a skip.
+ * Anything else is an error: an unreachable Woodcore host, a refused login, or
+ * a host the grant does not cover. Until 2026-10-28 every probe failure was a
+ * skip, so a Woodcore that could not be reached showed eleven skipped tables,
+ * no error, and a mirror that was not refreshed at all.
+ */
+export function probeFailureStatus(error: unknown): "skipped" | "error" {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && TABLE_NOT_READABLE.has(code) ? "skipped" : "error";
+}
+
 async function liveColumns(live: string): Promise<Set<string>> {
   const wc = getWoodcorePool();
   const [rows] = await wc.query<mysql.RowDataPacket[]>(`SHOW COLUMNS FROM \`${live}\``);
@@ -105,8 +131,8 @@ async function syncOne(spec: TableSpec): Promise<TableResult> {
     // Confirm we can actually SELECT (column visibility != row SELECT privilege).
     await wc.query(`SELECT ${present.map((c) => `\`${c}\``).join(",")} FROM \`${spec.live}\` LIMIT 1`);
   } catch (e) {
-    // Permission-denied (bridge tables) or missing table: skip WITHOUT truncating.
-    return { mirror: spec.mirror, status: "skipped", copied: 0, reason: errorSummary(e) };
+    // Never truncate after a failed probe: the mirror keeps its existing data.
+    return { mirror: spec.mirror, status: probeFailureStatus(e), copied: 0, reason: errorSummary(e) };
   }
 
   const colSql = present.map((c) => `\`${c}\``).join(",");
