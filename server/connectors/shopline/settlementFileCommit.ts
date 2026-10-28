@@ -152,6 +152,9 @@ export async function commitShoplineSettlementFile(
         // Only the orders this file speaks to: an order whose evidence is in a
         // file not yet imported must not be flagged for its absence.
         { orderRefs: [...new Set(fresh.map((row) => row.transactionRef as string))] },
+        // Under the store lock, read what a sync reconciling just before
+        // committed; a plain read on TiDB sees the transaction's start snapshot.
+        { lockReads: true },
       );
       matchedCount = result.matchedCount;
       exceptionCount = result.exceptionCount;

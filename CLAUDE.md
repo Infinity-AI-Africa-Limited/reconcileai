@@ -394,6 +394,20 @@ database) before their "already recorded?" check, and read under it. Two writers
 can no longer both pass the check and record one payment twice. No Redis is
 needed for this: the lock serialises every process and instance.
 
+**Reconciliation takes the same lock (since 2026-10-28).** Until then the API
+sync reconciled after its ingest lock was released, with plain reads. Two passes
+for one store could each read "not raised yet" and both file the same exception
+(Greptile, #209). Examples: a realtime sync beside the poll, or a sync beside a
+settlement file.
+
+Now every SHOPLINE pass goes through `reconcileStoreUnderLock`: one at a time
+per store, with locking reads.
+- **The lock is what `reconcileRace.db.test.ts` proves.** Without it, round 0
+  files two copies of one exception.
+- **The locking reads are for TiDB**, whose plain reads use the transaction's
+  start snapshot. MySQL, which CI runs, passes with or without them, so that test
+  cannot prove them.
+
 > ⚠️ **Until 2026-09-28 the dedupe claim was false.** The guard compared the
 > file's raw reference with the sanitised stored one (`#1001` is stored as
 > `1001`), so every re-upload of such a file was inserted again; and it keyed on
@@ -735,6 +749,8 @@ The rules now:
     pass.
   - **A settlement file that names the order may raise it again.** The file is
     new evidence; this is unchanged.
+  - **Concurrent passes are serialised per store** (`reconcileStoreUnderLock`,
+    §2C), so two of them cannot both pass the "already raised?" check.
   - Until 2026-10-27 only file-import runs checked at all. Every unscoped sync
     that re-read a window filed another copy of each exception. Production may
     hold such duplicates: measure before assuming it does not.

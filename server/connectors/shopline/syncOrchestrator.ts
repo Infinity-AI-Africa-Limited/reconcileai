@@ -658,18 +658,22 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
         ...(brokenPairRefs.length > 0 ? { excludeOrderRefs: brokenPairRefs } : {}),
         ...(opts.holdOrdersFrom ? { flag: { orderSideBefore: opts.holdOrdersFrom } } : {}),
       };
-      const result = await runReconciliationOnPersistedData(
-        db,
-        opts.organizationId,
+      const result = await reconcileStoreUnderLock(db, {
+        organizationId: opts.organizationId,
+        storeId: opts.slStoreId,
         ordersChannelId,
         paymentsChannelId,
-        opts.reconcileFrom ?? from,
+        from: opts.reconcileFrom ?? from,
         to,
-        store.currency ?? "USD",
-        Object.keys(scope).length > 0 ? scope : undefined,
-      );
-      matchedCount = result.matchedCount;
-      exceptionCount = result.exceptionCount;
+        currency: store.currency ?? "USD",
+        scope: Object.keys(scope).length > 0 ? scope : undefined,
+      });
+      if (result) {
+        matchedCount = result.matchedCount;
+        exceptionCount = result.exceptionCount;
+      } else {
+        console.info(`[SHOPLINE] store=${storeHandle} stopped being active before reconciliation; nothing reconciled`);
+      }
     }
 
     // Step 6 (lastSyncAt) is handled by persistSyncOutcome in the runSyncCycle
@@ -959,7 +963,7 @@ export function withShopifyRefundEvent<T extends { shopifyRefundId: string; rawD
 
 async function selectUnmatchedLeg(
   db: DbExecutor,
-  params: { organizationId: number; channelId: number; from: Date; to: Date; orderRefs?: string[] },
+  params: { organizationId: number; channelId: number; from: Date; to: Date; orderRefs?: string[]; lock?: boolean },
 ): Promise<Array<typeof transactions.$inferSelect>> {
   const conditions = (refs?: string[]) =>
     and(
@@ -970,12 +974,15 @@ async function selectUnmatchedLeg(
       lte(transactions.transactionDate, params.to),
       refs ? inArray(transactions.transactionRef, refs) : undefined,
     );
-  if (!params.orderRefs) return db.select().from(transactions).where(conditions());
+  const read = (refs?: string[]) => {
+    const query = db.select().from(transactions).where(conditions(refs));
+    return params.lock ? query.for("update") : query;
+  };
+  if (!params.orderRefs) return read();
 
   const rows: Array<typeof transactions.$inferSelect> = [];
   for (let i = 0; i < params.orderRefs.length; i += SCOPE_LOOKUP_CHUNK) {
-    const chunk = params.orderRefs.slice(i, i + SCOPE_LOOKUP_CHUNK);
-    rows.push(...(await db.select().from(transactions).where(conditions(chunk))));
+    rows.push(...(await read(params.orderRefs.slice(i, i + SCOPE_LOOKUP_CHUNK))));
   }
   return rows;
 }
@@ -986,11 +993,12 @@ async function exceptionKeys(
   organizationId: number,
   transactionIds: number[],
   statuses: readonly (typeof ANY_EXCEPTION_STATUS)[number][],
+  lock = false,
 ): Promise<Set<string>> {
   const keys = new Set<string>();
   for (let i = 0; i < transactionIds.length; i += SCOPE_LOOKUP_CHUNK) {
     const chunk = transactionIds.slice(i, i + SCOPE_LOOKUP_CHUNK);
-    const open = await db
+    const query = db
       .select({ transactionId: exceptions.transactionId, subCategory: exceptions.subCategory })
       .from(exceptions)
       .where(
@@ -1000,13 +1008,20 @@ async function exceptionKeys(
           inArray(exceptions.status, [...statuses]),
         ),
       );
-    for (const row of open) keys.add(`${row.transactionId}::${row.subCategory ?? ""}`);
+    const found = lock ? await query.for("update") : await query;
+    for (const row of found) keys.add(`${row.transactionId}::${row.subCategory ?? ""}`);
   }
   return keys;
 }
 
 /**
  * Run the retail reconciliation engine on persisted transactions for the given window.
+ *
+ * `lockReads`: read the rows to match, and the exceptions already raised, as
+ * locking reads. Pass it whenever this runs under the store's ingest lock (see
+ * `reconcileStoreUnderLock`). TiDB answers a plain read from the snapshot taken
+ * when the transaction began, which can be before the lock was granted. Such a
+ * read misses what the pass that held the lock just committed.
  */
 export async function runReconciliationOnPersistedData(
   db: DbExecutor,
@@ -1017,6 +1032,7 @@ export async function runReconciliationOnPersistedData(
   to: Date,
   currency: string,
   scope?: ReconciliationScope,
+  { lockReads = false }: { lockReads?: boolean } = {},
 ): Promise<{ matchedCount: number; exceptionCount: number }> {
   const orderRefs = scope?.orderRefs
     ? [...new Set(scope.orderRefs.filter(Boolean))]
@@ -1033,10 +1049,10 @@ export async function runReconciliationOnPersistedData(
 
   // Fetch persisted transactions for the window
   const sourceRows = (
-    await selectUnmatchedLeg(db, { organizationId, channelId: ordersChannelId, from, to, orderRefs })
+    await selectUnmatchedLeg(db, { organizationId, channelId: ordersChannelId, from, to, orderRefs, lock: lockReads })
   ).filter(usable);
   const targetRows = (
-    await selectUnmatchedLeg(db, { organizationId, channelId: paymentsChannelId, from, to, orderRefs })
+    await selectUnmatchedLeg(db, { organizationId, channelId: paymentsChannelId, from, to, orderRefs, lock: lockReads })
   ).filter(usable);
 
   if (sourceRows.length === 0 && targetRows.length === 0) {
@@ -1103,6 +1119,7 @@ export async function runReconciliationOnPersistedData(
       organizationId,
       [...new Set(raised.map((ex) => ex.transactionId))],
       orderRefs ? UNRESOLVED_EXCEPTION_STATUSES : ANY_EXCEPTION_STATUS,
+      lockReads,
     );
     raised = raised.filter((ex) => !already.has(`${ex.transactionId}::${ex.category}`));
   }
@@ -1113,6 +1130,49 @@ export async function runReconciliationOnPersistedData(
     matchedCount: result.matches.length,
     exceptionCount: raised.length,
   };
+}
+
+/**
+ * Reconcile one store's persisted rows under its ingest lock: one
+ * reconciliation at a time per store, every read a current one.
+ *
+ * A pass checks "already raised?" before raising, and matches the rows it read
+ * as unmatched. Until Greptile's review of #209, the API sync did this with no
+ * lock: its ingest lock was released before it reconciled. So two passes for
+ * one store running together could both read before either wrote, and file the
+ * same exception twice: a realtime sync beside the poll, or a sync beside a
+ * settlement file (which already reconciled under the lock). Now every SHOPLINE
+ * pass takes the same lock, ingest's included, and reads with `lockReads`.
+ *
+ * Returns null, having reconciled nothing, when the store is no longer active.
+ */
+export async function reconcileStoreUnderLock(
+  db: Db,
+  params: {
+    organizationId: number;
+    storeId: number;
+    ordersChannelId: number;
+    paymentsChannelId: number;
+    from: Date;
+    to: Date;
+    currency: string;
+    scope?: ReconciliationScope;
+  },
+): Promise<{ matchedCount: number; exceptionCount: number } | null> {
+  return db.transaction(async (tx) => {
+    if (!(await lockShoplineStoreForIngest(tx, params.organizationId, params.storeId))) return null;
+    return runReconciliationOnPersistedData(
+      tx,
+      params.organizationId,
+      params.ordersChannelId,
+      params.paymentsChannelId,
+      params.from,
+      params.to,
+      params.currency,
+      params.scope,
+      { lockReads: true },
+    );
+  });
 }
 
 function errorReport(
