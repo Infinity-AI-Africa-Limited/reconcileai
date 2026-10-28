@@ -33,6 +33,9 @@ is green.
   writes through a new app-database connection, which the database is refusing. Only the
   server log would show that failure; the workflow cannot. Treat the mirror as stale since
   2026-10-26.
+  - Fixed by the change that makes the workflow wait for the sync's result (branch
+    `claude/woodcore-sync-reports-failures`). Once it is merged, this bullet is no longer
+    true, and the job goes red every day until the database recovers.
 - **The SHOPLINE safety net cannot backfill more than 24 hours.** The catch-up window is
   capped at 24h (`MAX_CATCHUP_MS` in `server/connectors/shopline/scheduledSync.ts`), and the
   daily batch and "Sync Now" are fixed 24h windows too. The comment there that "the daily
@@ -67,7 +70,11 @@ update, which left Railway's `DATABASE_URL` stale.
    - If any SHOPLINE store took orders or payments more than 24h before recovery, they
      need a backfill that no current handler can do. Raise it rather than assume the safety
      net covered it.
-   - Run the Woodcore mirror, then confirm `GET /api/woodcore/sync` reports no error.
+   - Run `Woodcore mirror sync`.
+     - Once the change above is merged, a green run is the check.
+     - Until then, a green run proves nothing. Read `GET /api/woodcore/sync` until it
+       shows `running: false` with a `finishedAt` after the dispatch, `error: null`, and
+       no table whose `status` is `"error"`. `skipped` is normal for the two bridge tables.
 
 **Freeze until the exit check passes:**
 - No database password rotation, schema change, manual migration, reset or restore, or
@@ -197,6 +204,25 @@ WOODCORE_DB_PASSWORD=<set in environment>
 - `client/src/pages/WoodcorePOC.tsx` — Frontend POC dashboard
 - `server/routers.ts` — `woodcore.*` tRPC procedures (search for `woodcore: router({`)
 - The **connector** (separate from the POC engine) lives in `server/connectors/` and `server/routers/woodcoreConnector.ts` — see the model below.
+- `server/woodcoreSync.ts` — the live → `wc_*` mirror refresh, run daily by `.github/workflows/woodcore-sync.yml`
+
+**The mirror sync's job is green only when the sync worked (since 2026-10-28).**
+`POST /api/woodcore/sync` answers 202 and runs the sync in the background, so the job
+(`.github/scripts/woodcore-sync.sh`) polls `GET /api/woodcore/sync` until that run ends.
+- **It fails when:**
+  - the run reports an `error`, or any table has `status: "error"`;
+  - the run vanishes from the server (a restart loses the in-memory state);
+  - the status endpoint stops answering; or
+  - the run outlasts 50 minutes.
+- **A `skipped` table is only a warning.** It means Woodcore refused that one table, or
+  the table does not exist, and the mirror keeps its old rows.
+  - Any other probe failure, such as an unreachable host or a refused login, is an
+    `error` (`probeFailureStatus`).
+  - Until this change every probe failure was a skip, so a Woodcore that could not be
+    reached looked like a quiet day.
+- **The logs are public, and the job prints only names, statuses, counts and
+  `database error (CODE)` reasons.** A connection message can name a host.
+- `woodcoreSync.test.ts` beside the script runs the real script against a fake server.
 
 ### Connector-as-Onboarding-Channel Model (applies to ALL CBS connectors)
 

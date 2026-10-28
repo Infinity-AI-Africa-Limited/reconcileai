@@ -19,6 +19,7 @@
   "include": [],
   "files": [
     ".github/scripts/startTestMysql.test.ts",
+    ".github/scripts/woodcoreSync.test.ts",
     "scripts/bootstrapAdminGuard.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
     "client/src/lib/exceptionWorkflowPresentation.test.ts",
