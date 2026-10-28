@@ -33,9 +33,9 @@ is green.
   writes through a new app-database connection, which the database is refusing. Only the
   server log would show that failure; the workflow cannot. Treat the mirror as stale since
   2026-10-26.
-  - Fixed by the change that makes the workflow wait for the sync's result (branch
-    `claude/woodcore-sync-reports-failures`). Once it is merged, this bullet is no longer
-    true, and the job goes red every day until the database recovers.
+  - Fixed by #211, which makes the workflow wait for the sync's result. Once it is merged,
+    this bullet is no longer true, and the job goes red every day until the database
+    recovers.
 - **The SHOPLINE safety net cannot backfill more than 24 hours.** The catch-up window is
   capped at 24h (`MAX_CATCHUP_MS` in `server/connectors/shopline/scheduledSync.ts`), and the
   daily batch and "Sync Now" are fixed 24h windows too. The comment there that "the daily
@@ -71,7 +71,7 @@ update, which left Railway's `DATABASE_URL` stale.
      need a backfill that no current handler can do. Raise it rather than assume the safety
      net covered it.
    - Run `Woodcore mirror sync`.
-     - Once the change above is merged, a green run is the check.
+     - Once #211 is merged, a green run is the check.
      - Until then, a green run proves nothing. Read `GET /api/woodcore/sync` until it
        shows `running: false` with a `finishedAt` after the dispatch, `error: null`, and
        no table whose `status` is `"error"`. `skipped` is normal for the two bridge tables.
