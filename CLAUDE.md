@@ -2194,6 +2194,13 @@ sandbox.
   without the wait. `server/storageUploadGate.test.ts` fails CI when other
   code names `storagePut`/`storagePutPrivate` or loads the S3 SDK; a file that
   legitimately must is listed there with its reason.
+- **Stack frames go to the server log, never into a response.** A response carries
+  `errorSummary(err)` and, where a caller may publish it, an id that the log line also
+  carries (`failScheduledRun` in `server/connectors/shopline/scheduledSync.ts`). The
+  scheduler workflows print response bodies into this public repository's Actions logs,
+  and until 2026-10-28 the SHOPLINE handlers' 500s published bundle paths and dependency
+  versions there. `server/stackFramesStayInLogs.test.ts` fails CI on any `stackFrames(...)`
+  call or `.stack` read outside a `console.*` call.
 - **Split routers** when any router file exceeds 150 lines — use `server/routers/<feature>.ts`
 - **Vitest tests required** for every new procedure and engine function
 - **Never use `&&` for conditional rendering in JSX** — use a ternary with an
