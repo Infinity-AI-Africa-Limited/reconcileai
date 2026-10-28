@@ -19,6 +19,7 @@
   "include": [],
   "files": [
     ".github/scripts/startTestMysql.test.ts",
+    ".github/scripts/woodcoreSync.test.ts",
     "scripts/bootstrapAdminGuard.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
     "client/src/lib/exceptionWorkflowPresentation.test.ts",
@@ -155,6 +156,7 @@
     "server/webhookTenancy.db.test.ts",
     "server/outboundDestination.test.ts",
     "server/webhookDestination.db.test.ts",
+    "server/woodcoreSync.test.ts",
     "tools/publicPolicyClaims.test.ts",
     "tools/shopifyAppHomeHandoff.test.ts"
   ]
