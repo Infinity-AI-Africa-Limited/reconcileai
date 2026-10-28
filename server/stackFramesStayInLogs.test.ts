@@ -44,27 +44,74 @@ function insideConsoleCall(node: ts.Node): boolean {
   return false;
 }
 
-function namesStackFrames(node: ts.CallExpression): boolean {
-  const callee = node.expression;
-  if (ts.isIdentifier(callee)) return callee.text === "stackFrames";
-  return ts.isPropertyAccessExpression(callee) && callee.name.text === "stackFrames";
+/**
+ * The key a node reads, when it is written out: `x.key`, `x["key"]`, or a
+ * destructuring `{ key }` / `{ key: name }`.
+ */
+function keyRead(node: ts.Node): string | undefined {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)) {
+    return node.argumentExpression.text;
+  }
+  if (ts.isBindingElement(node) && ts.isObjectBindingPattern(node.parent)) {
+    const key = node.propertyName ?? node.name;
+    if (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) return key.text;
+  }
+  return undefined;
+}
+
+/**
+ * Every local name `stackFrames` goes by in a file: its own, and any it is
+ * imported or destructured under (`import { stackFrames as sf }`,
+ * `const { stackFrames: sf } = await import(...)`).
+ */
+function stackFramesNames(source: ts.SourceFile): Set<string> {
+  const names = new Set(["stackFrames"]);
+  const visit = (node: ts.Node) => {
+    if (ts.isImportSpecifier(node) && (node.propertyName ?? node.name).text === "stackFrames") {
+      names.add(node.name.text);
+    }
+    if (ts.isBindingElement(node) && keyRead(node) === "stackFrames" && ts.isIdentifier(node.name)) {
+      names.add(node.name.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  return names;
+}
+
+/** An identifier that USES one of those names, rather than declaring it or naming a property. */
+function usesName(node: ts.Identifier, names: Set<string>): boolean {
+  if (!names.has(node.text)) return false;
+  const parent = node.parent;
+  if (ts.isImportSpecifier(parent)) return false;
+  if (ts.isBindingElement(parent)) return false;
+  if (ts.isFunctionDeclaration(parent) && parent.name === node) return false;
+  // `x.stackFrames` is judged as the whole access, once.
+  if (ts.isPropertyAccessExpression(parent) && parent.name === node) return false;
+  if (ts.isPropertyAssignment(parent) && parent.name === node) return false;
+  return true;
 }
 
 /** Lines in `text` that build stack frames, or read a stack, outside a console call. */
 function stacksOutsideLogs(file: string, text: string): number[] {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true);
-  const lines: number[] = [];
+  const names = stackFramesNames(source);
+  const lines = new Set<number>();
   const visit = (node: ts.Node) => {
+    const key = keyRead(node);
     const handlesStack =
-      (ts.isCallExpression(node) && namesStackFrames(node)) ||
-      (ts.isPropertyAccessExpression(node) && node.name.text === "stack");
+      key === "stack" ||
+      // A namespace access, `t.stackFrames` or `t["stackFrames"]`. Destructuring it is an import.
+      (key === "stackFrames" && !ts.isBindingElement(node)) ||
+      (ts.isIdentifier(node) && usesName(node, names));
     if (handlesStack && !insideConsoleCall(node)) {
-      lines.push(source.getLineAndCharacterOfPosition(node.getStart()).line + 1);
+      lines.add(source.getLineAndCharacterOfPosition(node.getStart()).line + 1);
     }
     ts.forEachChild(node, visit);
   };
   visit(source);
-  return lines;
+  return [...lines];
 }
 
 function serverSources(dir: string): string[] {
@@ -83,6 +130,18 @@ describe("when the scanner reads a file", () => {
     ["frames kept in a variable", "const frames = stackFrames(err);\nconsole.error('failed', { frames });"],
     ["frames through a namespace", "import * as t from './errorText';\nres.json({ frames: t.stackFrames(err) });"],
     ["a raw stack in a response", "res.json({ stack: (err as Error).stack });"],
+    ["a stack read with brackets", "res.json({ stack: err['stack'] });"],
+    ["a stack read by destructuring", "const { stack } = err as Error;\nres.json({ stack });"],
+    ["a stack destructured under another name", "const { stack: trace } = err as Error;\nres.json({ trace });"],
+    [
+      "frames through a renamed import",
+      "import { stackFrames as frames } from './errorText';\nres.json({ f: frames(err) });",
+    ],
+    [
+      "frames through a renamed dynamic import",
+      "const { stackFrames: sf } = await import('./errorText');\nres.json({ f: sf(err) });",
+    ],
+    ["frames passed on as a function", "res.json({ f: errors.map(stackFrames) });"],
     [
       "frames in a callback handed to a log call",
       "console.error('x', () => res.json({ frames: stackFrames(err) }));",
@@ -95,6 +154,11 @@ describe("when the scanner reads a file", () => {
     ["frames in a log call", "console.error('failed', { ...loggableError(err), frames: stackFrames(err) });"],
     ["frames on a later line of a log call", "console.warn(\n  'failed',\n  {\n    frames: stackFrames(err),\n  },\n);"],
     ["a raw stack in a log call", "console.error(err.stack);"],
+    [
+      "a renamed import used only in a log call",
+      "import { stackFrames as sf } from './errorText';\nconsole.error('x', { frames: sf(err) });",
+    ],
+    ["an import of it on its own", "import { loggableError } from './dbErrors';\nimport { stackFrames } from './errorText';"],
     ["a mention in a comment or a string", "// stackFrames(err) is not called here\nconst s = 'err.stack';"],
   ])("should allow %s", (_label, text) => {
     expect(stacksOutsideLogs("fixture.ts", text)).toEqual([]);
