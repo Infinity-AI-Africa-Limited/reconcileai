@@ -87,6 +87,7 @@ import {
   webhooks,
 } from "../../../drizzle/schema";
 import {
+  slConnectorBillingCharges,
   slConnectorGdprRequests,
   slConnectorStores,
   slConnectorSubscriptions,
@@ -1074,7 +1075,10 @@ async function eraseTenantWorkspace(
       wcConnectorFieldMappings,
       wcConnectorConfigs,
       slConnectorGdprRequests,
+      // Subscriptions before their charges: a paid webhook locks a store's
+      // subscription row before its charge rows, so erasure takes the same order.
       slConnectorSubscriptions,
+      slConnectorBillingCharges,
       slConnectorWebhookEvents,
       slConnectorTokens,
       slConnectorStores,

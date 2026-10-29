@@ -532,6 +532,38 @@ Two important details:
 - **SHOPLINE sends its own grace period** (`gracePeriod` + `gracePeriodUnit`);
   we honour it and fall back to our portal-configured 7 days when absent.
 
+**`appsubscription/paid` is idempotent per charge (`bizOrderNo`), not per
+delivery (since 2026-10-29).** Webhook dedupe keys on `X-Shopline-Webhook-Id`,
+and one charge arrives under several ids when two subscriptions cover the topic.
+Until then the 400 path added one to `failedBillingAttempts` per delivery, with
+no lock, so one failed charge delivered three times put a store `past_due` and
+started its grace period.
+
+- **The ledger:** `sl_connector_billing_charges`, unique on
+  `(slStoreId, bizOrderNo)`, records which outcomes of each charge have taken
+  effect.
+- **The lock:** every paid delivery is applied in ONE transaction that first
+  locks the store's subscription row. So two deliveries of one charge cannot
+  both count it, and two different charges cannot overwrite each other's count.
+- **The rules** (`handleSubscriptionPaid`, `billingWebhook.ts`):
+  - a failure counts once per charge, and never once that charge has succeeded
+    or been cancelled, so a re-delivered failure cannot re-open the count;
+  - a re-delivered success or cancellation changes nothing, so it cannot erase
+    a newer failure or cancel a store that has paid since;
+  - **a failure with no usable `bizOrderNo` is never counted.** It is recorded
+    in `lastFailureReason` and logged, because nothing tells it apart from a
+    re-delivery.
+- **Assumed, not proven:** that `bizOrderNo` names one charge attempt. If
+  SHOPLINE reuses it across retries of one renewal, those retries count once.
+  That under-counts, the safe direction, since SHOPLINE's own expiration
+  (`expireType` 3) still ends access. The development-store rehearsal should
+  confirm it.
+- **Not covered:** a failure delivered for the FIRST time after a later success,
+  for example retries arriving out of order after an outage, still counts. Only
+  a re-delivery is caught. `create` and `expiration` deliveries are not yet
+  idempotent across subscriptions either. Their payloads carry no charge id, so
+  each needs its own key.
+
 ### 2B.3 Verified API Specification (from public docs)
 
 The implementation is built against the SHOPLINE public developer documentation
@@ -602,13 +634,13 @@ The SHOPLINE connector follows the same pattern as `server/connectors/woodcore/`
 | `apiClient.ts` | Signed/Bearer REST client: version pinning, link-header pagination, 429 backoff (≤3 rps), `traceId` logging |
 | `ingest.ts` | Normalises SHOPLINE orders/payments/payouts → canonical `transactions` rows with `rawData` metadata contract |
 | `webhookHandler.ts` | Express receiver: raw-body HMAC verify → resolve store → dedupe on `X-Shopline-Webhook-Id` → persist → process inline → ack 200 |
-| `billingWebhook.ts` | Billing lifecycle: 5 topics → `sl_connector_subscriptions` state machine |
+| `billingWebhook.ts` | Billing lifecycle: the 3 `appsubscription/*` topics → `sl_connector_subscriptions` state machine; `paid` applied once per charge via `sl_connector_billing_charges` (§2B.2) |
 | `syncOrchestrator.ts` | Full sync cycle: fetch orders+payments+payouts → normalise → persist → run retail reconciliation engine → create exceptions |
 | `settlementSync.ts` | Settlement-specific sync: normalises settlement records and runs retail reconciliation |
 | `onboarding.ts` | Self-serve provisioning: creates org (segment `retail_commerce`), admin user, channels, connector rows, seeds templates |
 | `routes.ts` | Express routes: `/api/shopline/install`, `/api/shopline/callback`, `/api/webhooks/shopline`, GDPR endpoints |
 
-### 2B.5 Database Schema (4 new tables)
+### 2B.5 Database Schema (4 Phase 1 tables, plus the charge ledger)
 
 All tables are in `drizzle/connector_schema.ts`, prefixed `sl_connector_*`:
 
@@ -618,6 +650,7 @@ All tables are in `drizzle/connector_schema.ts`, prefixed `sl_connector_*`:
 | `sl_connector_tokens` | Encrypted OAuth tokens per store (AES-256-GCM, 10h TTL) | `tenant_required` |
 | `sl_connector_webhook_events` | Idempotent webhook event log (deduped on `webhookId`, DLQ linkage) | `tenant_required` |
 | `sl_connector_subscriptions` | Billing lifecycle state (planId, status, trial dates, billing attempts) | `tenant_required` |
+| `sl_connector_billing_charges` | One row per app-subscription charge (`bizOrderNo`): which outcomes took effect, and how often a delivery of it was processed (migration 0118, see §2B.2) | `tenant_required` |
 
 **Subscription statuses:** `trialing` → `active` → `past_due` → `expired` / `cancelled`
 
