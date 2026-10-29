@@ -1027,30 +1027,38 @@ Re-check this table when a new notice arrives, and add a row for it.
     Do not **migrate** subscriptions until the database recovery exit check passes
     and a clean controlled development-store rehearsal has proved idempotent
     delivery and processing. Migrating means editing or retiring the legacy page's
-    configuration, deleting or altering any subscription, changing its event
-    version, or subscribing a topic outside the required list.
+    configuration, deleting or altering an existing subscription (its event
+    version included), or subscribing a topic outside the required list.
   - **Exempt: restoring what SHOPLINE deleted.** `shoplineWebhookReconciler`
     (incident recovery step 3, and every 6 hours on schedule) registers only the
     required topics (`SHOPLINE_WEBHOOK_TOPICS` + `SHOPLINE_BILLING_WEBHOOK_TOPICS`,
     12 in all) missing from a store's `/webhooks.json` list, at the pinned version.
     It never deletes or alters one. Its last green run before the outage
     (2026-10-26 02:16 UTC) found both installed stores, `reconcileai` and
-    `slapptest`, holding all 12 with nothing missing, so a re-registration puts
-    back the pre-incident state rather than adding a new overlap. Holding it back
-    would leave the rehearsal nothing to deliver to and the billing topics, which
-    have no polling backstop, dark. The doc order could not hold it back anyway:
-    the 6-hour schedule runs it on its own once the database answers.
+    `slapptest`, holding all 12 with nothing missing. So a re-registration only
+    replaces a subscription SHOPLINE deleted, and adds no overlap. The replacement
+    is created at the pinned version, which is the migration's own target and may
+    differ from the deleted one's (see below). Holding it back would leave each
+    deleted topic dark, including the billing topics, which have no polling
+    backstop. The doc order could not hold it back anyway: the 6-hour schedule
+    runs it on its own once the database answers.
   - **What the rehearsal must settle.** The reconciler records only a count, not
     each subscription's version, so it is **not known** whether the legacy page
-    shows those same 12 or a second, parallel set. If it is a parallel set, one
-    event arrives twice under two `X-Shopline-Webhook-Id`s, and deduplication is
-    keyed on that id alone. Order topics tolerate that because they only schedule a
-    coalesced sync. `appsubscription/paid` with status 400 does not:
-    `billingWebhook.ts` adds one to `failedBillingAttempts` per delivery, so one
-    failed charge would count twice toward `past_due`. Prove whether the legacy
-    configuration delivers before retiring anything, and fix that counter (a code
-    change, so after the incident's code freeze lifts) before any real merchant is
-    billed.
+    shows those same 12 or a second, parallel set.
+    - *If they are the same 12,* a replacement changes that topic's event version.
+      Order topics do not feel it: `scheduleReconciliation` takes only the
+      organisation, store and topic, and the sync it schedules pulls through the
+      API at the pinned version. The billing handler parses the payload, so the
+      rehearsal must see each billing topic parse after a replacement.
+    - *If they are a parallel set,* one event arrives twice under two
+      `X-Shopline-Webhook-Id`s, and deduplication is keyed on that id alone. Order
+      topics tolerate that, for the same reason. `appsubscription/paid` with status
+      400 does not: `billingWebhook.ts` adds one to `failedBillingAttempts` per
+      delivery, so one failed charge would count twice toward `past_due`.
+
+    Prove whether the legacy configuration delivers before retiring anything, and
+    fix that counter (a code change, so after the incident's code freeze lifts)
+    before any real merchant is billed.
 - `sl_connector_stores.apiVersion` is stored but **never used to build a
   request**. Do not start reading it without migrating every row.
 - **Nothing on storefronts:** no theme app extension, script tag or app embed,
