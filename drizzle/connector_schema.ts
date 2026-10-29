@@ -365,7 +365,11 @@ export const slConnectorSubscriptions = mysqlTable(
      * so a merchant resolving payment isn't cut off mid-buffer.
      */
     graceEndsAt: timestamp("graceEndsAt"),
-    /** Number of consecutive failed billing attempts */
+    /**
+     * Failed charges since the last success or (re)subscription: one per charge
+     * (`bizOrderNo`), however often SHOPLINE delivered it. See
+     * `sl_connector_billing_charges`.
+     */
     failedBillingAttempts: int("failedBillingAttempts").default(0).notNull(),
     /** Last billing failure reason */
     lastFailureReason: text("lastFailureReason"),
@@ -379,6 +383,45 @@ export const slConnectorSubscriptions = mysqlTable(
 );
 export type SlConnectorSubscription = typeof slConnectorSubscriptions.$inferSelect;
 export type InsertSlConnectorSubscription = typeof slConnectorSubscriptions.$inferInsert;
+
+// ─── SHOPLINE App-Subscription Charges ──────────────────────────────────────
+// One row per charge (`bizOrderNo`) that a store's `appsubscription/paid`
+// webhooks have reported. It makes that topic idempotent per CHARGE: webhook
+// dedupe (`sl_connector_webhook_events.webhookId`) knows a delivery, and one
+// charge can arrive as several — SHOPLINE's own retries, or two subscriptions
+// to the same topic, each with its own webhook id. Each outcome of a charge
+// changes the subscription once (billingWebhook.ts, handleSubscriptionPaid).
+export const slConnectorBillingCharges = mysqlTable(
+  "sl_connector_billing_charges",
+  {
+    id: int("id").autoincrement().primaryKey(),
+    organizationId: int("organizationId").notNull(),
+    slStoreId: int("slStoreId").notNull(),
+    /** SHOPLINE's order number for the charge (`bizOrderNo` on appsubscription/paid). */
+    bizOrderNo: varchar("bizOrderNo", { length: 128 }).notNull(),
+    /** When this charge's failure was counted in `failedBillingAttempts`. NULL: never counted. */
+    failureCountedAt: timestamp("failureCountedAt"),
+    /** When this charge's success was applied to the subscription. */
+    succeededAt: timestamp("succeededAt"),
+    /** When this charge's cancellation was applied to the subscription. */
+    cancelledAt: timestamp("cancelledAt"),
+    /**
+     * How many times a delivery of this charge was processed, whatever its
+     * status. Above 1 means it arrived more than once (a SHOPLINE retry, or a
+     * second subscription to the topic), or the replay sweep processed a stored
+     * delivery again; `sl_connector_webhook_events` tells those apart by
+     * webhook id.
+     */
+    deliveries: int("deliveries").default(0).notNull(),
+    createdAt: timestamp("createdAt").defaultNow().notNull(),
+    updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex("idx_sl_billing_charge_store_order").on(t.slStoreId, t.bizOrderNo),
+    index("idx_sl_billing_charge_org").on(t.organizationId),
+  ],
+);
+export type SlConnectorBillingCharge = typeof slConnectorBillingCharges.$inferSelect;
 
 // ─── SHOPLINE GDPR / Mandatory Compliance Requests ──────────────────────────
 // Auditable trail of SHOPLINE's mandatory GDPR webhooks (customer data request,

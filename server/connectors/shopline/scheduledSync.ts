@@ -289,6 +289,22 @@ export async function handleShoplineDailyBatch(req: Request, res: Response): Pro
 interface WebhookReconcileResult {
   storeHandle: string;
   existingCount: number;
+  /**
+   * Each subscription `/webhooks.json` listed: its topic, and the API version
+   * its events are sent in (null when SHOPLINE gave none), sorted by topic.
+   *
+   * The connector registers at SHOPLINE_API_VERSION, so a subscription at any
+   * other version was created somewhere else: an older connector, or the
+   * Partner Portal's legacy configuration. Two subscriptions to one topic
+   * deliver each event twice. Subscriptions that exist only in that legacy
+   * page may not be listed here at all.
+   *
+   * Topics and versions only: the scheduler workflow prints this response
+   * into a public repository's Actions log.
+   */
+  subscriptions: Array<{ topic: string; apiVersion: string | null }>;
+  /** How many listed subscriptions use each API version; `none` when SHOPLINE gave none. */
+  apiVersions: Record<string, number>;
   missingTopics: string[];
   registeredCount: number;
   errors: string[];
@@ -321,6 +337,8 @@ export async function handleShoplineWebhookReconciler(
       const result: WebhookReconcileResult = {
         storeHandle: store.storeHandle,
         existingCount: 0,
+        subscriptions: [],
+        apiVersions: {},
         missingTopics: [],
         registeredCount: 0,
         errors: [],
@@ -348,6 +366,13 @@ export async function handleShoplineWebhookReconciler(
         // List existing webhooks
         const existing = await listWebhooks(apiOpts);
         result.existingCount = existing.length;
+        result.subscriptions = existing
+          .map((w) => ({ topic: w.topic, apiVersion: w.api_version || null }))
+          .sort((a, b) => a.topic.localeCompare(b.topic) || (a.apiVersion ?? "").localeCompare(b.apiVersion ?? ""));
+        for (const { apiVersion } of result.subscriptions) {
+          const version = apiVersion ?? "none";
+          result.apiVersions[version] = (result.apiVersions[version] ?? 0) + 1;
+        }
 
         // Determine which required topics are missing
         const existingTopics = new Set(existing.map((w) => w.topic));
