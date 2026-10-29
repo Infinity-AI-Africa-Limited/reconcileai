@@ -84,6 +84,7 @@
     "server/connectors/shopline/settlementFileDedupe.test.ts",
     "server/connectors/shopline/settlementImportRequest.test.ts",
     "server/connectors/shopline/syncIngestLock.test.ts",
+    "server/connectors/shopline/webhookReconcilerVersions.test.ts",
     "server/controlCompleteness.test.ts",
     "server/controlRunAdmission.test.ts",
     "server/controlRunPopulation.test.ts",
