@@ -563,6 +563,21 @@ started its grace period.
   a re-delivery is caught. `create` and `expiration` deliveries are not yet
   idempotent across subscriptions either. Their payloads carry no charge id, so
   each needs its own key.
+- **Erasure — an open compliance gap, wider than this ledger:**
+  - The Shopify workspace erasure (`server/connectors/shopify/shopRedaction.ts`)
+    deletes the ledger with the rest of a tenant.
+  - **SHOPLINE's own `shop/redact` deletes nothing yet, this ledger included.**
+    `processGdprRequest` (`gdpr.ts`) marks the store uninstalled, cancels the
+    subscription, and records the request as `completed`. Its note says "data
+    scheduled for purge within retention window", but no code performs that
+    purge.
+  - The same charge references already outlive it in
+    `sl_connector_subscriptions.lastFailureReason` and in the stored
+    `appsubscription/paid` payloads.
+  - The fix is a SHOPLINE shop-data erasure across every table that holds the
+    store's or the tenant's rows, plus a truthful audit row. It needs an owner
+    decision on whether our billing records are kept. Raised by Greptile on
+    PR #213.
 
 ### 2B.3 Verified API Specification (from public docs)
 
