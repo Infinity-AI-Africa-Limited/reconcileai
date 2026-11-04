@@ -133,6 +133,17 @@ describe("when the Railway deployment recipe is reviewed", () => {
     expect(startCommand).not.toContain("RECONCILEAI_STARTUP_MODE");
     expect(startCommand).not.toContain("RECONCILEAI_DRAIN_TIMEOUT_MS");
   });
+
+  it("should launch exactly what `pnpm start` launches, with exec as the only difference", async () => {
+    // Railway no longer runs `pnpm start`, so the two commands are now kept in
+    // step by this test rather than by sharing one: a flag added to the start
+    // script (a heap size, source maps) would otherwise never reach production.
+    const manifest = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as {
+      scripts: { start: string };
+    };
+    expect(manifest.scripts.start).toMatch(/(^|\s)node\s/);
+    expect(startCommand).toBe(manifest.scripts.start.replace(/(^|\s)node\s/, "$1exec node "));
+  });
 });
 
 describe("when the exact Railway shell launcher runs only a synthetic Node fixture", () => {
