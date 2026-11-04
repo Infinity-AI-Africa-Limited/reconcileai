@@ -2,7 +2,7 @@
 
 ## Status and purpose
 
-Lifecycle increment 1 was merged and hardened through Claude's PR #214 review. That foundation addresses the unsafe assumption that stopping admission or reaching a timeout means background writes have finished. The narrow startup-recovery preservation increment described below remains a **review-only engineering prerequisite**, not a deployment, approved maintenance window, recovery rehearsal or completed backup control.
+Lifecycle increment 1 and startup-recovery preservation were merged and hardened through Claude's PR #214 and #215 reviews. Railway's active deployment identifies the #215 merge. These released controls address false drain proof and age-only abandonment of uncertain work; they are not an approved maintenance window, all-runtime stop/replay rehearsal or completed backup control. The test-only subprocess rehearsal in the next review increment does not change runtime behavior or authorize production actions.
 
 ReconcileAI remains read-only evidence/control software at the financial boundary. This change does not authorise funds movement, autonomous exception closure, customer-data exports or destructive operations.
 
@@ -42,7 +42,7 @@ Only after tracked work and producer stops settle successfully does the signal a
 
 BullMQ local stop awaits acquisition/main-loop quiescence with `pause(false)`. A worker cleanup `error` emitted while `close()` resolves is still treated as unproved closure; the registry entry and cached failure are retained. The lifecycle proof is rechecked before database-pool closure and after resource closure, so a late fenced acquisition cannot turn an invalidated proof into `stopped`. Async route failures log fixed codes only, without incoming URLs or arbitrary rejection text.
 
-## Startup recovery preservation — review-only increment
+## Startup recovery preservation — released control
 
 More than two hours without a heartbeat during downtime or a long queue wait does **not** prove that accepted durable reconciliation work was abandoned. `recoverStuckReconciliationJobs()` now defers before database access, candidate selection, abandonment updates or queue construction when Redis is configured, durability is required, the deployment is not explicitly cloud, `NODE_ENV` is not explicitly development/test, `DATABASE_URL` does not name a provably local database (`server/dbTarget.ts`: loopback only), or the reconciliation queue already has a cached promise. This includes on-premise mode, production with missing current Redis configuration, configured Redis outages or optional fallbacks, an in-progress queue initialization, and a development server whose `.env` names a shared or production database: that database's stale rows may belong to another deployment's durable queue, which a development process cannot see. A cached queue is not awaited or inspected to justify abandonment. Policy is rechecked after candidate selection before a legacy update, so queue initialization during the database awaits also vetoes abandonment.
 
@@ -77,3 +77,22 @@ A `stopped` result has scope **`tracked_process_only`**. It is not a distributed
 6. Protected owner-only credential entry, encrypted export/transfer, owner-approved isolated restore target, full validation and separately approved maintenance window.
 
 No production variables, deployment, DB export, restore target, credentials, Redis state, S3 settings, Manus publish setting or scheduled workflow enablement are changed while preparing this branch. No schema migration is introduced.
+
+## Cross-process adapter rehearsal — test-only increment
+
+`server/maintenance/subprocessRehearsal.test.ts` exercises the shipped lifecycle, HTTP admission, async route wrapper, queue factory and shutdown-signal adapters in separate Node processes. It uses an actual parent-owned disposable Redis fixture, Express listeners bound only to loopback, fixed IPC handshakes and injected synthetic HTTP/job effects. It does not load the normal app bootstrap, routers, financial reconciliation runners, customer records or a database.
+
+The actual-Redis cases prove:
+
+- A response sent before its synthetic async effect finishes does not release the handler's tracked work. SIGTERM synchronously fences later HTTP and enqueue admission; the process waits for accepted HTTP descendants, active queue work and Redis acknowledgement before resource closure and natural exit.
+- A waiting job remains in Redis after the first process stops. An **explicitly constructed replacement worker** consumes it; a separate synthetic failure retries to its second attempt. This does not prove the lazy production reconciliation worker automatically starts or resumes a backlog after boot.
+- A second worker sharing the unique fixture queue remains able to accept and execute work after the first worker reports `stopped`. This is a counterexample to treating process-local drain as cluster-wide quiescence.
+- Expiring the bounded wait reports `incomplete`, leaves resources open and admission fenced, and never becomes `stopped` merely because held work later finishes. A test cleanup kill is not drain proof.
+
+The two always-on safety tests reject non-exact loopback Redis URLs, mismatched fixture variables, non-synthetic queue names, unexpected child environment keys and arbitrary IPC payloads. The three actual-Redis cases opt in only with `RECONCILEAI_TEST_REDIS_URL` set to the exact `redis://127.0.0.1:<ephemeral-port>` of an independently created disposable fixture and an equal `REDIS_URL`. A loopback address alone does not prove disposability: do not point these tests at an existing developer, production or provider queue. The child environment is an exact five-key test allowlist, without inherited service credentials or loader arguments. Tests kill and await all their own children before obliterating only their UUID-named fixture queue, never FLUSHDB or a shared/global pause.
+
+Synthetic job IDs are namespaced (`synthetic-*`) so they cannot collide with BullMQ's reserved internal queue keys such as `active`. Initial bare-ID test-fixture collisions were corrected without modifying shipped runtime behavior or weakening assertions. Timeouts and cleanup errors emit only typed fixed-phase diagnostics, never arbitrary request, job, environment or provider data.
+
+Validation on 4 November 2026: all five new tests passed in three consecutive executions; combined actual-Redis validation passed 28 tests across five files. Source/test typechecks and compiled cold-mode checks are recorded in the review handoff. These are **controlled cross-process adapter** results, not full-bootstrap, integrated-database, provider-grace, sustained all-writer freeze, actual backlog-resume, export/restore, RTO or financial-correctness proof. This test-only increment is not a new runtime prerequisite for collecting the private inventory, nor permission to stop production.
+
+Final review gate on the unchanged runtime source: committed migrations and drift passed on a new disposable loopback MySQL instance; full regression passed **5,261 tests with 21 conditional skips and no failures**. The separate actual-Redis run passed **28/28**, and the new five-test suite passed in two further executions. Source/test typechecks, lint, build and compiled cold-mode smoke all passed. The existing route/detached-work ratchets remain unchanged. Both fixture servers were stopped and their synthetic data directories removed. No production connection or managed Manus publish/checkpoint action occurred.
