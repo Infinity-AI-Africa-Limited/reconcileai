@@ -1,6 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import { createServer } from "http";
+import { createServer, type Server } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
@@ -24,9 +24,10 @@ import { ENV } from "./env";
 import { shopifyWebhookRawBody } from "../connectors/shopify/webhookBody";
 import { loggableError } from "../dbErrors";
 import { errorSummary, logProcedureFailure } from "../errorText";
-import { applicationLifecycle, runBackgroundWork } from "../maintenance/lifecycle";
+import { applicationLifecycle, MaintenanceAdmissionError, runBackgroundWork } from "../maintenance/lifecycle";
 import { maintenanceAdmission } from "../maintenance/httpAdmission";
 import { attachShutdownSignals } from "../maintenance/shutdown";
+import { listenUnlessFenced } from "../maintenance/startup";
 import { readDrainTimeout } from "../maintenance/config";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -48,7 +49,24 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
-async function startServer() {
+/**
+ * Queues first (a worker may still acknowledge a job), then the pools. Each
+ * step re-checks the drain proof: a late queue event can invalidate it while an
+ * earlier close is still running.
+ */
+async function closeApplicationResources(isStillDrained: () => boolean): Promise<void> {
+  const { closeAllQueues } = await import("../jobQueue");
+  await closeAllQueues();
+  if (!isStillDrained()) throw new Error("drain_proof_invalidated");
+  const { closeWoodcorePools } = await import("../woodcoreDb");
+  if (!isStillDrained()) throw new Error("drain_proof_invalidated");
+  await closeWoodcorePools();
+  const { closeAppPools } = await import("../dbSession");
+  if (!isStillDrained()) throw new Error("drain_proof_invalidated");
+  await closeAppPools();
+}
+
+async function startServer(app: express.Express, server: Server) {
   // Data residency: log the enforced posture and fail fast if on-premise mode is
   // misconfigured in a way that would leak data off-box (e.g. Forge enabled).
   const posture = describeResidencyPosture();
@@ -65,28 +83,12 @@ async function startServer() {
   // otherwise only visible as strange addresses in the audit trail.
   console.log(describeTrustedProxyConfig());
 
-  const app = express();
-  const server = createServer(app);
   // Before parsers, auth, GET routes with audit effects, and health's storage probe.
   app.use(maintenanceAdmission());
   app.get("/api/readyz", (_req, res) => {
     res.setHeader("Cache-Control", "no-store");
     const ready = applicationLifecycle.isAcceptingWork();
     res.status(ready ? 200 : 503).json({ status: ready ? "accepting" : "maintenance" });
-  });
-  attachShutdownSignals(server, {
-    timeoutMs: readDrainTimeout(process.env.RECONCILEAI_DRAIN_TIMEOUT_MS),
-    closeResources: async (isStillDrained) => {
-      const { closeAllQueues } = await import("../jobQueue");
-      await closeAllQueues();
-      if (!isStillDrained()) throw new Error("drain_proof_invalidated");
-      const { closeWoodcorePools } = await import("../woodcoreDb");
-      if (!isStillDrained()) throw new Error("drain_proof_invalidated");
-      await closeWoodcorePools();
-      const { closeAppPools } = await import("../dbSession");
-      if (!isStillDrained()) throw new Error("drain_proof_invalidated");
-      await closeAppPools();
-    },
   });
   // Shopify webhooks are read as bytes under their own limit BEFORE the global
   // JSON parser below, which would otherwise parse an unauthenticated body up to
@@ -780,6 +782,14 @@ async function startServer() {
     serveStatic(app);
   }
 
+  // Shutdown may have begun while the routes above were imported. Every launch
+  // below would be refused anyway (startup lends no admission, see runRoot);
+  // stopping here also skips their imports and the listen.
+  if (!applicationLifecycle.isAcceptingWork()) {
+    console.log("[boot] startup_fenced", { stage: "before_background_work" });
+    return;
+  }
+
   // Shopify durable-queue evidence: build the live order and privacy queues and
   // read their BullMQ counts, so /api/health has evidence on a Redis-configured
   // instance. It adds no job and no merchant data to Redis.
@@ -862,9 +872,34 @@ async function startServer() {
 
   // Bind all container interfaces; Docker publishes this only through the
   // Compose-controlled host loopback mapping in on-premise deployments.
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${port}/`);
-  });
+  // A signal during the port search must not be followed by a listen, and a
+  // listen in flight must finish before startup (tracked work) settles.
+  if (!(await listenUnlessFenced(server, port, "0.0.0.0"))) {
+    console.log("[boot] startup_fenced", { stage: "before_listen" });
+    return;
+  }
+  console.log(`Server running on http://localhost:${port}/`);
 }
 
-startServer().catch(console.error);
+const app = express();
+const server = createServer(app);
+// Attached before startup begins: a signal from here on fences admission, then
+// waits for startup, like any other tracked work, before anything is closed.
+const shutdownHook = attachShutdownSignals(server, {
+  timeoutMs: readDrainTimeout(process.env.RECONCILEAI_DRAIN_TIMEOUT_MS),
+  closeResources: closeApplicationResources,
+});
+
+// Tracked, so the drain cannot report idle or close the pools while startup is
+// still importing, choosing a port or binding.
+void applicationLifecycle.runRoot("startup", () => startServer(app, server)).catch((error: unknown) => {
+  // Shutdown began before startup could: nothing was launched.
+  if (error instanceof MaintenanceAdmissionError) return;
+  console.error("[boot] startup_failed", loggableError(error));
+  process.exitCode = 1;
+  // A server that will never listen must not leave writers running behind it:
+  // routers.ts starts its producer loops at import, before startup runs.
+  void shutdownHook.shutdown().then(result => {
+    console.log(`[shutdown] ${result.status}; scope=tracked_process_only`);
+  });
+});

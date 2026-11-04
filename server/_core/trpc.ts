@@ -4,7 +4,7 @@ import superjson from "superjson";
 import type { TrpcContext } from "./context";
 import { auditOrganizationFor, runInRequestScope } from "./requestScope";
 import { errorSummary, isDatabaseError } from "../errorText";
-import { applicationLifecycle, MaintenanceAdmissionError } from "../maintenance/lifecycle";
+import { runTrpcWork } from "../maintenance/trpcWork";
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
@@ -90,14 +90,8 @@ const bindRequestScope = t.middleware(({ ctx, next }) =>
   ),
 );
 
-const bindLifecycle = t.middleware(async ({ next }) => {
-  try {
-    return await applicationLifecycle.run("request", async () => next());
-  } catch (error) {
-    if (!(error instanceof MaintenanceAdmissionError)) throw error;
-    throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "maintenance_unavailable" });
-  }
-});
+// Context creation is tracked the same way, in createContext (context.ts).
+const bindLifecycle = t.middleware(({ next }) => runTrpcWork(() => next()));
 
 const baseProcedure = t.procedure.use(bindLifecycle).use(bindRequestScope).use(refuseReadOnlyWrites);
 

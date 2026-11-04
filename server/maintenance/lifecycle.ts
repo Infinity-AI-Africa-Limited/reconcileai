@@ -57,6 +57,27 @@ export class ApplicationLifecycle {
     }
   }
 
+  /**
+   * Count a ROOT operation until it settles, without lending its admission to
+   * the work it starts.
+   *
+   * `run` admits nested work after the fence, so an admitted request can finish
+   * its own effects. Startup must not get that: once shutdown begins, a server
+   * still booting has to stop launching writers rather than be granted them.
+   * So work it starts after the fence is refused, while the drain still waits
+   * for startup itself to settle before anything is closed.
+   */
+  async runRoot<T>(kind: WorkKind, operation: () => Promise<T>): Promise<T> {
+    // Root admission only: a live caller context must not smuggle startup past the fence.
+    if (this.state !== "running") throw new MaintenanceAdmissionError();
+    const token = this.reserve(kind);
+    try {
+      return await this.context.exit(operation);
+    } finally {
+      this.release(token);
+    }
+  }
+
   /** Reserve a response lifetime; the HTTP adapter releases on finish/close. */
   enterRequest(operation: () => void): { release: () => void } {
     const token = this.reserve("request");

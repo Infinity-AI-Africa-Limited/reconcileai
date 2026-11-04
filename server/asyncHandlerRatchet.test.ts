@@ -35,19 +35,33 @@ function scanVirtual(files: Record<string, string>) {
   return scanFile(entry, byPath.get(entry), { read: f => byPath.get(f) });
 }
 
+/**
+ * Asynchronous handlers that may run untracked, each with the reason it can
+ * never hold a pool, a queue or a write past the drain.
+ */
+const UNTRACKED_ALLOWED: Record<string, string> = {
+  "USE * -> <anonymous> @ _core/vite.ts":
+    "development only (setupVite never runs in production); reads index.html from disk and touches no pool, queue or storage",
+};
+
 const HEADER = `import express from "express";\nimport type { Request, Response } from "express";\nconst app = express();\n`;
 
 describe("when the real server code is scanned", () => {
   // Every server file is parsed once and shared by both cases below.
   const REAL_SCAN_TIMEOUT = 60_000;
-  let real: { handlers: string[]; exposures: Exposure[] } | undefined;
+  let real: { handlers: string[]; untracked: string[]; exposures: Exposure[] } | undefined;
   beforeAll(() => {
     const handlers = new Set<string>();
+    const untracked = new Set<string>();
     const scanner = createScanner({
-      onHandler: h => handlers.add(`${h.route} -> ${h.name} @ ${path.relative(SERVER, h.file).split(path.sep).join("/")}${h.wrapped ? " [wrapped]" : ""}`),
+      onHandler: h => {
+        const id = `${h.route} -> ${h.name} @ ${path.relative(SERVER, h.file).split(path.sep).join("/")}`;
+        handlers.add(`${id}${h.wrapped ? " [wrapped]" : ""}`);
+        if (h.async && !h.wrapped) untracked.add(id);
+      },
     });
     const exposures = serverSources(SERVER).flatMap(f => scanner.scanFile(f));
-    real = { handlers: [...handlers], exposures };
+    real = { handlers: [...handlers], untracked: [...untracked], exposures };
   }, REAL_SCAN_TIMEOUT);
 
   it("should see into the handlers the server really registers, so a clean result means something", () => {
@@ -65,6 +79,21 @@ describe("when the real server code is scanned", () => {
         "GET /developers -> <anonymous> @ _core/index.ts [wrapped]",
       ]),
     );
+  });
+
+  it("should track every asynchronous handler, so a drain cannot close the pools under it", () => {
+    // asyncHandler also holds the handler's promise in the maintenance
+    // lifecycle. The HTTP lease ends when the client disconnects, so an
+    // unwrapped async handler — even one that answers its own failures —
+    // keeps writing after the drain has stopped counting it (#214: the
+    // storage proxy's lastSignedIn and audit writes).
+    expect(real, "the real-code scan did not run").toBeDefined();
+    const untracked = (real?.untracked ?? []).filter(id => !(id in UNTRACKED_ALLOWED));
+    expect(untracked, "Wrap the handler in asyncHandler(...) from _core/asyncHandler").toEqual([]);
+  });
+
+  it("should keep every allowed untracked handler real, so an exception cannot outlive its route", () => {
+    expect(real?.untracked).toEqual(expect.arrayContaining(Object.keys(UNTRACKED_ALLOWED)));
   });
 
   it("should leave no route exposed without asyncHandler", () => {
@@ -334,5 +363,23 @@ describe("when the receiver is not an obvious `app`", () => {
       const hit = cache.get("key");
       cache.delete("key");`;
     expect(scanFile(path.resolve("/virtual/a.ts"), sample)).toEqual([]);
+  });
+});
+
+describe("when a handler's lifetime must be tracked", () => {
+  it("should report an async handler as untracked until asyncHandler wraps it, even when a try answers its failures", () => {
+    const sample = `${HEADER}import { asyncHandler } from "./_core/asyncHandler";
+      app.get("/a", async (req, res) => { try { await work(); res.end(); } catch { res.end(); } });
+      app.get("/b", asyncHandler(async (req, res) => { try { await work(); res.end(); } catch { res.end(); } }));
+      app.get("/c", (req, res) => { res.json({ ok: true }); });
+      app.get("/d", (req, res) => work().then(() => res.end()));`;
+    const seen: Array<[string, boolean, boolean]> = [];
+    scanFile(path.resolve("/virtual/a.ts"), sample, { onHandler: h => seen.push([h.route, h.async, h.wrapped]) });
+    expect(seen).toEqual([
+      ["GET /a", true, false],
+      ["GET /b", true, true],
+      ["GET /c", false, false],
+      ["GET /d", true, false],
+    ]);
   });
 });

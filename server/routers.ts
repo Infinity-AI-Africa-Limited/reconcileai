@@ -911,7 +911,7 @@ export const appRouter = router({
         if (tenant) {
           const _orgId = tenant;
           const _userId = ctx.user.id;
-          void import("./exceptionIntelligence").then((ei) =>
+          runBackgroundWork(() => import("./exceptionIntelligence").then((ei) =>
             ei.captureExceptionOutcome({
               organizationId: _orgId,
               exceptionId: input.id,
@@ -919,7 +919,7 @@ export const appRouter = router({
               outcome: "escalated",
               resolutionText: input.note || "Escalated per aging SLA",
             }),
-          ).catch(() => {});
+          ).catch(() => {}));
         }
         dispatchExceptionEvent(escalated, tenant, "exception.escalated", { exceptionId: input.id });
         return { success: true };
@@ -947,7 +947,7 @@ export const appRouter = router({
         const _orgId = tenant;
         const _userId = ctx.user.id;
         const _ids = overAged.map((r) => r.id);
-        void (async () => {
+        runBackgroundWork(async () => {
           try {
             const ei = await import("./exceptionIntelligence");
             for (const id of _ids) {
@@ -960,7 +960,7 @@ export const appRouter = router({
               });
             }
           } catch { /* best-effort */ }
-        })();
+        });
       }
       return { success: true, count: overAged.length };
     }),
@@ -1052,13 +1052,13 @@ export const appRouter = router({
           notes: input.resolutionNotes,
         }, ip, ua);
         // Learning and the exception.resolved webhook, shared with governed closure.
-        void afterExceptionClosed({
+        runBackgroundWork(() => afterExceptionClosed({
           organizationId,
           exceptionId: input.id,
           userId: ctx.user.id,
           outcome: input.status,
           resolutionNotes,
-        });
+        }));
         return { success: true };
       }),
 
@@ -1091,9 +1091,9 @@ export const appRouter = router({
         // the shared pool. Best-effort, never fails the reopen.
         if (ctx.user.organizationId) {
           const _orgId = ctx.user.organizationId;
-          void import("./exceptionIntelligence").then((ei) =>
+          runBackgroundWork(() => import("./exceptionIntelligence").then((ei) =>
             ei.retractResolutionLearning(_orgId, input.id),
-          ).catch(() => {});
+          ).catch(() => {}));
         }
 
         return { success: true };
@@ -1223,7 +1223,7 @@ export const appRouter = router({
         if (ctx.user.organizationId) {
           const _orgId = ctx.user.organizationId;
           const _userId = ctx.user.id;
-          void import("./exceptionIntelligence").then((ei) =>
+          runBackgroundWork(() => import("./exceptionIntelligence").then((ei) =>
             ei.captureExceptionOutcome({
               organizationId: _orgId,
               exceptionId: input.id,
@@ -1231,7 +1231,7 @@ export const appRouter = router({
               outcome: "escalated",
               resolutionText: input.notes || "Escalated to management",
             }),
-          ).catch(() => {});
+          ).catch(() => {}));
         }
 
         dispatchExceptionEvent(escalated, tenant, "exception.escalated", { exceptionId: input.id });
@@ -5935,10 +5935,10 @@ Always be specific, reference actual exception IDs and amounts where available, 
         // Notify owner of new assessment lead
         if (input.respondentEmail) {
           const { notifyOwner } = await import("./_core/notification");
-          notifyOwner({
+          runBackgroundWork(() => notifyOwner({
             title: `📋 New Compliance Assessment — ${input.institutionName ?? "Anonymous"} [${riskLevel.toUpperCase()}]`,
             content: `Score: ${overallScore}/100\nRisk: ${riskLevel}\nType: ${input.institutionType ?? "N/A"}\nName: ${input.respondentName ?? "N/A"}\nEmail: ${input.respondentEmail}\nConsent: ${input.consentToContact}`,
-          }).catch(() => {});
+          }).catch(() => {}));
         }
 
         // Send follow-up email to respondent when they have consented to contact

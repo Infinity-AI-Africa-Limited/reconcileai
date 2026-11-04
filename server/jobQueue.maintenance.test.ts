@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JobQueue } from "./jobQueue";
 
 type BullJob = { name: string; data: unknown; attemptsMade: number; opts: { attempts?: number } };
-type Listener = (...args: any[]) => unknown;
+type Listener = (...args: unknown[]) => unknown;
 
 const bull = vi.hoisted(() => ({
   workers: [] as Array<{
@@ -13,7 +13,7 @@ const bull = vi.hoisted(() => ({
     close: ReturnType<typeof vi.fn>;
   }>,
   queues: [] as Array<{
-    options: Record<string, any>;
+    options: Record<string, unknown>;
     add: ReturnType<typeof vi.fn>;
     remove: ReturnType<typeof vi.fn>;
     close: ReturnType<typeof vi.fn>;
@@ -29,14 +29,14 @@ const bull = vi.hoisted(() => ({
 
 vi.mock("bullmq", () => ({
   Queue: class {
-    options: Record<string, any>;
+    options: Record<string, unknown>;
     add = vi.fn(() => bull.addWork?.() ?? Promise.resolve());
     remove = vi.fn(() => bull.removeWork?.() ?? Promise.resolve());
     close = vi.fn(async () => {});
     pause = vi.fn(async () => {});
     drain = vi.fn(async () => {});
     obliterate = vi.fn(async () => {});
-    constructor(_name: string, options: Record<string, any>) {
+    constructor(_name: string, options: Record<string, unknown>) {
       this.options = options;
       bull.queues.push(this);
       bull.construct?.();

@@ -22,6 +22,16 @@ In normal mode the admission middleware is mounted before body parsers, authenti
 
 Explicitly tracked request, procedure, startup, queue and background promises remain counted until their real lifetimes end. An early HTTP response or disconnected client does not end a separately tracked handler. Live tasks may launch tracked descendants needed to finish their accepted operation. Expired asynchronous contexts may not use an unrelated active task as permission to start new work.
 
+The HTTP admission lease ends when the client disconnects, so it is never the only thing holding work open:
+
+- **tRPC context creation** is tracked on its own (`createContext`). Authentication writes `lastSignedIn`, and a client that disconnects mid-authentication must not let the drain report idle under that write. The procedure that follows is tracked separately.
+- **Every asynchronous Express handler** is wrapped in `asyncHandler`, which holds its promise in the lifecycle. `asyncHandlerRatchet.test.ts` fails CI on an unwrapped one; the dev-only Vite fallback is the single reviewed exception.
+- **Every detached promise** in server code (a `void` call, or a `.then`/`.catch`/`.finally` chain nobody awaits) is launched through `runBackgroundWork`/`deferBackgroundWork`, or is listed with its reason in `maintenance/detachedWorkRatchet.test.ts`. Review found nine untracked in procedures: four flywheel learning captures and retractions, both launches of the exception-closure effects, two owner notifications, and a manual Woodcore batch sync that writes for minutes after returning.
+
+**Startup is tracked root work** (`runRoot`). The signal handler is attached before startup begins, and the drain cannot finish, nor the pools close, while startup is still importing, choosing a port or binding. Startup does not lend admission to what it launches: once the fence is up it starts no background work and never listens (`[boot] startup_fenced`). A listen already in flight is awaited, so shutdown closes a bound server rather than racing the bind. A server that never listened is treated as closed. A startup that fails sets exit code 1 and runs the same fence and drain, because `routers.ts` starts its producer loops at import.
+
+A signal that arrives while Node is still loading and evaluating the bundle, before the handler exists, meets Node's default action and exits with code 143. No application write can be in flight then: evaluation is synchronous, and nothing it schedules has run.
+
 Periodic producers stop creating new ticks. Existing runs remain tracked. Deferred work is reserved before `setImmediate`, and response-completion effects are reserved before the response finishes. The normal matching, ownership, tenant, read-only and human-approval rules remain unchanged.
 
 `RECONCILEAI_DRAIN_TIMEOUT_MS` is an optional bounded **wait** setting: default 90,000 ms; accepted range 1,000–300,000 ms. It is not an export outage estimate or cancellation deadline. A timeout or stop failure reports `incomplete`, remains fenced and must never be treated as completed work. This increment does not force `process.exit()`.
@@ -36,7 +46,8 @@ BullMQ local stop awaits acquisition/main-loop quiescence with `pause(false)`. A
 
 - Cold boot selection before normal writer-bearing imports.
 - Admission before parsing, including GET paths with audit or probe effects.
-- Async route and tRPC procedure lifetimes; post-ack and post-response effects.
+- Async route, tRPC context-creation and procedure lifetimes; post-ack and post-response effects; detached effects launched by procedures.
+- Startup as tracked root work: fenced startup launches nothing and never listens; a bind in flight completes before closure.
 - Scheduled reconciliation, SFTP, bucket ingestion, SLA, due-date monitoring, demo timeline and Shopify recovery/backstop timers.
 - Reconciliation descendant effects, heartbeat writes, queue factories and operations, local worker acquisition and terminal hooks.
 - Idempotent signal handling, bounded waits and pool closure after—not before—settled tracked work.

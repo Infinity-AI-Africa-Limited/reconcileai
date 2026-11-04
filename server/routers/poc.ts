@@ -21,6 +21,7 @@ import {
   HANDOVER_MARKDOWN, HANDOVER_TITLE, HANDOVER_UPDATED,
 } from "../content/technicalHandover";
 import { loggableError } from "../dbErrors";
+import { runBackgroundWork } from "../maintenance/lifecycle";
 import { errorSummary } from "../errorText";
 
 // ~20 MB of base64 keeps us safely under the 50 MB Express body limit.
@@ -285,11 +286,11 @@ export const pocRouter = router({
       });
       const fileId = (inserted as any)[0].insertId as number;
 
-      // Notify owner (fire-and-forget)
+      // Notify owner (fire-and-forget, but tracked so a drain waits for it)
       const meta = pocMeta(input.pocSlug);
       const roleLabel = meta.roles[input.fileRole];
       const sizeMb = (input.sizeBytes / (1024 * 1024)).toFixed(2);
-      notifyOwner({
+      runBackgroundWork(() => notifyOwner({
         title: `📂 ${meta.name} POC — New file uploaded`,
         content:
           `A prospect has uploaded a file on the **${meta.name} POC** page.\n\n` +
@@ -299,7 +300,7 @@ export const pocRouter = router({
           `**Type:** ${input.mimeType}\n` +
           `**Visitor ID:** ${input.visitorId ?? "unknown"}\n\n` +
           `View all uploads in the **Admin Portal → POC Hub**.`,
-      }).catch(() => {/* swallow */});
+      }).catch(() => {/* swallow */}));
 
       return { fileId, s3Key, s3Url };
     }),

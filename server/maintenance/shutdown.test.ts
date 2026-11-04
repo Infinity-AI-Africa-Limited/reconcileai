@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApplicationLifecycle } from "./lifecycle";
 import { attachShutdownSignals } from "./shutdown";
 
-const fakeServer = () => ({
+const fakeServer = (listening = true) => ({
+  listening,
   close: vi.fn((callback: (error?: Error) => void) => { callback(); }),
   closeIdleConnections: vi.fn(),
 });
@@ -115,6 +116,18 @@ describe("when an isolated process receives the maintenance shutdown sequence", 
       },
     }, lifecycle, signals());
     expect((await hook.shutdown()).status).toBe("incomplete");
+    hook.detach();
+  });
+  it("should close the pools without touching a server that never listened", async () => {
+    // Startup met the fence and skipped its listen: server.close() would fail
+    // with ERR_SERVER_NOT_RUNNING and leave the process reporting incomplete.
+    const lifecycle = new ApplicationLifecycle();
+    const server = fakeServer(false);
+    const closeResources = vi.fn(async () => {});
+    const hook = attachShutdownSignals(server as never, { timeoutMs: 1000, closeResources }, lifecycle, signals());
+    expect(await hook.shutdown()).toEqual({ status: "stopped", scope: "tracked_process_only" });
+    expect(closeResources).toHaveBeenCalledOnce();
+    expect(server.close).not.toHaveBeenCalled();
     hook.detach();
   });
   it("should detach only its own signal listeners", () => {

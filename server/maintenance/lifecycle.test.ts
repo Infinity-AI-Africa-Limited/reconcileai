@@ -189,6 +189,69 @@ describe("when the admission fence closes", () => {
   });
 });
 
+describe("when startup runs as root work", () => {
+  it("should hold the drain open until startup settles", async () => {
+    const gate = deferred();
+    const startup = lifecycle.runRoot("startup", () => gate.promise);
+    expect(lifecycle.snapshot()).toEqual({ state: "running", active: 1, stopFailures: 0 });
+    let settled = false;
+    const drain = lifecycle.drain(1_000).then(result => { settled = true; return result; });
+    await flushMicrotasks();
+    expect(settled).toBe(false);
+    gate.resolve(undefined);
+    await startup;
+    await expect(drain).resolves.toEqual({ status: "drained", active: 0, stopFailures: 0 });
+  });
+
+  it("should not lend its admission to work it launches after the fence", async () => {
+    // A request may finish its own effects after the fence; a booting server
+    // must not start new writers because it happened to be mid-startup.
+    const gate = deferred();
+    const lateWriter = vi.fn(async () => undefined);
+    let launched!: Promise<unknown>;
+    const startup = lifecycle.runRoot("startup", async () => {
+      await gate.promise;
+      launched = lifecycle.run("background", lateWriter).catch(error => error);
+    });
+    const drain = lifecycle.drain(1_000);
+    gate.resolve(undefined);
+    await startup;
+    await expect(launched).resolves.toBeInstanceOf(MaintenanceAdmissionError);
+    expect(lateWriter).not.toHaveBeenCalled();
+    await expect(drain).resolves.toEqual({ status: "drained", active: 0, stopFailures: 0 });
+  });
+
+  it("should still track work it launched before the fence", async () => {
+    const writerGate = deferred();
+    let writer!: Promise<void>;
+    const startup = lifecycle.runRoot("startup", async () => {
+      writer = lifecycle.run("background", () => writerGate.promise);
+    });
+    await startup;
+    const drain = lifecycle.drain(1_000);
+    await flushMicrotasks();
+    expect(lifecycle.snapshot()).toMatchObject({ state: "draining", active: 1 });
+    writerGate.resolve(undefined);
+    await writer;
+    await expect(drain).resolves.toEqual({ status: "drained", active: 0, stopFailures: 0 });
+  });
+
+  it("should refuse to start once the fence is up, even from inside admitted work", async () => {
+    const operation = vi.fn(async () => undefined);
+    await lifecycle.run("request", async () => {
+      lifecycle.beginDrain();
+      await expect(lifecycle.runRoot("startup", operation)).rejects.toBeInstanceOf(MaintenanceAdmissionError);
+    });
+    expect(operation).not.toHaveBeenCalled();
+  });
+
+  it("should release its reservation when startup fails", async () => {
+    await expect(lifecycle.runRoot("startup", async () => { throw new Error("fixture_startup_failure"); }))
+      .rejects.toThrow("fixture_startup_failure");
+    expect(lifecycle.snapshot().active).toBe(0);
+  });
+});
+
 describe("when HTTP request lifetimes are reserved", () => {
   it("should invoke middleware synchronously after reservation and release idempotently", async () => {
     const operation = vi.fn(() => { expect(lifecycle.snapshot().active).toBe(1); });

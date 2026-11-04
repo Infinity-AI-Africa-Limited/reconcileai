@@ -26,7 +26,7 @@ async function withinDeadline(work: Promise<void>, remainingMs: number): Promise
 
 /** No process.exit(), queue purge, database query, provider call or runtime resume switch. */
 export function attachShutdownSignals(
-  server: Pick<Server, "close" | "closeIdleConnections">,
+  server: Pick<Server, "close" | "closeIdleConnections" | "listening">,
   options: { timeoutMs: number; closeResources: (isStillDrained: () => boolean) => Promise<void> },
   lifecycle: ApplicationLifecycle = applicationLifecycle,
   signals: SignalSource = process,
@@ -50,6 +50,11 @@ export function attachShutdownSignals(
           return options.closeResources(isStillDrained);
         }),
         new Promise<void>((resolve, reject) => {
+          // Startup that met the fence never listened, so there is no socket to
+          // close; server.close() would fail with ERR_SERVER_NOT_RUNNING. Sound
+          // only because startup is tracked work that awaits its own bind: the
+          // drain above cannot finish while a listen is still in flight.
+          if (!server.listening) { resolve(); return; }
           server.close(error => error ? reject(error) : resolve());
           server.closeIdleConnections();
         }),
