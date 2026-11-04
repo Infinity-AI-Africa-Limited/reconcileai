@@ -139,6 +139,7 @@
     "server/maintenance/startup.test.ts",
     "server/maintenance/requestLifetime.test.ts",
     "server/maintenance/detachedWorkRatchet.test.ts",
+    "server/maintenance/subprocessRehearsal.test.ts",
     "server/jobQueue.maintenance.test.ts",
     "server/jobQueue.maintenance.redis.test.ts",
     "server/api/gatewayLifetime.test.ts",
