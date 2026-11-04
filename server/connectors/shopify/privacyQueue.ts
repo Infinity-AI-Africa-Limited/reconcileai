@@ -11,6 +11,7 @@ import { handleShopifyCustomerRedactionJob } from "./customerRedaction";
 import { handleShopifyShopRedactionJob } from "./shopRedaction";
 import { runShopifyPrivacyDeadlineCheck } from "./privacyDeadlines";
 import { runShopifyScopeAEvidenceRetentionIfDue } from "./evidenceRetention";
+import { applicationLifecycle, runBackgroundWork } from "../../maintenance/lifecycle";
 
 /** Queue-name prefix per job kind: a job id is unique only within its own table. */
 export function shopifyPrivacyJobPrefix(kind: ShopifyPrivacyQueuePayload["kind"]): string {
@@ -87,6 +88,7 @@ export async function recoverShopifyPrivacyOutbox(): Promise<void> {
 }
 
 let recoveryTimer: NodeJS.Timeout | null = null;
+applicationLifecycle.registerStop(stopShopifyPrivacyRecoveryLoop);
 
 /**
  * One recovery sweep: re-dispatch the outbox, clean expired artifacts, report
@@ -132,9 +134,17 @@ export async function runShopifyPrivacyRecoverySweep(deps: {
 
 /** Start one process-local DB recovery scanner; correctness remains in the DB claims. */
 export function startShopifyPrivacyRecoveryLoop(intervalMs = 30_000): void {
+  if (!applicationLifecycle.isAcceptingWork()) return;
   if (recoveryTimer) return;
   const sweep = singleFlight(() => runShopifyPrivacyRecoverySweep());
-  void sweep();
-  recoveryTimer = setInterval(() => void sweep(), intervalMs);
+  runBackgroundWork(() => sweep());
+  if (!applicationLifecycle.isAcceptingWork()) return;
+  recoveryTimer = setInterval(() => runBackgroundWork(() => sweep()), intervalMs);
   recoveryTimer.unref?.();
+}
+
+/** Stop future sweeps only. The immediate dispatch has no timer; active work stays tracked. */
+export function stopShopifyPrivacyRecoveryLoop(): void {
+  if (recoveryTimer) clearInterval(recoveryTimer);
+  recoveryTimer = null;
 }

@@ -8,6 +8,7 @@ import {
 } from "../../../drizzle/shopify_schema";
 import { ENV } from "../../_core/env";
 import { createAuditLog, getDb } from "../../db";
+import { asyncHandler } from "../../_core/asyncHandler";
 import { normalizeShopDomain, shopifyWebhookPayloadDigest, verifyShopifyWebhookHmac } from "./auth";
 import { enqueueShopifyWebhookSync } from "./syncOrchestrator";
 import {
@@ -389,6 +390,6 @@ export async function handleShopifyWebhook(req: express.Request, res: express.Re
 
 export function createShopifyWebhookRouter(): express.Router {
   const router = express.Router();
-  router.post(SHOPIFY_WEBHOOK_PATH, handleShopifyWebhook);
+  router.post(SHOPIFY_WEBHOOK_PATH, asyncHandler(handleShopifyWebhook));
   return router;
 }

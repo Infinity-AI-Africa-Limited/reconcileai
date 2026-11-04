@@ -16,6 +16,7 @@ import * as db from "../db";
 import { getSessionCookieOptions } from "../_core/cookies";
 import { DEMO_PREWARM_OPEN_ID, isPrewarmComplete } from "../prewarmDemoUser";
 import { loggableError } from "../dbErrors";
+import { deferBackgroundWork } from "../maintenance/deferredWork";
 
 /** A guest session lasts a day; long enough to walk the demo, short enough to expire. */
 const GUEST_SESSION_MS = 24 * 60 * 60 * 1000;
@@ -49,7 +50,7 @@ export async function establishGuestSession(ctx: { req: Request; res: Response }
     if (!fallbackUser) {
       throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create guest user' });
     }
-    setImmediate(async () => {
+    deferBackgroundWork(async () => {
       try {
         // Seed ONCE per demo tenant, not once per guest — and once even if
         // several cold-start logins race.

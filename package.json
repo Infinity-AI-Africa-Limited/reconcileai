@@ -4,8 +4,8 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "dev": "NODE_ENV=development tsx watch server/_core/index.ts",
-    "build": "vite build && esbuild server/_core/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
+    "dev": "NODE_ENV=development tsx watch server/_core/bootstrap.ts",
+    "build": "vite build && esbuild server/_core/bootstrap.ts --platform=node --packages=external --bundle --format=esm --splitting --outdir=dist --entry-names=index --chunk-names=server-[name]-[hash]",
     "start": "NODE_ENV=production node dist/index.js",
     "check": "tsc --noEmit",
     "check:tests": "tsc -p tsconfig.tests.json",

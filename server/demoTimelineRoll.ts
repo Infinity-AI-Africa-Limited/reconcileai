@@ -73,6 +73,7 @@ import { createAuditLog, getDb } from "./db";
 import { DEMO_REPORT_MARKER, isSeededReportSummary } from "./demoReportSeed";
 import { buildReportSummary } from "./reportSummary";
 import { loggableError } from "./dbErrors";
+import { applicationLifecycle, runBackgroundWork } from "./maintenance/lifecycle";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
@@ -534,6 +535,14 @@ async function refreshSeededReportSummary(tx: Tx, orgId: number) {
 // ─── The timer ──────────────────────────────────────────────────────────────
 
 let running = false;
+const rollTimers = new Set<NodeJS.Timeout>();
+const initialRollTimers = new Set<NodeJS.Timeout>();
+applicationLifecycle.registerStop(() => {
+  for (const timer of initialRollTimers) clearTimeout(timer);
+  for (const timer of rollTimers) clearInterval(timer);
+  initialRollTimers.clear();
+  rollTimers.clear();
+});
 
 /**
  * One pass over the allow-list. Never throws; logs one line per tenant.
@@ -633,6 +642,7 @@ export function rollEnabledHere(env: NodeJS.ProcessEnv): { enabled: true; minute
  * says this is not the place — logged, so a deploy that did not start it says why.
  */
 export function startDemoTimelineRoll(env: NodeJS.ProcessEnv = process.env): NodeJS.Timeout | null {
+  if (!applicationLifecycle.isAcceptingWork()) return null;
   const here = rollEnabledHere(env);
   if (!here.enabled) {
     if (!env.VITEST) console.log(`[demo-timeline] not started: ${here.reason}`);
@@ -642,8 +652,14 @@ export function startDemoTimelineRoll(env: NodeJS.ProcessEnv = process.env): Nod
   console.log(`[demo-timeline] rolling ${DEMO_TIMELINE_TENANTS.join(", ")} every ${minutes} min`);
   // First pass a minute after boot, clear of startup work, so a deploy also
   // brings the demo current rather than waiting up to an hour.
-  setTimeout(() => void rollAllDemoTimelines(), 60_000).unref?.();
-  const timer = setInterval(() => void rollAllDemoTimelines(), minutes * 60_000);
+  const initialTimer = setTimeout(() => {
+    initialRollTimers.delete(initialTimer);
+    runBackgroundWork(() => rollAllDemoTimelines());
+  }, 60_000);
+  initialRollTimers.add(initialTimer);
+  initialTimer.unref?.();
+  const timer = setInterval(() => runBackgroundWork(() => rollAllDemoTimelines()), minutes * 60_000);
+  rollTimers.add(timer);
   timer.unref?.();
   return timer;
 }

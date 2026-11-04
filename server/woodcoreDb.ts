@@ -7,9 +7,10 @@ import mysql from "mysql2/promise";
 import { ENV } from "./_core/env";
 
 let pool: mysql.Pool | null = null;
+const sourcePools = new Set<mysql.Pool>();
 
 function createPool(): mysql.Pool {
-  return mysql.createPool({
+  const created = mysql.createPool({
     host: ENV.woodcoreDbHost,
     port: ENV.woodcoreDbPort,
     user: ENV.woodcoreDbUser,
@@ -25,6 +26,8 @@ function createPool(): mysql.Pool {
     dateStrings: true,
     multipleStatements: false,
   });
+  sourcePools.add(created);
+  return created;
 }
 
 export function getWoodcorePool(): mysql.Pool {
@@ -32,6 +35,16 @@ export function getWoodcorePool(): mysql.Pool {
     pool = createPool();
   }
   return pool;
+}
+
+/** Shutdown only, after every tracked source sync has actually settled. */
+export async function closeWoodcorePools(): Promise<void> {
+  const results = await Promise.allSettled([...sourcePools].map(async created => {
+    await created.end();
+    sourcePools.delete(created);
+    if (pool === created) pool = null;
+  }));
+  if (results.some(result => result.status === "rejected")) throw new Error("source_pool_close_failed");
 }
 
 export async function woodcoreQuery<T = Record<string, unknown>>(
