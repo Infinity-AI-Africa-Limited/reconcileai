@@ -34,6 +34,7 @@ import { appOriginFor, clientIpOrUnknown, requestIsSecure } from "./clientIp";
 import { sdk } from "./sdk";
 import { isOrgLoginAllowed } from "./tenancy";
 import { loggableError } from "../dbErrors";
+import { asyncHandler } from "./asyncHandler";
 
 export type SsoProviderId = "google" | "microsoft";
 
@@ -281,7 +282,7 @@ function loginError(res: Response, code: string): void {
 }
 
 export function registerSsoRoutes(app: Express): void {
-  app.get("/api/oauth/:provider/start", async (req, res) => {
+  app.get("/api/oauth/:provider/start", asyncHandler(async (req, res) => {
     try {
       const def = getProviderDef(req.params.provider);
       if (!def) return loginError(res, "sso_not_configured");
@@ -317,9 +318,9 @@ export function registerSsoRoutes(app: Express): void {
       console.error("[sso] start failed:", loggableError(err));
       loginError(res, "sso_failed");
     }
-  });
+  }));
 
-  app.get("/api/oauth/:provider/callback", async (req, res) => {
+  app.get("/api/oauth/:provider/callback", asyncHandler(async (req, res) => {
     try {
       const def = getProviderDef(req.params.provider);
       if (!def) return loginError(res, "sso_not_configured");
@@ -436,7 +437,7 @@ export function registerSsoRoutes(app: Express): void {
       console.error("[sso] callback failed:", loggableError(err));
       loginError(res, "sso_failed");
     }
-  });
+  }));
 }
 
 /** cookie-parser isn't installed; read the flow cookie from the raw header. */

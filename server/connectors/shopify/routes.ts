@@ -1,6 +1,8 @@
 import express from "express";
 import { sdk } from "../../_core/sdk";
 import { getDb } from "../../db";
+import { asyncHandler } from "../../_core/asyncHandler";
+import { trackResponseCompletion } from "../../maintenance/deferredWork";
 import { normalizeShopDomain } from "./auth";
 import {
   PrivacyArtifactIntegrityError,
@@ -29,7 +31,7 @@ function installError(res: express.Response, reason: ShopifyInstallErrorReason):
 export function createShopifyRouter(): express.Router {
   const router = express.Router();
 
-  router.get("/api/shopify/privacy/artifacts/:publicId", async (req, res) => {
+  router.get("/api/shopify/privacy/artifacts/:publicId", asyncHandler(async (req, res) => {
     res.set("Cache-Control", "no-store, private, max-age=0");
     res.set("Pragma", "no-cache");
     const publicId = req.params.publicId;
@@ -63,8 +65,8 @@ export function createShopifyRouter(): express.Router {
       // the browser had fetched anything.)
       // A failed confirmation write is retried; if it still fails the export
       // stays downloadable, and expiry records it as served-but-unconfirmed.
-      res.once("finish", () => {
-        void confirmPrivacyArtifactDeliveryWithRetry(db, artifact, actor.id, new Date())
+      trackResponseCompletion(res, () =>
+        confirmPrivacyArtifactDeliveryWithRetry(db, artifact, actor.id, new Date())
           .then((outcome) => {
             if (outcome === "not_confirmed") {
               console.warn("[shopify-privacy] delivery sent but not recorded", { code: "delivery_not_confirmed" });
@@ -75,8 +77,8 @@ export function createShopifyRouter(): express.Router {
               code: "delivery_evidence_failed",
               requestId: artifact.requestId,
             });
-          });
-      });
+          }),
+      );
       res.set("Content-Type", "application/json; charset=utf-8");
       res.set("Content-Disposition", `attachment; filename="${prepared.filename}"`);
       res.set("X-Content-Type-Options", "nosniff");
@@ -97,7 +99,7 @@ export function createShopifyRouter(): express.Router {
       });
       return res.status(503).send("Temporarily unavailable");
     }
-  });
+  }));
 
   // ── The authorization-code install path, retired ───────────────────────────
   //

@@ -35,6 +35,7 @@ import { validateParsedRows, storeTransactions, calculateFileHash } from "./apiI
 import { parseTabularFile } from "./ingest/fileParser";
 import { loggableError } from "./dbErrors";
 import { errorSummary } from "./errorText";
+import { applicationLifecycle, runBackgroundWork } from "./maintenance/lifecycle";
 
 export { encryptCredential, decryptCredential };
 
@@ -46,6 +47,7 @@ const MAX_OBJECT_BYTES = 50 * 1024 * 1024;
 
 const POLLING_CHECK_INTERVAL = 60_000;
 let pollingInterval: NodeJS.Timeout | null = null;
+applicationLifecycle.registerStop(stopBucketPolling);
 
 /** Build an S3 client for a source. Endpoint is required for R2/MinIO. */
 export function buildS3Client(src: {
@@ -350,10 +352,11 @@ export async function pollBucketSources(): Promise<{ polled: number; ingested: n
 }
 
 export function startBucketPolling(): void {
+  if (!applicationLifecycle.isAcceptingWork()) return;
   if (pollingInterval) return;
   console.info("[BucketIngestion] Starting with 60000ms interval");
   pollingInterval = setInterval(() => {
-    void pollBucketSources();
+    runBackgroundWork(() => pollBucketSources());
   }, POLLING_CHECK_INTERVAL);
   pollingInterval.unref?.();
 }

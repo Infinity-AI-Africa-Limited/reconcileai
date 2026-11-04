@@ -2,6 +2,7 @@ import { TRPCError } from "@trpc/server";
 import { canManageExceptionWorkflows } from "@shared/exceptionWorkflowRules";
 import { protectedProcedure, router } from "../_core/trpc";
 import { afterExceptionClosed } from "../exceptionClosureEffects";
+import { runBackgroundWork } from "../maintenance/lifecycle";
 import {
   approveExceptionWorkflowDecisionInput,
   escalateExceptionWorkflowInput,
@@ -120,13 +121,14 @@ export const exceptionWorkflowRouter = router({
       client: getClientInfo(ctx),
     });
     // After the commit: the same learning and webhook as any other closure.
-    void afterExceptionClosed({
+    // Tracked: these writes outlive the procedure, and a drain must wait for them.
+    runBackgroundWork(() => afterExceptionClosed({
       organizationId,
       exceptionId: input.exceptionId,
       userId: ctx.user.id,
       outcome: input.outcome,
       resolutionNotes: input.resolutionNotes,
-    });
+    }));
     return closed;
   }),
 });
