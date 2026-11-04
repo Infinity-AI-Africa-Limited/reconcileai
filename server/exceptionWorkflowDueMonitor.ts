@@ -3,6 +3,7 @@ import { exceptionWorkflows, exceptions } from "../drizzle/schema";
 import { getDb } from "./db";
 import { loggableError } from "./dbErrors";
 import { recordElapsedDeadline } from "./exceptionWorkflowDeadline";
+import { applicationLifecycle, runBackgroundWork } from "./maintenance/lifecycle";
 
 export { DUE_DATE_ELAPSED_NOTE } from "./exceptionWorkflowDeadline";
 
@@ -162,6 +163,7 @@ export async function expireDueExceptionWorkflows(
 
 let dueMonitorTimer: NodeJS.Timeout | null = null;
 let tickInFlight = false;
+applicationLifecycle.registerStop(stopExceptionWorkflowDueMonitor);
 
 /**
  * An application-owned recurring sweep. It runs once at production boot and
@@ -190,6 +192,7 @@ export function startExceptionWorkflowDueMonitor(
   env: NodeJS.ProcessEnv = process.env,
   intervalMs = EXCEPTION_WORKFLOW_DUE_MONITOR_INTERVAL_MS,
 ): NodeJS.Timeout | null {
+  if (!applicationLifecycle.isAcceptingWork()) return null;
   const enabled = dueMonitorEnabledHere(env);
   if (!enabled.enabled) {
     if (!env.VITEST) console.log(`[exception-workflow-due-monitor] not started: ${enabled.reason}`);
@@ -197,8 +200,9 @@ export function startExceptionWorkflowDueMonitor(
   }
   if (dueMonitorTimer) return dueMonitorTimer;
   console.log(`[exception-workflow-due-monitor] starting every ${intervalMs}ms`);
-  void dueMonitorTick();
-  dueMonitorTimer = setInterval(() => { void dueMonitorTick(); }, intervalMs);
+  runBackgroundWork(() => dueMonitorTick());
+  if (!applicationLifecycle.isAcceptingWork()) return null;
+  dueMonitorTimer = setInterval(() => { runBackgroundWork(() => dueMonitorTick()); }, intervalMs);
   dueMonitorTimer.unref?.();
   return dueMonitorTimer;
 }

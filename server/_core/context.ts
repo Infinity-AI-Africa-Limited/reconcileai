@@ -3,6 +3,7 @@ import type { User } from "../../drizzle/schema";
 import { sdk } from "./sdk";
 import { PORTAL_ORG_HEADER, applyPortalView } from "./portalView";
 import { getOrganizationById } from "../db";
+import { runTrpcWork } from "../maintenance/trpcWork";
 
 export type TrpcContext = {
   req: CreateExpressContextOptions["req"];
@@ -18,7 +19,17 @@ export type TrpcContext = {
   viewingAs?: number | null;
 };
 
-export async function createContext(
+/**
+ * Tracked work, not just part of the HTTP lease: authentication writes
+ * `lastSignedIn`, and a client that disconnects mid-authentication ends the
+ * lease while that write is still running. The procedure that follows is
+ * tracked separately (bindLifecycle in trpc.ts).
+ */
+export function createContext(opts: CreateExpressContextOptions): Promise<TrpcContext> {
+  return runTrpcWork(() => resolveContext(opts));
+}
+
+async function resolveContext(
   opts: CreateExpressContextOptions
 ): Promise<TrpcContext> {
   let signedIn: User | null = null;

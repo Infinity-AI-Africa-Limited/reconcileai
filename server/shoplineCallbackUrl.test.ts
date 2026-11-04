@@ -156,6 +156,7 @@ async function drive(
   };
 
   await layer.route.stack[0].handle(req, res);
+  await vi.waitFor(() => expect(out.redirect ?? out.status).toBeDefined());
   return out;
 }
 

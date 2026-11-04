@@ -5,6 +5,8 @@ import { isTenantId } from "@shared/tenantId";
 import { auditOrganizationFor } from "./requestScope";
 import { clientIp } from "./clientIp";
 import { loggableError } from "../dbErrors";
+import { runBackgroundWork } from "../maintenance/lifecycle";
+import { asyncHandler } from "./asyncHandler";
 
 /**
  * Which audit chain a storage access decision is filed in.
@@ -46,7 +48,10 @@ export function storageAuditTenant(
  *   3. AUDIT — every access is logged (actor, key, decision).
  */
 export function registerStorageProxy(app: Express) {
-  app.get("/manus-storage/:key(*)", async (req, res) => {
+  // asyncHandler tracks the handler's own promise: authentication writes
+  // `lastSignedIn`, and a client that disconnects mid-request must not let a
+  // drain close the pool under that write.
+  app.get("/manus-storage/:key(*)", asyncHandler(async (req, res) => {
     const key = req.params.key;
     if (!key) {
       res.status(400).send("Missing storage key");
@@ -73,7 +78,9 @@ export function registerStorageProxy(app: Express) {
       user.organizationId === keyOrgId;
 
     // 3. Audit the access decision (best-effort; never blocks the response).
-    void (async () => {
+    // Tracked, not detached: it outlives the response, and an untracked write
+    // is one a drain would close the pool under.
+    runBackgroundWork(async () => {
       try {
         const { createAuditLog } = await import("../db");
         await createAuditLog({
@@ -86,7 +93,7 @@ export function registerStorageProxy(app: Express) {
           userAgent: (req.headers["user-agent"] || "").toString().substring(0, 500) || null,
         });
       } catch { /* audit is best-effort here */ }
-    })();
+    });
 
     if (!allowed) {
       res.status(403).send("You do not have access to this object");
@@ -101,5 +108,5 @@ export function registerStorageProxy(app: Express) {
       console.error("[StorageProxy] failed:", loggableError(err));
       res.status(502).send("Storage proxy error");
     }
-  });
+  }));
 }

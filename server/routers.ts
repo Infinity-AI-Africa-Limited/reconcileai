@@ -1,3 +1,5 @@
+import { runBackgroundWork } from "./maintenance/lifecycle";
+import { deferBackgroundWork } from "./maintenance/deferredWork";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -264,9 +266,9 @@ import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 // reached every tenant's webhooks. Fire-and-forget: never awaited, never throws.
 
 function dispatchWebhook(organizationId: number, event: WebhookEvent, payload: Record<string, unknown>): void {
-  dispatchWebhookEvent(organizationId, event, payload).catch((err) =>
+  runBackgroundWork(() => dispatchWebhookEvent(organizationId, event, payload).catch((err) =>
     console.error("[webhookDelivery] dispatch failed (non-fatal):", loggableError(err)),
-  );
+  ));
 }
 
 /**
@@ -909,7 +911,7 @@ export const appRouter = router({
         if (tenant) {
           const _orgId = tenant;
           const _userId = ctx.user.id;
-          void import("./exceptionIntelligence").then((ei) =>
+          runBackgroundWork(() => import("./exceptionIntelligence").then((ei) =>
             ei.captureExceptionOutcome({
               organizationId: _orgId,
               exceptionId: input.id,
@@ -917,7 +919,7 @@ export const appRouter = router({
               outcome: "escalated",
               resolutionText: input.note || "Escalated per aging SLA",
             }),
-          ).catch(() => {});
+          ).catch(() => {}));
         }
         dispatchExceptionEvent(escalated, tenant, "exception.escalated", { exceptionId: input.id });
         return { success: true };
@@ -945,7 +947,7 @@ export const appRouter = router({
         const _orgId = tenant;
         const _userId = ctx.user.id;
         const _ids = overAged.map((r) => r.id);
-        void (async () => {
+        runBackgroundWork(async () => {
           try {
             const ei = await import("./exceptionIntelligence");
             for (const id of _ids) {
@@ -958,7 +960,7 @@ export const appRouter = router({
               });
             }
           } catch { /* best-effort */ }
-        })();
+        });
       }
       return { success: true, count: overAged.length };
     }),
@@ -1050,13 +1052,13 @@ export const appRouter = router({
           notes: input.resolutionNotes,
         }, ip, ua);
         // Learning and the exception.resolved webhook, shared with governed closure.
-        void afterExceptionClosed({
+        runBackgroundWork(() => afterExceptionClosed({
           organizationId,
           exceptionId: input.id,
           userId: ctx.user.id,
           outcome: input.status,
           resolutionNotes,
-        });
+        }));
         return { success: true };
       }),
 
@@ -1089,9 +1091,9 @@ export const appRouter = router({
         // the shared pool. Best-effort, never fails the reopen.
         if (ctx.user.organizationId) {
           const _orgId = ctx.user.organizationId;
-          void import("./exceptionIntelligence").then((ei) =>
+          runBackgroundWork(() => import("./exceptionIntelligence").then((ei) =>
             ei.retractResolutionLearning(_orgId, input.id),
-          ).catch(() => {});
+          ).catch(() => {}));
         }
 
         return { success: true };
@@ -1221,7 +1223,7 @@ export const appRouter = router({
         if (ctx.user.organizationId) {
           const _orgId = ctx.user.organizationId;
           const _userId = ctx.user.id;
-          void import("./exceptionIntelligence").then((ei) =>
+          runBackgroundWork(() => import("./exceptionIntelligence").then((ei) =>
             ei.captureExceptionOutcome({
               organizationId: _orgId,
               exceptionId: input.id,
@@ -1229,7 +1231,7 @@ export const appRouter = router({
               outcome: "escalated",
               resolutionText: input.notes || "Escalated to management",
             }),
-          ).catch(() => {});
+          ).catch(() => {}));
         }
 
         dispatchExceptionEvent(escalated, tenant, "exception.escalated", { exceptionId: input.id });
@@ -5933,10 +5935,10 @@ Always be specific, reference actual exception IDs and amounts where available, 
         // Notify owner of new assessment lead
         if (input.respondentEmail) {
           const { notifyOwner } = await import("./_core/notification");
-          notifyOwner({
+          runBackgroundWork(() => notifyOwner({
             title: `📋 New Compliance Assessment — ${input.institutionName ?? "Anonymous"} [${riskLevel.toUpperCase()}]`,
             content: `Score: ${overallScore}/100\nRisk: ${riskLevel}\nType: ${input.institutionType ?? "N/A"}\nName: ${input.respondentName ?? "N/A"}\nEmail: ${input.respondentEmail}\nConsent: ${input.consentToContact}`,
-          }).catch(() => {});
+          }).catch(() => {}));
         }
 
         // Send follow-up email to respondent when they have consented to contact
@@ -7060,9 +7062,9 @@ async function runReconciliation(
   // unref() so a stray timer can never hold the process open, and every error
   // swallowed: a failed heartbeat must not fail the reconciliation.
   const heartbeat = setInterval(() => {
-    db.touchReconciliationJobHeartbeat(jobId).catch((err) =>
+    runBackgroundWork(() => db.touchReconciliationJobHeartbeat(jobId).catch((err) =>
       console.warn(`[Reconciliation] heartbeat failed for job ${jobId} (non-fatal):`, loggableError(err)),
-    );
+    ));
   }, RECONCILIATION_HEARTBEAT_MS);
   if (typeof heartbeat.unref === "function") heartbeat.unref();
 
@@ -7306,7 +7308,7 @@ async function runReconciliation(
     // Invalidate this tenant's dashboard stats cache so their next load is fresh.
     // Scoped to the run's own organization — the unscoped version dropped every
     // other tenant's row too.
-    db.invalidateDashboardStatsCache(runOrganizationId).catch(() => {});
+    runBackgroundWork(() => db.invalidateDashboardStatsCache(runOrganizationId).catch(() => {}));
 
     // Dispatch webhooks (WS-4 event set), to the job's own tenant only.
     dispatchWebhook(runOrganizationId, "reconciliation.completed", {
@@ -7338,16 +7340,16 @@ async function runReconciliation(
     }
 
     // Send email alerts based on user preferences
-    checkAndSendAlerts(jobId, userId).catch((err) =>
+    runBackgroundWork(() => checkAndSendAlerts(jobId, userId).catch((err) =>
       console.error("[EmailReport] Alert check failed:", loggableError(err))
-    );
+    ));
 
     // Deferred AI analysis — fire-and-forget so the job is already "completed".
     // High/critical exceptions get their Claude narrative filled in shortly after,
     // keeping LLM latency entirely out of the reconciliation hot path.
-    runDeferredAiAnalysis(jobId).catch((err) =>
+    runBackgroundWork(() => runDeferredAiAnalysis(jobId).catch((err) =>
       console.error("[AI pass] deferred analysis failed:", loggableError(err))
-    );
+    ));
 
   } catch (error) {
     console.error("[Reconciliation] Job failed:", { ...loggableError(error), frames: stackFrames(error) });
@@ -7393,8 +7395,8 @@ startExceptionWorkflowDueMonitor();
 startDemoTimelineRoll();
 // Pre-warm the shared demo user so the first guest gets instant data
 // Runs asynchronously — does not block server startup
-setImmediate(() => {
-  prewarmDemoUser().catch((err) =>
+deferBackgroundWork(() => {
+  return prewarmDemoUser().catch((err) =>
     console.error("[Boot] prewarmDemoUser failed:", loggableError(err))
   );
 });

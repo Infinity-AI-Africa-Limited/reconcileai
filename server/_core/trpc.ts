@@ -4,6 +4,7 @@ import superjson from "superjson";
 import type { TrpcContext } from "./context";
 import { auditOrganizationFor, runInRequestScope } from "./requestScope";
 import { errorSummary, isDatabaseError } from "../errorText";
+import { runTrpcWork } from "../maintenance/trpcWork";
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
@@ -89,7 +90,10 @@ const bindRequestScope = t.middleware(({ ctx, next }) =>
   ),
 );
 
-const baseProcedure = t.procedure.use(bindRequestScope).use(refuseReadOnlyWrites);
+// Context creation is tracked the same way, in createContext (context.ts).
+const bindLifecycle = t.middleware(({ next }) => runTrpcWork(() => next()));
+
+const baseProcedure = t.procedure.use(bindLifecycle).use(bindRequestScope).use(refuseReadOnlyWrites);
 
 export const publicProcedure = baseProcedure;
 

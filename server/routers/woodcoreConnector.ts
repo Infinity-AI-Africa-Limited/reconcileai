@@ -35,6 +35,7 @@ import { encryptSecretForOrg, maskSecretForOrg } from "../connectors/woodcore/se
 import { runBatchSync } from "../connectors/woodcore/sync";
 import { pushWriteBackNote } from "../connectors/woodcore/writeback";
 import { loggableError } from "../dbErrors";
+import { runBackgroundWork } from "../maintenance/lifecycle";
 
 const entitySchema = z.enum(["savings_transaction", "loan_transaction", "journal_entry"]);
 
@@ -337,13 +338,15 @@ export const woodcoreConnectorRouter = router({
           message: `Sync trigger rate limit reached — try again in ${rate.retryAfterSec}s`,
         });
       }
-      // Fire-and-forget: the dashboard polls listSyncRuns for progress.
-      runBatchSync(cfg.id, {
+      // Fire-and-forget: the dashboard polls listSyncRuns for progress. Tracked,
+      // because the sync writes for minutes after this returns: a drain must
+      // wait for it rather than close the pool under it.
+      runBackgroundWork(() => runBatchSync(cfg.id, {
         trigger: input?.windowFrom ? "backfill" : "manual",
         scope: input?.scope ?? "all",
         windowFrom: input?.windowFrom,
         windowTo: input?.windowTo,
-      }).catch((e) => console.error("[wc-connector] manual sync failed:", loggableError(e)));
+      }).catch((e) => console.error("[wc-connector] manual sync failed:", loggableError(e))));
       return { started: true };
     }),
 

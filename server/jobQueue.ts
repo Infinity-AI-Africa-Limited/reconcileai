@@ -14,8 +14,10 @@
  * change. If BullMQ/Redis initialisation fails, we fall back in-process and
  * log loudly rather than dropping jobs silently.
  */
+import { AsyncResource } from "node:async_hooks";
 import { loggableError } from "./dbErrors";
 import { stackFrames, errorSummary } from "./errorText";
+import { applicationLifecycle, MaintenanceAdmissionError } from "./maintenance/lifecycle";
 
 export interface QueueJob<T> {
   name: string;
@@ -135,10 +137,10 @@ export interface JobQueue<T> {
   /**
    * Release the backend's resources and deregister the queue.
    *
-   * The server never calls this — its queues live as long as the process, which
-   * is the point of them. TESTS must, because a BullMQ queue holds a Queue and a
-   * Worker, each with its own Redis connection, and an unclosed pair keeps the
-   * event loop alive: the run leaks connections and may simply never terminate.
+   * Maintenance calls this only AFTER tracked drain. Tests must also close
+   * their queues: BullMQ owns Queue and Worker connections that otherwise keep
+   * the event loop alive. Closure errors propagate; an unfinished in-process
+   * queue refuses closure rather than claiming its non-durable work survived.
    */
   close(): Promise<void>;
   /** Which backend is live — surfaced in health/ops output. */
@@ -215,9 +217,22 @@ export function backoffDelayMs(attempt: number, baseMs: number): number {
 
 // ─── In-process backend ───────────────────────────────────────────────────────
 
+/** A non-durable queue cannot be discarded as if its entries were preserved. */
+export class InProcessQueueNotEmptyError extends Error {
+  constructor() {
+    super("In-process queue has unfinished work; maintenance cannot safely close it.");
+    this.name = "InProcessQueueNotEmptyError";
+  }
+}
+
 class InProcessQueue<T> implements JobQueue<T> {
   readonly backend = "in-process" as const;
   private pending = 0;
+  private stopped = false;
+  private closed = false;
+  private readonly unregisterStop: () => void;
+  /** Entries stay here when fenced; cancelling a timer never discards its work. */
+  private readonly waiting = new Set<{ stopTimer: () => void }>();
   /** coalesceKey → whether its entry has started, and the one follow-up kept while it runs. */
   private readonly coalesced = new Map<
     string,
@@ -229,7 +244,12 @@ class InProcessQueue<T> implements JobQueue<T> {
     private readonly handler: JobHandler<T>,
     private readonly defaults: RetryDefaults,
     private readonly onFinalFailure?: (job: QueueJob<T>, error: unknown) => Promise<void>,
-  ) {}
+  ) {
+    this.unregisterStop = applicationLifecycle.registerStop(() => {
+      this.stopped = true;
+      for (const entry of this.waiting) entry.stopTimer();
+    });
+  }
 
   async stats(): Promise<QueueStats> {
     // No inspectable store: work lives in closures and dies with the process.
@@ -238,12 +258,23 @@ class InProcessQueue<T> implements JobQueue<T> {
   }
 
   async close(): Promise<void> {
-    // Nothing to release — pending work is timers and closures, and the retry
-    // timers are already unref'd so they cannot hold the process open.
-    LIVE_QUEUES.delete(this.queueName);
+    if (this.pending || this.waiting.size || this.coalesced.size) {
+      throw new InProcessQueueNotEmptyError();
+    }
+    this.closed = true;
+    this.stopped = true;
+    this.unregisterStop();
+    deregisterQueue(this.queueName, this as JobQueue<unknown>);
   }
 
   async enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void> {
+    await applicationLifecycle.run("queue-operation", async () => {
+      if (this.closed) throw new MaintenanceAdmissionError();
+      this.enqueueNow(name, data, opts);
+    });
+  }
+
+  private enqueueNow(name: string, data: T, opts?: EnqueueOptions): void {
     const attempts = opts?.attempts ?? this.defaults.attempts;
     const backoffMs = opts?.backoffMs ?? this.defaults.backoffMs;
     const delayMs = opts?.delayMs ?? 0;
@@ -275,21 +306,53 @@ class InProcessQueue<T> implements JobQueue<T> {
         onSettled: () => {
           this.coalesced.delete(key);
           const next = entry.followUp;
-          if (next) void this.enqueue(next.name, next.data, next.opts);
+          // This completion effect belongs to the active tracked handler. A
+          // drain retains it locally, but must not acquire it as a new run.
+          if (next) this.enqueueNow(next.name, next.data, next.opts);
         },
       }),
     );
   }
 
-  /** Start work now, or after `delayMs` (EnqueueOptions.delayMs). */
+  /** Track the timer, but retain its closure if acquisition is fenced. */
   private after(delayMs: number, start: () => void): void {
-    if (delayMs <= 0) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let immediate: ReturnType<typeof setImmediate> | undefined;
+    let release!: () => void;
+    const timerDone = new Promise<void>((resolve) => { release = resolve; });
+    const entry = {
+      // Keep `start` reachable even once the timer has been cancelled: this is
+      // unfinished, non-durable work, not a successful preservation claim.
+      start,
+      stopTimer: () => {
+        clearTimeout(timer);
+        if (immediate) clearImmediate(immediate);
+        release();
+      },
+    };
+    this.waiting.add(entry);
+    void applicationLifecycle.run("queue-operation", () => timerDone).catch((error) => {
+      entry.stopTimer();
+      console.error(`[queue:${this.queueName}] timer tracking failed:`, loggableError(error));
+    });
+    const acquire = () => {
+      if (this.stopped || !applicationLifecycle.isAcceptingWork()) {
+        entry.stopTimer();
+        return;
+      }
+      this.waiting.delete(entry);
+      // Start the tracked handler before releasing the timer's lifecycle slot.
       start();
-      return;
+      release();
+    };
+    if (this.stopped || !applicationLifecycle.isAcceptingWork()) {
+      entry.stopTimer();
+    } else if (delayMs > 0) {
+      timer = setTimeout(() => { immediate = setImmediate(acquire); }, delayMs);
+      timer.unref?.();
+    } else {
+      immediate = setImmediate(acquire);
     }
-    const timer = setTimeout(start, delayMs);
-    // A delayed start must not hold the process open, any more than a retry.
-    timer.unref?.();
   }
 
   private run(
@@ -297,10 +360,9 @@ class InProcessQueue<T> implements JobQueue<T> {
     maxAttempts: number,
     backoffMs: number,
     hooks?: { onStart: () => void; onSettled: () => void },
-  ) {
+  ): void {
     this.pending += 1;
-    // setImmediate keeps enqueue non-blocking; the handler owns its own errors.
-    setImmediate(async () => {
+    void applicationLifecycle.run("queue-handler", async () => {
       hooks?.onStart();
       try {
         await this.handler(job);
@@ -308,12 +370,10 @@ class InProcessQueue<T> implements JobQueue<T> {
       } catch (err) {
         if (job.attempt < maxAttempts) {
           const delay = backoffDelayMs(job.attempt, backoffMs);
-          const timer = setTimeout(
-            () => this.run({ ...job, attempt: job.attempt + 1 }, maxAttempts, backoffMs, hooks),
+          this.after(
             delay,
+            () => this.run({ ...job, attempt: job.attempt + 1 }, maxAttempts, backoffMs, hooks),
           );
-          // Never keep the process alive just for retries.
-          if (typeof timer.unref === "function") timer.unref();
         } else {
           try {
             await this.onFinalFailure?.(job, err);
@@ -334,6 +394,8 @@ class InProcessQueue<T> implements JobQueue<T> {
       } finally {
         this.pending -= 1;
       }
+    }).catch((error) => {
+      console.error(`[queue:${this.queueName}] handler tracking failed:`, loggableError(error));
     });
   }
 }
@@ -364,35 +426,124 @@ async function createBullMqQueue<T>(
     },
   });
 
+  // BullMQ acknowledges completion/failure AFTER the processor resolves. Keep
+  // the lifecycle slot until that event, otherwise drain could miss the final
+  // Redis write and the terminal hook. bind preserves the admitted ancestry
+  // even when BullMQ emits the event outside the processor's async context.
+  const finishing = new Map<object, (error?: unknown, final?: boolean) => Promise<void>>();
+  let unprovedFinalisation = false;
+  let closingWorker = false;
+  const workerCloseErrors: unknown[] = [];
+  async function terminalHook(bullJob: { name: string; data: unknown; attemptsMade: number }, error: unknown) {
+    try {
+      await onFinalFailure?.({ name: bullJob.name, data: bullJob.data as T, attempt: bullJob.attemptsMade }, error);
+    } catch (terminalError) {
+      // Keep the failed BullMQ row as dead-letter evidence too.
+      console.error(`[queue:${queueName}] terminal failure hook failed for "${bullJob.name}":`, loggableError(terminalError));
+    }
+  }
+  const acceptingAtConstruction = applicationLifecycle.isAcceptingWork();
   const worker = new Worker(
     queueName,
-    async (bullJob) => {
-      await handler({
-        name: bullJob.name,
-        data: bullJob.data as T,
-        attempt: bullJob.attemptsMade + 1,
-      });
-    },
-    { connection, concurrency },
+    (bullJob) => new Promise<void>((resolveProcessor, rejectProcessor) => {
+      // This is a fresh acquisition, not an enqueue descendant. The worker's
+      // local pause stops acquisition; this fence also catches an in-flight
+      // fetch that raced the stop signal. BullMQ retains the rejected entry.
+      if (!applicationLifecycle.isAcceptingWork()) {
+        // BullMQ still has to acknowledge this race in Redis, without an
+        // admitted handler lease. Invalidate safe drain instead of inventing
+        // proof that an untracked finalisation has finished.
+        unprovedFinalisation = true;
+        applicationLifecycle.registerStop(() => { throw new MaintenanceAdmissionError(); });
+        rejectProcessor(new MaintenanceAdmissionError());
+        return;
+      }
+      void applicationLifecycle.run("queue-handler", async () => {
+        let release!: () => void;
+        const acknowledged = new Promise<void>((resolve) => { release = resolve; });
+        finishing.set(bullJob, AsyncResource.bind(async (error?: unknown, final = false) => {
+          try {
+            if (final) await applicationLifecycle.run("queue-handler", () => terminalHook(bullJob, error));
+          } finally {
+            finishing.delete(bullJob);
+            release();
+          }
+        }));
+        try {
+          await handler({ name: bullJob.name, data: bullJob.data as T, attempt: bullJob.attemptsMade + 1 });
+          resolveProcessor();
+        } catch (error) {
+          rejectProcessor(error);
+        }
+        await acknowledged;
+      }).catch(rejectProcessor);
+    }),
+    // Normal mode preserves constructor autorun (also used by existing mocks).
+    // A factory already admitted before drain may finish its lazy import late:
+    // disable autorun then, so it never fetches work before its stop is wired.
+    { connection, concurrency, autorun: acceptingAtConstruction },
   );
-  worker.on("error", (err) => console.error(`[queue:${queueName}] worker error:`, loggableError(err)));
+  worker.on("error", (err) => {
+    // BullMQ catches cleanup failures, emits them here, then resolves close().
+    // Observing only that promise would falsely prove resource cleanup.
+    if (closingWorker) workerCloseErrors.push(err);
+    console.error(`[queue:${queueName}] worker error:`, loggableError(err));
+  });
+  worker.on("completed", (bullJob) => { void finishing.get(bullJob)?.(); });
   worker.on("failed", async (bullJob, error) => {
-    if (!bullJob || bullJob.attemptsMade < (bullJob.opts.attempts ?? defaults.attempts)) return;
-    const job: QueueJob<T> = {
-      name: bullJob.name,
-      data: bullJob.data as T,
-      attempt: bullJob.attemptsMade,
-    };
-    try {
-      await onFinalFailure?.(job, error);
-    } catch (terminalError) {
-      // Keep the failed BullMQ row as the queue's dead-letter evidence too.
-      console.error(
-        `[queue:${queueName}] terminal failure hook failed for "${bullJob.name}":`,
-        loggableError(terminalError),
-      );
+    if (!bullJob) return;
+    const final = bullJob.attemptsMade >= (bullJob.opts.attempts ?? defaults.attempts);
+    const finish = finishing.get(bullJob);
+    if (finish) {
+      await finish(error, final);
+    } else if (final) {
+      // BullMQ can fail deferred/stalled work without calling the processor.
+      // Do not create untracked asynchronous terminal effects.
+      try {
+        await applicationLifecycle.run("queue-handler", () => terminalHook(bullJob, error));
+      } catch (trackingError) {
+        // A deferred terminal event after the fence has no live ancestry. Its
+        // persisted failed entry remains, but terminal effects are unproved.
+        unprovedFinalisation = true;
+        applicationLifecycle.registerStop(() => { throw new MaintenanceAdmissionError(); });
+        console.error(`[queue:${queueName}] terminal hook admission failed:`, loggableError(trackingError));
+      }
     }
   });
+  let stopped: Promise<void> | undefined;
+  const stopQueue = () => {
+    // pause(true) leaves the blocking fetch/main loop in flight. Full local
+    // pause proves acquisition quiescence, including final Redis acknowledgements;
+    // the lifecycle drain bounds this wait without cancelling its stop promise.
+    // Never globally pause or purge the shared Queue.
+    stopped ??= worker.pause(false);
+    return stopped;
+  };
+  const unregisterStop = applicationLifecycle.registerStop(stopQueue);
+  if (!applicationLifecycle.isAcceptingWork()) {
+    // registerStop may have already invoked it; await the SAME local pause so
+    // a late factory never returns an acquisition-capable worker during drain.
+    await stopQueue();
+  }
+  let closed = false;
+
+  // BullMQ caches its close promise even when cleanup emitted errors. Cache our
+  // proof too: a retry cannot turn that resolved promise into successful cleanup.
+  let workerClose: Promise<void> | undefined;
+  function closeWorker(): Promise<void> {
+    workerClose ??= (async () => {
+      closingWorker = true;
+      try {
+        await worker.close();
+        if (workerCloseErrors.length) {
+          throw new AggregateError(workerCloseErrors, "Worker resources could not be safely closed.");
+        }
+      } finally {
+        closingWorker = false;
+      }
+    })();
+    return workerClose;
+  }
 
   let statsInFlight: Promise<QueueStats> | null = null;
   async function readStats(): Promise<QueueStats> {
@@ -482,14 +633,21 @@ async function createBullMqQueue<T>(
     });
   }
 
-  return {
+  const result: JobQueue<T> = {
     backend: "bullmq" as const,
     async close(): Promise<void> {
       // Worker first: it holds the blocking connection that keeps the event
       // loop alive, so closing the Queue alone would still hang a test run.
-      await worker.close().catch(() => {});
-      await queue.close().catch(() => {});
-      LIVE_QUEUES.delete(queueName);
+      // Do not close the Queue if the worker failed to close: an active worker
+      // may still need it to acknowledge work. Failures block safe maintenance.
+      await closeWorker();
+      if (unprovedFinalisation) throw new MaintenanceAdmissionError();
+      await queue.close();
+      // A late unadmitted event also invalidates a closure already in progress.
+      if (unprovedFinalisation) throw new MaintenanceAdmissionError();
+      closed = true;
+      unregisterStop();
+      deregisterQueue(queueName, result as JobQueue<unknown>);
     },
     stats(): Promise<QueueStats> {
       // One count read in flight per queue, shared by every caller. Against an
@@ -505,7 +663,10 @@ async function createBullMqQueue<T>(
     enqueue(name: string, data: T, opts?: EnqueueOptions): Promise<void> {
       // The WHOLE operation is bounded, not each round trip: the re-arm path
       // makes up to four, and the caller's budget is for the enqueue.
-      return bounded("enqueue", name, enqueueNow(name, data, opts));
+      return bounded("enqueue", name, applicationLifecycle.run("queue-operation", async () => {
+        if (closed) throw new MaintenanceAdmissionError();
+        await enqueueNow(name, data, opts);
+      }));
     },
     // Addressable only when the name IS the job id; without that there is
     // nothing to look up, so the capability is simply absent.
@@ -517,12 +678,16 @@ async function createBullMqQueue<T>(
             return bounded(
               "remove",
               name,
-              queue.remove(name).then(() => {}),
+              applicationLifecycle.run("queue-operation", async () => {
+                if (closed) throw new MaintenanceAdmissionError();
+                await queue.remove(name);
+              }),
             );
           },
         }
       : {}),
   };
+  return result;
 }
 
 // ─── Live-queue registry (health/ops) ─────────────────────────────────────────
@@ -532,6 +697,28 @@ async function createBullMqQueue<T>(
  * actually running rather than on what the configuration implies.
  */
 const LIVE_QUEUES = new Map<string, JobQueue<unknown>>();
+// Health is keyed by name, but several workers may share a name. Closing only
+// the latest map entry would leak the earlier worker and its connections.
+const QUEUE_INSTANCES = new Set<JobQueue<unknown>>();
+
+function registerQueue(name: string, queue: JobQueue<unknown>): void {
+  LIVE_QUEUES.set(name, queue);
+  QUEUE_INSTANCES.add(queue);
+}
+
+function deregisterQueue(name: string, queue: JobQueue<unknown>): void {
+  if (LIVE_QUEUES.get(name) === queue) LIVE_QUEUES.delete(name);
+  QUEUE_INSTANCES.delete(queue);
+}
+
+/** Only call after a successful lifecycle drain, never in the stop phase. */
+export async function closeAllQueues(): Promise<void> {
+  const results = await Promise.allSettled([...QUEUE_INSTANCES].map((queue) => queue.close()));
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failures.length) {
+    throw new AggregateError(failures.map((result) => result.reason), "Queue resources could not be safely closed.");
+  }
+}
 
 /**
  * How long one queue's count read may take before it is reported as failing.
@@ -576,6 +763,17 @@ export async function createQueue<T>(
   handler: JobHandler<T>,
   opts?: QueueCreateOptions<T>,
 ): Promise<JobQueue<T>> {
+  // Include lazy import, construction, stop registration, and live registry
+  // insertion in ONE tracked operation. A pre-fence factory can finish late;
+  // drain must not report success before that resource is visible for close.
+  return applicationLifecycle.run("queue-operation", () => createQueueNow(queueName, handler, opts));
+}
+
+async function createQueueNow<T>(
+  queueName: string,
+  handler: JobHandler<T>,
+  opts?: QueueCreateOptions<T>,
+): Promise<JobQueue<T>> {
   const defaults: RetryDefaults = {
     attempts: opts?.attempts ?? 6,
     backoffMs: opts?.backoffMs ?? 30_000,
@@ -596,9 +794,12 @@ export async function createQueue<T>(
         opts?.operationTimeoutMs ?? QUEUE_OPERATION_TIMEOUT_MS,
       );
       console.log(`[queue:${queueName}] BullMQ backend active`);
-      LIVE_QUEUES.set(queueName, q as JobQueue<unknown>);
+      registerQueue(queueName, q as JobQueue<unknown>);
       return q;
     } catch (err) {
+      // A lifecycle stop failure must never be disguised as a fallback that
+      // loses the durable worker or falsely claims maintenance is safe.
+      if (!applicationLifecycle.isAcceptingWork()) throw err;
       if (opts?.requireDurable) {
         throw new DurableQueueUnavailableError(
           queueName,
@@ -620,6 +821,6 @@ export async function createQueue<T>(
     defaults,
     opts?.onFinalFailure,
   );
-  LIVE_QUEUES.set(queueName, fallback as JobQueue<unknown>);
+  registerQueue(queueName, fallback as JobQueue<unknown>);
   return fallback;
 }

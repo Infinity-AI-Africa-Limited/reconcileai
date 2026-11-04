@@ -65,9 +65,17 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // close() must not discard the last delayed request or coalesced follow-up.
+  // This queue has attempts: 1 (runRealtimeSync handles sync failures), so two
+  // windows cover both without running unrelated recurring timers indefinitely.
+  await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS * 2 + 100);
+  // A rejected sync is an intentional fixture outcome, not a teardown failure.
+  // Await its lifetime too, then flush the queue/lifecycle completion promises.
+  await Promise.allSettled(runSyncCycle.mock.results.map(result => result.value));
+  await vi.advanceTimersByTimeAsync(0);
+  await __resetRealtimeQueue();
   vi.useRealTimers();
   vi.restoreAllMocks();
-  await __resetRealtimeQueue();
   vi.unstubAllEnvs();
 });
 
