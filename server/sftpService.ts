@@ -7,6 +7,7 @@ import { validateParsedRows, storeTransactions, calculateFileHash } from "./apiI
 import { parseTabularFile } from "./ingest/fileParser";
 import { loggableError } from "./dbErrors";
 import { errorSummary } from "./errorText";
+import { applicationLifecycle, runBackgroundWork } from "./maintenance/lifecycle";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -347,6 +348,7 @@ export async function downloadAndProcessSftpFile(
 // ─── SFTP Polling Service ──────────────────────────────────────────
 
 let pollingInterval: NodeJS.Timeout | null = null;
+applicationLifecycle.registerStop(stopSftpPolling);
 
 export async function pollSftpCredentials() {
   const db = await getDb();
@@ -423,6 +425,7 @@ export async function pollSftpCredentials() {
 }
 
 export function startSftpPolling() {
+  if (!applicationLifecycle.isAcceptingWork()) return;
   if (pollingInterval) {
     console.log("[SFTP Polling] Already running");
     return;
@@ -431,10 +434,11 @@ export function startSftpPolling() {
   console.log(`[SFTP Polling] Starting with ${POLLING_CHECK_INTERVAL}ms interval`);
   
   // Initial poll
-  pollSftpCredentials();
+  runBackgroundWork(() => pollSftpCredentials());
   
   // Set up recurring poll
-  pollingInterval = setInterval(pollSftpCredentials, POLLING_CHECK_INTERVAL);
+  if (!applicationLifecycle.isAcceptingWork()) return;
+  pollingInterval = setInterval(() => runBackgroundWork(() => pollSftpCredentials()), POLLING_CHECK_INTERVAL);
 }
 
 export function stopSftpPolling() {

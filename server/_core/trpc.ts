@@ -4,6 +4,7 @@ import superjson from "superjson";
 import type { TrpcContext } from "./context";
 import { auditOrganizationFor, runInRequestScope } from "./requestScope";
 import { errorSummary, isDatabaseError } from "../errorText";
+import { applicationLifecycle, MaintenanceAdmissionError } from "../maintenance/lifecycle";
 
 const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
@@ -89,7 +90,16 @@ const bindRequestScope = t.middleware(({ ctx, next }) =>
   ),
 );
 
-const baseProcedure = t.procedure.use(bindRequestScope).use(refuseReadOnlyWrites);
+const bindLifecycle = t.middleware(async ({ next }) => {
+  try {
+    return await applicationLifecycle.run("request", async () => next());
+  } catch (error) {
+    if (!(error instanceof MaintenanceAdmissionError)) throw error;
+    throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "maintenance_unavailable" });
+  }
+});
+
+const baseProcedure = t.procedure.use(bindLifecycle).use(bindRequestScope).use(refuseReadOnlyWrites);
 
 export const publicProcedure = baseProcedure;
 

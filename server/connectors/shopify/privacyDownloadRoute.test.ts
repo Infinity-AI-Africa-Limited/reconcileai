@@ -8,7 +8,7 @@
  * response's `finish` — every byte handed to the network — never on `close`.
  */
 import { EventEmitter } from "node:events";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
   process.env.DATABASE_URL = "";
@@ -36,6 +36,7 @@ vi.mock("./privacyCompletion", async (importOriginal) => ({
 import type express from "express";
 import { PrivacyArtifactIntegrityError } from "./privacyCompletion";
 import { createShopifyRouter } from "./routes";
+import { ApplicationLifecycle, applicationLifecycle } from "../../maintenance/lifecycle";
 
 const PUBLIC_ID = "11111111-1111-4111-8111-111111111111";
 const ARTIFACT = { requestId: 901, organizationId: 42, storeId: 7 };
@@ -82,16 +83,21 @@ async function download() {
   const { res, sent } = fakeResponse();
   const req = { params: { publicId: PUBLIC_ID }, headers: {} } as unknown as express.Request;
   await downloadHandler()(req, res as unknown as express.Response);
+  await vi.waitFor(() => expect(sent.statusCode).not.toBe(0));
   return { res, sent };
 }
 
+let lifecycle: ApplicationLifecycle;
 beforeEach(() => {
   vi.clearAllMocks();
+  lifecycle = new ApplicationLifecycle();
+  vi.spyOn(applicationLifecycle, "run").mockImplementation(lifecycle.run.bind(lifecycle));
   state.authenticate.mockResolvedValue(ACTOR);
   state.load.mockResolvedValue(ARTIFACT);
   state.read.mockResolvedValue({ bytes: BYTES, filename: "shopify-customer-data-request-901.json" });
   state.confirm.mockResolvedValue("completed");
 });
+afterEach(() => vi.restoreAllMocks());
 
 describe("when the claimant downloads an export", () => {
   it("should send the file itself — not a redirect to a presigned URL", async () => {
@@ -133,5 +139,28 @@ describe("when the claimant downloads an export", () => {
     const { sent } = await download();
     expect(sent.statusCode).toBe(401);
     expect(state.read).not.toHaveBeenCalled();
+  });
+
+  it("should reserve confirmation before the handler returns and await retries after finish and close", async () => {
+    let complete!: (outcome: string) => void;
+    state.confirm.mockReturnValue(new Promise<string>(resolve => { complete = resolve; }));
+    const { res } = await download();
+    expect(lifecycle.snapshot().active).toBe(1);
+    const drain = lifecycle.drain(1_000);
+    res.emit("finish");
+    res.emit("close");
+    await vi.waitFor(() => expect(state.confirm).toHaveBeenCalledTimes(1));
+    expect(lifecycle.snapshot()).toMatchObject({ state: "draining", active: 1 });
+    complete("completed");
+    await expect(drain).resolves.toMatchObject({ status: "drained", active: 0 });
+  });
+
+  it("should drain an aborted response without recording delivery", async () => {
+    const { res } = await download();
+    expect(lifecycle.snapshot().active).toBe(1);
+    const drain = lifecycle.drain(1_000);
+    res.emit("close");
+    await expect(drain).resolves.toMatchObject({ status: "drained", active: 0 });
+    expect(state.confirm).not.toHaveBeenCalled();
   });
 });

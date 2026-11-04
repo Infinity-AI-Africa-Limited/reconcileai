@@ -1,3 +1,5 @@
+import { runBackgroundWork } from "./maintenance/lifecycle";
+import { deferBackgroundWork } from "./maintenance/deferredWork";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -264,9 +266,9 @@ import { featureStrictlyAppliesTo } from "@shared/verticalFeatures";
 // reached every tenant's webhooks. Fire-and-forget: never awaited, never throws.
 
 function dispatchWebhook(organizationId: number, event: WebhookEvent, payload: Record<string, unknown>): void {
-  dispatchWebhookEvent(organizationId, event, payload).catch((err) =>
+  runBackgroundWork(() => dispatchWebhookEvent(organizationId, event, payload).catch((err) =>
     console.error("[webhookDelivery] dispatch failed (non-fatal):", loggableError(err)),
-  );
+  ));
 }
 
 /**
@@ -7060,9 +7062,9 @@ async function runReconciliation(
   // unref() so a stray timer can never hold the process open, and every error
   // swallowed: a failed heartbeat must not fail the reconciliation.
   const heartbeat = setInterval(() => {
-    db.touchReconciliationJobHeartbeat(jobId).catch((err) =>
+    runBackgroundWork(() => db.touchReconciliationJobHeartbeat(jobId).catch((err) =>
       console.warn(`[Reconciliation] heartbeat failed for job ${jobId} (non-fatal):`, loggableError(err)),
-    );
+    ));
   }, RECONCILIATION_HEARTBEAT_MS);
   if (typeof heartbeat.unref === "function") heartbeat.unref();
 
@@ -7306,7 +7308,7 @@ async function runReconciliation(
     // Invalidate this tenant's dashboard stats cache so their next load is fresh.
     // Scoped to the run's own organization — the unscoped version dropped every
     // other tenant's row too.
-    db.invalidateDashboardStatsCache(runOrganizationId).catch(() => {});
+    runBackgroundWork(() => db.invalidateDashboardStatsCache(runOrganizationId).catch(() => {}));
 
     // Dispatch webhooks (WS-4 event set), to the job's own tenant only.
     dispatchWebhook(runOrganizationId, "reconciliation.completed", {
@@ -7338,16 +7340,16 @@ async function runReconciliation(
     }
 
     // Send email alerts based on user preferences
-    checkAndSendAlerts(jobId, userId).catch((err) =>
+    runBackgroundWork(() => checkAndSendAlerts(jobId, userId).catch((err) =>
       console.error("[EmailReport] Alert check failed:", loggableError(err))
-    );
+    ));
 
     // Deferred AI analysis — fire-and-forget so the job is already "completed".
     // High/critical exceptions get their Claude narrative filled in shortly after,
     // keeping LLM latency entirely out of the reconciliation hot path.
-    runDeferredAiAnalysis(jobId).catch((err) =>
+    runBackgroundWork(() => runDeferredAiAnalysis(jobId).catch((err) =>
       console.error("[AI pass] deferred analysis failed:", loggableError(err))
-    );
+    ));
 
   } catch (error) {
     console.error("[Reconciliation] Job failed:", { ...loggableError(error), frames: stackFrames(error) });
@@ -7393,8 +7395,8 @@ startExceptionWorkflowDueMonitor();
 startDemoTimelineRoll();
 // Pre-warm the shared demo user so the first guest gets instant data
 // Runs asynchronously — does not block server startup
-setImmediate(() => {
-  prewarmDemoUser().catch((err) =>
+deferBackgroundWork(() => {
+  return prewarmDemoUser().catch((err) =>
     console.error("[Boot] prewarmDemoUser failed:", loggableError(err))
   );
 });

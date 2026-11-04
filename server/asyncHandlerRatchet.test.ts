@@ -57,11 +57,11 @@ describe("when the real server code is scanned", () => {
     // inline one, to prove the wrapper is recognised on real code.
     expect(real?.handlers).toEqual(
       expect.arrayContaining([
-        "POST /api/webhooks/cbs/:configId -> cbsWebhookHandler @ _core/index.ts",
-        "USE <middleware> -> requireApiKey @ api/gateway.ts",
-        "POST /api/shopline/gdpr/shop-data-request -> <anonymous> @ connectors/shopline/routes.ts",
+        "POST /api/webhooks/cbs/:configId -> cbsWebhookHandler @ _core/index.ts [wrapped]",
+        "USE <middleware> -> requireApiKey @ api/gateway.ts [wrapped]",
+        "POST /api/shopline/gdpr/shop-data-request -> <anonymous> @ connectors/shopline/routes.ts [wrapped]",
         // Imported from another file — and the route where this crash class was first found (#134).
-        "POST /api/webhooks/shopify -> handleShopifyWebhook @ connectors/shopify/webhooks.ts",
+        "POST /api/webhooks/shopify -> handleShopifyWebhook @ connectors/shopify/webhooks.ts [wrapped]",
         "GET /developers -> <anonymous> @ _core/index.ts [wrapped]",
       ]),
     );

@@ -80,7 +80,10 @@ async function startHandler(env: Record<string, string | undefined>): Promise<Ha
 
   const handler = routes.get("/api/oauth/:provider/start");
   if (!handler) throw new Error("start route not registered");
-  return handler;
+  return async (req, res) => {
+    handler(req, res);
+    await vi.waitFor(() => expect((res as unknown as CapturedResponse).redirects).toHaveLength(1));
+  };
 }
 
 /** A request as it arrives in production: TLS ends at the edge, the socket is plaintext. */
