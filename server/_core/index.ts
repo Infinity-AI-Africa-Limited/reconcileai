@@ -810,12 +810,18 @@ async function startServer(app: express.Express, server: Server) {
       }),
     ));
 
-  // Boot sweep: mark reconciliation jobs stuck in pending/running >2h as
-  // failed — crash orphans from the pre-queue era or in-process restarts
-  // (fire-and-forget; see server/reconciliationQueue.ts).
+  // Boot sweep: in development/test on a local database only, mark jobs stuck
+  // in pending/running >2h as failed. Everywhere else it defers: silence is not
+  // proof that retained work was abandoned (see server/reconciliationQueue.ts).
   runBackgroundWork(() => import("../reconciliationQueue")
     .then((q) => q.recoverStuckReconciliationJobs())
     .catch((e) => console.error("[boot] stuck-job sweep failed:", loggableError(e))));
+
+  // Reconciliation runs retained in Redis through a restart resume now, not
+  // when someone next creates a run. Fire-and-forget, like the SHOPLINE worker.
+  runBackgroundWork(() => import("../reconciliationQueue")
+    .then((q) => q.startReconciliationWorker())
+    .catch((e) => console.error("[boot] reconciliation worker unavailable:", loggableError(e))));
 
   // Shopify privacy admission writes a transactional outbox row. Redis is only
   // touched after commit; this recovery loop closes the commit/enqueue crash gap.
