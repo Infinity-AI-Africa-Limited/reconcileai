@@ -17,6 +17,9 @@ import { Router as createRouter } from "express";
 import { createHmac } from "crypto";
 import { parse as parseUrl } from "url";
 import { ENV } from "../../_core/env";
+import { asyncHandler } from "../../_core/asyncHandler";
+import { deferBackgroundWork } from "../../maintenance/deferredWork";
+import { runBackgroundWork } from "../../maintenance/lifecycle";
 import { appOriginFor } from "../../_core/clientIp";
 import {
   buildAuthorizationUrl,
@@ -176,7 +179,7 @@ export function createShoplineRouter(): Router {
   // ─── Install Entry Point ──────────────────────────────────────────────────
   // SHOPLINE redirects the merchant here when they click "Install" in the App Store.
   // Query params: appkey, handle, timestamp, sign
-  router.get("/api/shopline/install", async (req: Request, res: Response) => {
+  router.get("/api/shopline/install", asyncHandler(async (req: Request, res: Response) => {
     try {
       const { handle, appkey, timestamp, sign } = req.query as Record<string, string>;
 
@@ -216,12 +219,12 @@ export function createShoplineRouter(): Router {
       console.error("[shopline-install] error:", loggableError(err));
       return res.status(500).json({ error: "Internal server error" });
     }
-  });
+  }));
 
   // ─── OAuth Callback ───────────────────────────────────────────────────────
   // SHOPLINE redirects here after merchant grants permissions.
   // Query params: appkey, code, handle, timestamp, sign, customField (state)
-  router.get("/api/shopline/callback", async (req: Request, res: Response) => {
+  router.get("/api/shopline/callback", asyncHandler(async (req: Request, res: Response) => {
     try {
       const { code, handle, sign, customField } = req.query as Record<string, string>;
 
@@ -265,9 +268,9 @@ export function createShoplineRouter(): Router {
       });
 
       // Register webhooks for this store (fire-and-forget)
-      registerWebhooksForStore(apiOpts).catch((err: unknown) => {
+      runBackgroundWork(() => registerWebhooksForStore(apiOpts).catch((err: unknown) => {
         console.error("[shopline-callback] Webhook registration failed:", loggableError(err));
-      });
+      }));
 
       // First install → pull 90 days of history in the background so the
       // merchant's dashboard has real results within minutes rather than
@@ -275,7 +278,7 @@ export function createShoplineRouter(): Router {
       // merchant is redirected immediately, and a reconnection skips it
       // (the data is already there).
       if (!result.isReconnection) {
-        void import("./syncOrchestrator")
+        runBackgroundWork(() => import("./syncOrchestrator")
           .then(({ runHistoricalBackfill }) =>
             runHistoricalBackfill({
               organizationId: result.organizationId,
@@ -284,7 +287,7 @@ export function createShoplineRouter(): Router {
           )
           .catch((err: unknown) => {
             console.error("[shopline-callback] Historical backfill failed:", loggableError(err));
-          });
+          }));
       }
 
       // Same origin policy as the callback: a redirect built from
@@ -296,13 +299,13 @@ export function createShoplineRouter(): Router {
       console.error("[shopline-callback] error:", loggableError(err));
       return res.redirect(302, `${appOriginFor(req)}/shopline/error?reason=install_failed`);
     }
-  });
+  }));
 
   // ─── Webhook Receiver ─────────────────────────────────────────────────────
   // POST /api/webhooks/shopline
   // Headers: X-Shopline-Hmac-SHA256, X-Shopline-Topic, X-Shopline-Webhook-Id,
   //          X-Shopline-Shop-Domain
-  router.post("/api/webhooks/shopline", async (req: Request, res: Response) => {
+  router.post("/api/webhooks/shopline", asyncHandler(async (req: Request, res: Response) => {
     try {
       const hmacHeader = (req.headers["x-shopline-hmac-sha256"] as string) || "";
       const topic = (req.headers["x-shopline-topic"] as string) || "";
@@ -369,11 +372,11 @@ export function createShoplineRouter(): Router {
       // rather than lost.
       res.status(200).json({ ok: true, eventId: admission.eventId });
 
-      setImmediate(() => {
-        void processAdmittedWebhook(db, admission).catch((err: unknown) => {
+      deferBackgroundWork(() =>
+        processAdmittedWebhook(db, admission).catch((err: unknown) => {
           console.error("[shopline-webhook] processing error for event", admission.eventId, loggableError(err));
-        });
-      });
+        }),
+      );
       return;
     } catch (err) {
       // Admission itself failed. This is exactly the case that must NOT be
@@ -382,7 +385,7 @@ export function createShoplineRouter(): Router {
       if (res.headersSent) return;
       return res.status(503).json({ error: "Temporarily unable to accept webhook" });
     }
-  });
+  }));
 
   // ─── GDPR / Mandatory Compliance Endpoints ────────────────────────────────
   // SHOPLINE's mandatory data-protection webhooks. The Partner Portal registers
@@ -391,7 +394,7 @@ export function createShoplineRouter(): Router {
   //   POST /api/shopline/gdpr/shop-data-request       (shop/merchant data deletion)
   // The older customers-redact / merchants-redact paths are kept as aliases so a
   // previously-registered URL keeps working. All share one signed handler.
-  const gdprHandler = (endpointKind: GdprKind) => async (req: Request, res: Response) => {
+  const gdprHandler = (endpointKind: GdprKind) => asyncHandler(async (req: Request, res: Response) => {
     try {
       const rawBody =
         (req as Request & { rawBody?: Buffer }).rawBody ??
@@ -420,7 +423,7 @@ export function createShoplineRouter(): Router {
       // Still 200 to avoid retries; the request is logged for manual follow-up.
       return res.status(200).json({ ok: true });
     }
-  };
+  });
 
   // Canonical paths (match Partner Portal registration).
   router.post("/api/shopline/gdpr/customers-data-request", gdprHandler("customer_data_request"));

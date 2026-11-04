@@ -4,105 +4,6 @@
 > It contains the complete project context, architectural decisions, production build priorities,
 > and engineering constraints for ReconcileAI. Read it fully before writing any code.
 
-## ⚠️ OPEN INCIDENT — production database authentication (opened 2026-10-27)
-
-**This section is temporary. Re-run the exit check before you trust it, and delete the
-section once the check passes.** An incident note that outlives its incident misleads every
-later session as badly as a missing one. Until then, it overrides any statement below that
-production is healthy.
-
-**Exit check:** `GET https://www.reconcileaiafrica.com/api/health` reports
-`checks.database.status: "ok"`, **and** the latest `SHOPLINE scheduled sync` run on `main`
-is green.
-
-**Verified from this repository's own evidence (2026-10-27):**
-- **Every `SHOPLINE scheduled sync` run since 2026-10-26 08:07 UTC has failed.** That is
-  14 runs up to 2026-10-27 15:41 UTC; the last green run was 2026-10-26 02:40 UTC.
-  - Every run sampled (5 of the 14, covering `shoplineSyncCycle` and
-    `shoplineWebhookReconciler`) got HTTP 500 `database error (ER_ACCESS_DENIED_ERROR)` on
-    the handler's first query.
-  - The request itself was authenticated (no 403). So this is **not** a
-    `CRON_SECRET`/OIDC fault and not a SHOPLINE code defect, and re-running the workflow
-    cannot fix it.
-- **The app database is refusing new connections, so every database-backed path fails:**
-  sign-in, tRPC, webhook intake and scheduled jobs. They all share the same pool, and the
-  owner reports that `/api/health` answers 503. `/api/healthz` still answers 200, because it
-  measures liveness, not readiness.
-- **A green `Woodcore mirror sync` run proves nothing here.** `POST /api/woodcore/sync`
-  answers 202 before it touches the database, and the workflow passes on 202. The sync then
-  writes through a new app-database connection, which the database is refusing. Only the
-  server log would show that failure; the workflow cannot. Treat the mirror as stale since
-  2026-10-26.
-- **The SHOPLINE safety net cannot backfill more than 24 hours.** The catch-up window is
-  capped at 24h (`MAX_CATCHUP_MS` in `server/connectors/shopline/scheduledSync.ts`), and the
-  daily batch and "Sync Now" are fixed 24h windows too. The comment there that "the daily
-  batch covers anything older" is false. Payments and payouts have no webhook at all, and
-  SHOPLINE retries an order webhook for only 48h (§2B.3). So **SHOPLINE data more than 24h
-  older than the recovery is not guaranteed to arrive.** Shopify is not affected: its
-  backstop walks forward from each store's watermark in 7-day steps until it reaches now.
-
-**Reported by the provider, not verified here:** Manus Support says production's database
-is a Manus-managed TiDB instance. Manus changed its password on 2026-10-23 during a security
-update, which left Railway's `DATABASE_URL` stale.
-- The 3-day gap before the first failure fits connections opened before the change
-  surviving until 26 Oct.
-- If this is confirmed, §3 and §12 are incomplete when they list the database as TiDB Cloud:
-  production depends on a third party that can change its credential without notice.
-  Correct those sections after recovery.
-
-**Recovery: the owner's steps. Claude performs none of them.**
-1. **Set the credential.** Obtain the current database URL from the provider through an
-   authenticated channel and set Railway `DATABASE_URL` once. It must never appear in chat,
-   a document, a commit or a log (§18).
-   - *Blocked as of 2026-10-27:* the provider's database-management page is unavailable to
-     the owner, and an escalation is open.
-2. **Deploy exactly once.** That deployment's pre-deploy `pnpm db:migrate` is the only
-   migration run; nobody runs migrations by hand.
-3. **Validate:**
-   - Run the exit check.
-   - Dispatch `SHOPLINE scheduled sync` with `webhookReconciler`. SHOPLINE deletes a
-     subscription after 19 consecutive failed deliveries (§2B.3), so subscriptions may need
-     re-registering. This **restores; it does not migrate**, so the §2B.14 subscription
-     freeze exempts it. Record each store's `missingTopics` from the run's output: before
-     the outage both installed stores listed all 12 required topics, so whatever is missing
-     now is what SHOPLINE deleted.
-   - Dispatch `syncCycle` next. It resumes from each store's watermark, capped at 24h.
-   - Inspect the Partner Portal's Webhook delivery dashboard after recovery and before any
-     subscription migration. At 2026-10-27 review it showed a 12.281% seven-day failed-
-     delivery rate. This is a risk signal, not proof of cause. Validate a clean
-     post-recovery window with the controlled development-store rehearsal in §2B.14 before
-     migrating any subscription.
-   - If any SHOPLINE store took orders or payments more than 24h before recovery, they
-     need a backfill that no current handler can do. Raise it rather than assume the safety
-     net covered it.
-   - Run the Woodcore mirror, then confirm `GET /api/woodcore/sync` reports no error.
-
-**Freeze until the exit check passes:**
-- No database password rotation, schema change, manual migration, reset or restore, or
-  production export.
-- No change to object-storage credentials or IAM policy. The planned storage cutover waits
-  for a recovered deployment that passes storage health (`checks.storage`).
-- **Every merge to `main` deploys.** `railway.json` sets no watch paths, so a documentation
-  merge deploys too.
-  - While the credential is stale, such a deploy fails at `pnpm db:migrate`. Railway's
-    documented behaviour for a failed pre-deploy command is to keep the running
-    deployment, so that is noise, not harm.
-  - **Merge no code until recovery is validated.** The recovery deploy should ship the code
-    that was already running, so anything still failing afterwards is the credential, not
-    new code.
-- The Shopify App Store submission stays NO-GO (owner decision) until recovery and its
-  remaining release gates are complete. Its scope stays read-only order-evidence
-  reconciliation.
-
-**Repositories:** `origin` is authoritative. The owner reports that `mirror` was 20 commits
-behind on 2026-10-27, so do not assume parity. The PR process is unchanged (§15).
-
-**This repository is public.** Keep credentials, connection strings, provider support links,
-raw logs and customer data out of this file and out of Git. The owner keeps the incident
-records outside the repository.
-
----
-
 ## 0. Operating Role — Acting Global CTO (applies to EVERY request)
 
 Claude Code operates on ReconcileAI as a **highly experienced global CTO**, not as a code
@@ -154,7 +55,7 @@ needing to be restated. It is a standard of judgement, not a tone.
 - Deep readiness: `/api/health` (checks DB and dependencies)
 - Older docs may reference `reconcileai.vip` — that domain is **historical**; the live domain is **reconcileaiafrica.com**.
 
-**GitHub repositories** (every commit is dual-pushed to BOTH — keep them at par):
+**GitHub repositories** (every commit is dual-pushed to BOTH — keep them at par; §15 records the current gap):
 - `origin` (Primary): `Infinity-AI-Africa-Limited/reconcileai`
 - `mirror`: `MistaRichMan/reconcileai`
 
@@ -689,6 +590,18 @@ deliveries (SHOPLINE explicitly does not guarantee webhook delivery):
 | Daily batch sync | Once daily | Full reconciliation run across all active stores |
 | Webhook subscription reconciler | Every 6 hours | Verify webhook subscriptions still active (SHOPLINE deletes after 19 failures) |
 
+> ⚠️ **The safety net reaches back 24 hours, no further** (found during the
+> October 2026 database outage; re-verified against the code 2026-11-04). The
+> catch-up window is capped at `MAX_CATCHUP_MS` (24h, `scheduledSync.ts`), and
+> the daily batch and "Sync Now" are fixed 24h windows too. The comment beside
+> `MAX_CATCHUP_MS` saying "the daily batch covers anything older" is false.
+> Payments and payouts have no webhook, and SHOPLINE retries an order webhook
+> for 48h only (§2B.3). So after any outage longer than 24 hours, SHOPLINE
+> records older than that are not guaranteed to arrive, and no current handler
+> backfills them: raise a backfill, do not assume the safety net covered it.
+> Shopify is not affected: its backstop syncs each store to now from its
+> watermark, in 7-day steps.
+
 ### 2B.8 Frontend Pages
 
 | Route | Component | Purpose |
@@ -1023,14 +936,15 @@ Re-check this table when a new notice arrives, and add a row for it.
     version field. Treat it as a controlled migration requirement, not an
     emergency delete/recreate task.
   - **Freeze condition:** the Portal's seven-day delivery dashboard reported a
-    12.281% failed-delivery rate during the active TiDB authentication incident.
-    Do not **migrate** subscriptions until the database recovery exit check passes
-    and a clean controlled development-store rehearsal has proved idempotent
-    delivery and processing. Migrating means editing or retiring the legacy page's
+    12.281% failed-delivery rate during the October 2026 database outage. That
+    outage's exit check passed on 2026-11-04 (#216); re-read the dashboard over a
+    clean post-recovery window. Do not **migrate** subscriptions until a clean
+    controlled development-store rehearsal has proved idempotent delivery and
+    processing. Migrating means editing or retiring the legacy page's
     configuration, deleting or altering an existing subscription (its event
     version included), or subscribing a topic outside the required list.
   - **Exempt: restoring what SHOPLINE deleted.** `shoplineWebhookReconciler`
-    (incident recovery step 3, and every 6 hours on schedule) registers only the
+    (every 6 hours on schedule, or dispatched by hand) registers only the
     required topics (`SHOPLINE_WEBHOOK_TOPICS` + `SHOPLINE_BILLING_WEBHOOK_TOPICS`,
     12 in all) missing from a store's `/webhooks.json` list, at the pinned version.
     It never deletes or alters one. Its last green run before the outage
@@ -1057,8 +971,8 @@ Re-check this table when a new notice arrives, and add a row for it.
       delivery, so one failed charge would count twice toward `past_due`.
 
     Prove whether the legacy configuration delivers before retiring anything, and
-    fix that counter (a code change, so after the incident's code freeze lifts)
-    before any real merchant is billed.
+    fix that counter before any real merchant is billed (#213, open, counts a
+    failed charge once however often it is delivered).
 - `sl_connector_stores.apiVersion` is stored but **never used to build a
   request**. Do not start reading it without migrating every row.
 - **Nothing on storefronts:** no theme app extension, script tag or app embed,
@@ -1073,7 +987,7 @@ Re-check this table when a new notice arrives, and add a row for it.
 | Storefront accessibility, by 2026-10-30 | **No** | ReconcileAI renders nothing on storefronts |
 | App extensions deletable only via CLI or support ticket | **No** | The app has no extensions |
 | Theme CLI ≥ 1.3.2 | **No** | No theme development |
-| Legacy application webhook configuration page | **Controlled follow-up** | Existing subscriptions are shown in SHOPLINE's pre-`v20240601` legacy interface. Both installed stores already list all 12 required topics through OpenAPI `/webhooks.json` (last checked 2026-10-26), so the open question is whether the legacy configuration is a second, parallel set. Inventory and minimise topics, prove delivery and deduplication in the development store, then retire legacy configuration only after an approved overlap and reconciliation window. No migration while the TiDB runtime incident remains open; the reconciler's restoration of deleted topics is exempt (above). |
+| Legacy application webhook configuration page | **Controlled follow-up** | Existing subscriptions are shown in SHOPLINE's pre-`v20240601` legacy interface. Both installed stores already list all 12 required topics through OpenAPI `/webhooks.json` (last checked 2026-10-26), so the open question is whether the legacy configuration is a second, parallel set. Inventory and minimise topics, prove delivery and deduplication in the development store, then retire legacy configuration only after an approved overlap and reconciliation window. No migration before that rehearsal; the reconciler's restoration of deleted topics is exempt (above). |
 
 ---
 
@@ -2091,6 +2005,12 @@ pack (`deploy/`, `ml/`), and the public ROI calculator at `/roi-calculator`.
 5. **Multi-region:** Is data residency in Nigeria required for CBN compliance?
 6. **Stripe pricing tiers:** What are the final subscription tiers and prices per institution type?
 7. **Woodcore partnership:** Is there a formal reseller or referral agreement with Woodcore?
+8. **Who controls the production database credential?** During the October 2026 outage
+   (every database-backed path failing with `ER_ACCESS_DENIED_ERROR` from 2026-10-26),
+   Manus Support reported that production's database is a Manus-managed TiDB instance
+   whose password Manus changed on 2026-10-23, leaving Railway's `DATABASE_URL` stale.
+   Not verified from this repository. If confirmed, §3 and §12 should say so:
+   production would depend on a third party that can change its credential without notice.
 
 ---
 
@@ -2205,6 +2125,13 @@ tok=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | sed -
 par. Stage files explicitly (never `git add -A`); the working tree is shared with the Manus
 sandbox.
 
+> ⚠️ **Not at par today, and Claude cannot reach `mirror` (2026-11-04).** Manus reported
+> mirror `main` 29 commits behind `origin` (in #215). GitHub refuses Claude sessions
+> access to `MistaRichMan/reconcileai` (the Claude GitHub App is not installed there, or
+> the repository is not in its selection), and a session that holds `origin` cannot attach
+> a second repository named `reconcileai` either. Mirror branches and merges are the
+> owner's until that changes. `origin` is authoritative: do not assume parity.
+
 ### What Manus Does NOT Build via PR (commits directly to `main`)
 
 - GitHub sync merges (`git merge -X theirs mistarichman/main`) — these are already Claude's production code coming in
@@ -2295,6 +2222,10 @@ The following are stable foundations that should not be modified without explici
 document.** Reference secrets by variable name only. They belong in the Railway environment
 and GitHub Actions secrets, nowhere else. A secret that has been written down anywhere else
 is compromised and must be rotated — there is no "it was only internal" exception.
+
+**`origin` is a public repository** (verified 2026-11-04): anything committed is published.
+Keep credentials, connection strings, provider support links, raw logs and customer data
+out of this file and out of Git.
 
 **Incident log (four occurrences, all avoidable):**
 
@@ -2393,6 +2324,10 @@ code-complete but **not receiving mail**, deferred on cost. See §19.4.
 - Anyone asks for, demos, or sells **email forwarding** of settlement/payout
   files — that channel is built but inert (§19.4), and must not be presented to
   a customer as working until a real delivery has been observed.
+
+> **Owner decision (2026-10-27): the Shopify App Store submission is NO-GO** until its
+> remaining release gates are complete, and its scope stays read-only order-evidence
+> reconciliation. Do not submit it or describe it as ready for submission.
 
 ### The three items
 

@@ -60,8 +60,12 @@ export interface Exposure {
 export interface ScanOptions {
   /** Read another file, for following an import. Defaults to the filesystem. */
   read?: (file: string) => string | undefined;
-  /** Called for every handler the scan resolved and analysed — proof it looked. */
-  onHandler?: (h: { route: string; name: string; file: string; wrapped: boolean }) => void;
+  /**
+   * Called for every handler the scan resolved and analysed — proof it looked.
+   * `async`: the handler is declared async, or returns something that may be a
+   * promise, so its work can outlive the call that Express makes.
+   */
+  onHandler?: (h: { route: string; name: string; file: string; wrapped: boolean; async: boolean }) => void;
 }
 
 const ROUTE_METHODS = new Set(["get", "post", "put", "patch", "delete", "all", "use"]);
@@ -507,7 +511,8 @@ export function createScanner(opts: ScanOptions = {}) {
         for (const t of node.arguments.flatMap(arg => resolve(arg, ctx, 0))) {
           const wrapped = t.kind !== "safe" && !!t.wrapped;
           if (t.kind === "fn") {
-            opts.onHandler?.({ route, name: handlerName(t.fn), file: t.ctx.file, wrapped });
+            const async = isAsync(t.fn) || returnedExpressions(t.fn).some(r => mayBePromise(r, t.ctx, t.fn, 0));
+            opts.onHandler?.({ route, name: handlerName(t.fn), file: t.ctx.file, wrapped, async });
             analyze(t.fn, t.ctx, route, wrapped, out);
           } else if (t.kind === "opaque") {
             const line = t.ctx.sf.getLineAndCharacterOfPosition(t.node.getStart(t.ctx.sf)).line + 1;
