@@ -2,8 +2,10 @@
  * SHOPLINE shop/redact is acknowledged, but nothing erases a SHOPLINE shop's
  * data yet. Until 2026-11-04 the request was recorded as "completed", with a
  * note that a purge was scheduled when none existed. It must be recorded as an
- * OPEN obligation (`received`), which the compliance view lists, until erasure
- * is built (docs/security/SHOPLINE_SHOP_ERASURE.md). Synthetic rows only.
+ * OPEN obligation (`received`), which the owner's reminder counts
+ * (gdprDeadlines.ts), until erasure is built
+ * (docs/security/SHOPLINE_SHOP_ERASURE.md). No page lists these rows yet.
+ * Synthetic rows only.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { rowOf, scriptedDb } from "../shopify/scriptedDb.testkit";
