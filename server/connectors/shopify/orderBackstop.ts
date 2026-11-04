@@ -27,6 +27,7 @@ import { loggableError } from "../../dbErrors";
 import { singleFlight } from "../../singleFlight";
 import { recheckShopifyStoreClassifications } from "./storeClassification";
 import { runShopifyOrderSyncToNow } from "./syncOrchestrator";
+import { applicationLifecycle, runBackgroundWork } from "../../maintenance/lifecycle";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
@@ -172,6 +173,7 @@ export async function recordShopifyBackstopAttempt(
 
 let backstopTimer: ReturnType<typeof setInterval> | null = null;
 let firstRun: ReturnType<typeof setTimeout> | null = null;
+applicationLifecycle.registerStop(stopShopifyOrderBackstopLoop);
 
 /**
  * Start the backstop once per process. Returns whether it is running.
@@ -184,6 +186,7 @@ let firstRun: ReturnType<typeof setTimeout> | null = null;
 export function startShopifyOrderBackstopLoop(
   options: { intervalMs?: number; firstDelayMs?: number; run?: () => Promise<unknown> } = {},
 ): boolean {
+  if (!applicationLifecycle.isAcceptingWork()) return false;
   if (backstopTimer || firstRun) return true;
   if (!ENV.shopifyClientId || !ENV.shopifyClientSecret) {
     console.log("[shopify-backstop] not started: Shopify app credentials are not configured", {
@@ -203,15 +206,16 @@ export function startShopifyOrderBackstopLoop(
   });
   firstRun = setTimeout(() => {
     firstRun = null;
-    void tick();
-    backstopTimer = setInterval(() => void tick(), intervalMs);
+    runBackgroundWork(() => tick());
+    if (!applicationLifecycle.isAcceptingWork()) return;
+    backstopTimer = setInterval(() => runBackgroundWork(() => tick()), intervalMs);
     backstopTimer.unref?.();
   }, options.firstDelayMs ?? 60_000 + Math.floor(Math.random() * 60_000));
   firstRun.unref?.();
   return true;
 }
 
-/** Test-only: stop the loop so a suite can start it again. */
+/** Stop future ticks only; an admitted sync stays tracked until it settles. */
 export function stopShopifyOrderBackstopLoop(): void {
   if (firstRun) clearTimeout(firstRun);
   if (backstopTimer) clearInterval(backstopTimer);

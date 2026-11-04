@@ -30,6 +30,9 @@ import { runSandboxReconciliation } from "./sandbox";
 import { loggableError } from "../dbErrors";
 import { stackFrames, errorSummary } from "../errorText";
 
+import { asyncHandler } from "../_core/asyncHandler";
+import { trackResponseCompletion } from "../maintenance/deferredWork";
+
 type ApiAuth = { organizationId: number | null; apiKeyId: number; userId: number };
 
 // Express request augmentation without global declaration noise.
@@ -92,22 +95,20 @@ async function requireApiKey(req: ApiRequest, res: Response, next: NextFunction)
 /** Request log into api_ingestion_logs (fire-and-forget on response finish). */
 function logRequests(req: ApiRequest, res: Response, next: NextFunction) {
   const startedAt = Date.now();
-  res.on("finish", () => {
-    void (async () => {
-      try {
-        const db = await getDb();
-        if (!db) return;
-        await db.insert(apiIngestionLogs).values({
-          organizationId: req.apiAuth?.organizationId ?? null,
-          apiKeyId: req.apiAuth?.apiKeyId ?? null,
-          endpoint: `/api/v1${req.path}`.slice(0, 255),
-          method: req.method,
-          status: res.statusCode < 400 ? "success" : "failed",
-          statusCode: res.statusCode,
-          processingTimeMs: Date.now() - startedAt,
-        });
-      } catch { /* logging must never affect the response */ }
-    })();
+  trackResponseCompletion(res, async () => {
+    try {
+      const db = await getDb();
+      if (!db) return;
+      await db.insert(apiIngestionLogs).values({
+        organizationId: req.apiAuth?.organizationId ?? null,
+        apiKeyId: req.apiAuth?.apiKeyId ?? null,
+        endpoint: `/api/v1${req.path}`.slice(0, 255),
+        method: req.method,
+        status: res.statusCode < 400 ? "success" : "failed",
+        statusCode: res.statusCode,
+        processingTimeMs: Date.now() - startedAt,
+      });
+    } catch { /* logging must never affect the response */ }
   });
   next();
 }
@@ -133,7 +134,7 @@ export function createApiGateway(): express.Router {
     res.json({ status: "ok", timestamp: new Date().toISOString(), version: "1.0.0" });
   });
 
-  api.get("/openapi.yaml", async (_req, res) => {
+  api.get("/openapi.yaml", asyncHandler(async (_req, res) => {
     try {
       const { readFile } = await import("node:fs/promises");
       const path = await import("node:path");
@@ -142,7 +143,7 @@ export function createApiGateway(): express.Router {
     } catch {
       sendError(res, 404, "NOT_FOUND", "Spec not bundled in this deployment");
     }
-  });
+  }));
 
   // ── Sandbox (keyless; own tighter IP limit) ─────────────────────────────────
   const sandboxLimiter = createRateLimiter({ windowMs: 60_000, max: 30 });
@@ -167,10 +168,10 @@ export function createApiGateway(): express.Router {
   });
 
   // ── Authenticated surface ───────────────────────────────────────────────────
-  api.use(rateLimit, requireApiKey, logRequests);
+  api.use(rateLimit, asyncHandler(requireApiKey), asyncHandler(logRequests));
 
   // /reconciliation
-  api.post("/reconciliation/runs", async (req: ApiRequest, res) => {
+  api.post("/reconciliation/runs", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const caller = await callerFor(req, res);
       const b = req.body ?? {};
@@ -186,9 +187,9 @@ export function createApiGateway(): express.Router {
       } as any);
       res.status(202).json({ runId: (created as any).jobId ?? (created as any).id, status: "pending" });
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
-  api.get("/reconciliation/runs", async (req: ApiRequest, res) => {
+  api.get("/reconciliation/runs", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const caller = await callerFor(req, res);
       const jobs = await caller.reconciliation.list();
@@ -208,9 +209,9 @@ export function createApiGateway(): express.Router {
       }));
       res.json({ data: rows, total: (jobs as any[]).length });
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
-  api.get("/reconciliation/runs/:runId", async (req: ApiRequest, res) => {
+  api.get("/reconciliation/runs/:runId", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const caller = await callerFor(req, res);
       const runId = Number(req.params.runId);
@@ -233,10 +234,10 @@ export function createApiGateway(): express.Router {
         exceptions: (detail as any).exceptions?.slice(0, 200) ?? [],
       });
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
   // ERP journal-entry export (WS-7): natively-importable files, content inline.
-  api.get("/reconciliation/runs/:runId/erp-export", async (req: ApiRequest, res) => {
+  api.get("/reconciliation/runs/:runId/erp-export", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const runId = Number(req.params.runId);
       if (!Number.isInteger(runId) || runId <= 0) return sendError(res, 400, "BAD_REQUEST", "runId must be a positive integer");
@@ -257,10 +258,10 @@ export function createApiGateway(): express.Router {
         files, // [{ filename, content }] — journal CSVs are small; content is inline
       });
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
   // /exceptions
-  api.get("/exceptions", async (req: ApiRequest, res) => {
+  api.get("/exceptions", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const caller = await callerFor(req, res);
       const q = req.query;
@@ -274,9 +275,9 @@ export function createApiGateway(): express.Router {
       });
       res.json(result);
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
-  api.patch("/exceptions/:exceptionId", async (req: ApiRequest, res) => {
+  api.patch("/exceptions/:exceptionId", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const caller = await callerFor(req, res);
       const id = Number(req.params.exceptionId);
@@ -292,10 +293,10 @@ export function createApiGateway(): express.Router {
       });
       res.json({ id, status });
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
   // /templates
-  api.get("/templates", async (req: ApiRequest, res) => {
+  api.get("/templates", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const caller = await callerFor(req, res);
       const category = req.query.category ? String(req.query.category) : undefined;
@@ -308,10 +309,10 @@ export function createApiGateway(): express.Router {
         isDefault: t.isDefault,
       })));
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
   // /intelligence
-  api.get("/intelligence/recommendations", async (req: ApiRequest, res) => {
+  api.get("/intelligence/recommendations", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const auth = req.apiAuth!;
       const category = String(req.query.category ?? "");
@@ -346,9 +347,9 @@ export function createApiGateway(): express.Router {
       const network = await ei.getSharedRecommendations(auth.organizationId, category);
       res.json({ institutional, network });
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
-  api.post("/intelligence/diagnose", async (req: ApiRequest, res) => {
+  api.post("/intelligence/diagnose", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const b = req.body ?? {};
       const category = String(b.category ?? "");
@@ -394,10 +395,10 @@ export function createApiGateway(): express.Router {
       );
       res.json({ category, currency, amount, analysis, networkInformed: networkGuidance.length > 0 });
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
   // /kpi — org reconciliation KPIs from the last 20 completed jobs.
-  api.get("/kpi", async (req: ApiRequest, res) => {
+  api.get("/kpi", asyncHandler(async (req: ApiRequest, res) => {
     try {
       const auth = req.apiAuth!;
       if (!auth.organizationId) return sendError(res, 403, "FORBIDDEN", "API key has no organization scope");
@@ -443,7 +444,7 @@ export function createApiGateway(): express.Router {
         ],
       });
     } catch (err) { handleError(res, err); }
-  });
+  }));
 
   // Unknown /api/v1 path → structured 404 (not the SPA fallback).
   api.use((_req, res) => sendError(res, 404, "NOT_FOUND", "Unknown endpoint — see /developers for the API reference"));

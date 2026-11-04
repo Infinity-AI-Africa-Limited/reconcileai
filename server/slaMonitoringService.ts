@@ -33,6 +33,7 @@ import { OPERATOR_ORG_CODE } from "@shared/operatorOrg";
 import { normalizeOrigin } from "@shared/appOrigin";
 import { ENV } from "./_core/env";
 import { loggableError } from "./dbErrors";
+import { applicationLifecycle, runBackgroundWork } from "./maintenance/lifecycle";
 
 // SLA thresholds in hours
 const SLA_WARNING_THRESHOLD = 20; // Yellow alert
@@ -310,18 +311,29 @@ async function sendSLABreachNotification(breaches: SLABreach[]): Promise<void> {
   await notifyOwner(formatSLABreachNotification(breaches));
 }
 
+// Keep every returned timer: callers may start more than one monitor.
+const monitoringTimers = new Set<NodeJS.Timeout>();
+applicationLifecycle.registerStop(() => {
+  for (const timer of monitoringTimers) clearInterval(timer);
+  monitoringTimers.clear();
+});
+
 /**
  * Start SLA monitoring with periodic checks
  * @param intervalMinutes How often to check for SLA breaches (default: 60 minutes)
  */
-export function startSLAMonitoring(intervalMinutes: number = 60): NodeJS.Timeout {
+export function startSLAMonitoring(intervalMinutes: number = 60): NodeJS.Timeout | null {
+  if (!applicationLifecycle.isAcceptingWork()) return null;
   console.log(`[SLA Monitor] Starting with ${intervalMinutes}-minute interval`);
 
   // Run immediately on start
-  checkSLABreaches();
+  runBackgroundWork(() => checkSLABreaches());
 
   // Then run periodically
-  return setInterval(() => {
-    checkSLABreaches();
+  if (!applicationLifecycle.isAcceptingWork()) return null;
+  const timer = setInterval(() => {
+    runBackgroundWork(() => checkSLABreaches());
   }, intervalMinutes * 60 * 1000);
+  monitoringTimers.add(timer);
+  return timer;
 }

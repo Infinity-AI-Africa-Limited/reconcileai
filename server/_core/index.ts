@@ -1,6 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import { createServer } from "http";
+import { createServer, type Server } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
@@ -24,6 +24,11 @@ import { ENV } from "./env";
 import { shopifyWebhookRawBody } from "../connectors/shopify/webhookBody";
 import { loggableError } from "../dbErrors";
 import { errorSummary, logProcedureFailure } from "../errorText";
+import { applicationLifecycle, MaintenanceAdmissionError, runBackgroundWork } from "../maintenance/lifecycle";
+import { maintenanceAdmission } from "../maintenance/httpAdmission";
+import { attachShutdownSignals } from "../maintenance/shutdown";
+import { listenUnlessFenced } from "../maintenance/startup";
+import { readDrainTimeout } from "../maintenance/config";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -44,7 +49,24 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
-async function startServer() {
+/**
+ * Queues first (a worker may still acknowledge a job), then the pools. Each
+ * step re-checks the drain proof: a late queue event can invalidate it while an
+ * earlier close is still running.
+ */
+async function closeApplicationResources(isStillDrained: () => boolean): Promise<void> {
+  const { closeAllQueues } = await import("../jobQueue");
+  await closeAllQueues();
+  if (!isStillDrained()) throw new Error("drain_proof_invalidated");
+  const { closeWoodcorePools } = await import("../woodcoreDb");
+  if (!isStillDrained()) throw new Error("drain_proof_invalidated");
+  await closeWoodcorePools();
+  const { closeAppPools } = await import("../dbSession");
+  if (!isStillDrained()) throw new Error("drain_proof_invalidated");
+  await closeAppPools();
+}
+
+async function startServer(app: express.Express, server: Server) {
   // Data residency: log the enforced posture and fail fast if on-premise mode is
   // misconfigured in a way that would leak data off-box (e.g. Forge enabled).
   const posture = describeResidencyPosture();
@@ -61,8 +83,13 @@ async function startServer() {
   // otherwise only visible as strange addresses in the audit trail.
   console.log(describeTrustedProxyConfig());
 
-  const app = express();
-  const server = createServer(app);
+  // Before parsers, auth, GET routes with audit effects, and health's storage probe.
+  app.use(maintenanceAdmission());
+  app.get("/api/readyz", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const ready = applicationLifecycle.isAcceptingWork();
+    res.status(ready ? 200 : 503).json({ status: ready ? "accepting" : "maintenance" });
+  });
   // Shopify webhooks are read as bytes under their own limit BEFORE the global
   // JSON parser below, which would otherwise parse an unauthenticated body up to
   // 50 MB before the webhook's HMAC could refuse it. Having consumed the body,
@@ -92,7 +119,7 @@ async function startServer() {
   // GET /api/health
   // Returns DB connectivity, LLM provider mode/model, and app version.
   // Useful for Rocket.new deployment verification and uptime monitoring.
-  app.get("/api/health", async (_req, res) => {
+  app.get("/api/health", asyncHandler(async (_req, res) => {
     const startedAt = Date.now();
     const checks: Record<string, unknown> = {};
 
@@ -199,10 +226,10 @@ async function startServer() {
     };
 
     res.status(allOk ? 200 : 503).json(body);
-  });
+  }));
 
   // ── Scheduled: weekly assessment digest ─────────────────────────────────
-  app.post("/api/scheduled/weeklyAssessmentDigest", async (req, res) => {
+  app.post("/api/scheduled/weeklyAssessmentDigest", asyncHandler(async (req, res) => {
     try {
       const db = await getDb();
       if (!db) throw new Error("DB unavailable");
@@ -254,10 +281,10 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       });
     }
-  });
+  }));
 
   // ── Scheduled: weekly CFO channel metrics report ──────────────────────────
-  app.post("/api/scheduled/weeklyChannelReport", async (req, res) => {
+  app.post("/api/scheduled/weeklyChannelReport", asyncHandler(async (req, res) => {
     try {
       // Authenticate the cron caller via task UID header (no §5c patches needed)
       const taskUid = req.headers["x-manus-cron-task-uid"] as string | undefined;
@@ -279,10 +306,10 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       });
     }
-  });
+  }));
 
   // ── Scheduled: daily threshold breach check ─────────────────────────────
-  app.post("/api/scheduled/channelThresholdCheck", async (req, res) => {
+  app.post("/api/scheduled/channelThresholdCheck", asyncHandler(async (req, res) => {
     try {
       const taskUid = req.headers["x-manus-cron-task-uid"] as string | undefined;
       if (!taskUid) return res.status(403).json({ error: "cron-only" });
@@ -309,12 +336,12 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       });
     }
-  });
+  }));
 
   // ── Scheduled: daily S3 CSV export cleanup ──────────────────────────────
   // Heartbeat cron: runs daily (e.g. "0 0 2 * * *" — 02:00 UTC)
   // Deletes CSV files from S3 whose age exceeds their configured retentionDays.
-  app.post("/api/scheduled/s3CsvCleanup", async (req, res) => {
+  app.post("/api/scheduled/s3CsvCleanup", asyncHandler(async (req, res) => {
     try {
       const taskUid = req.headers["x-manus-cron-task-uid"] as string | undefined;
       if (!taskUid) return res.status(403).json({ error: "cron-only" });
@@ -332,7 +359,7 @@ async function startServer() {
         timestamp: new Date().toISOString(),
       });
     }
-  });
+  }));
 
   // ── Magic-link login ─────────────────────────────────────────────────────
   // GET /api/magic-login?token=<hex>
@@ -342,7 +369,7 @@ async function startServer() {
   // single-use, but auth endpoints must still be rate-limited.
   const { createRateLimiter } = await import("../rateLimiter");
   const magicLoginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 20 });
-  app.get("/api/magic-login", async (req, res) => {
+  app.get("/api/magic-login", asyncHandler(async (req, res) => {
     const reqIp = clientIpOrUnknown(req);
     if (!magicLoginLimiter.check(`ip:${reqIp}`).allowed) {
       return res.status(429).send("Too many attempts. Please try again in a few minutes.");
@@ -407,7 +434,7 @@ async function startServer() {
       console.error("[magic-login] error:", loggableError(err));
       return res.redirect(302, "/?error=login_failed");
     }
-  });
+  }));
 
   // GET /api/reviewer-access?key=<token>
   //
@@ -422,7 +449,7 @@ async function startServer() {
   // reviewerAccess.ts: read-only enforced globally in _core/trpc.ts, the
   // operations role, one pinned organisation, a hard expiry, and revocation.
   const reviewerAccessLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 20 });
-  app.get("/api/reviewer-access", async (req, res) => {
+  app.get("/api/reviewer-access", asyncHandler(async (req, res) => {
     const reqIp = clientIpOrUnknown(req);
     if (!reviewerAccessLimiter.check(`ip:${reqIp}`).allowed) {
       return res.status(429).send("Too many attempts. Please try again in a few minutes.");
@@ -476,7 +503,7 @@ async function startServer() {
       console.error("[reviewer-access] error:", loggableError(err));
       return res.redirect(302, "/login?error=reviewer_link_invalid");
     }
-  });
+  }));
 
   // ── Woodcore live → mirror sync ────────────────────────────────────────────
   // POST /api/woodcore/sync  — start a full mirror refresh (async; poll GET for progress)
@@ -533,7 +560,7 @@ async function startServer() {
     if (!(await syncAuthorized(req))) return res.status(403).json({ error: "forbidden" });
     const { syncWoodcoreMirror, syncState } = await import("../woodcoreSync");
     if (syncState.running) return res.status(409).json({ error: "already running", state: syncState });
-    syncWoodcoreMirror().catch((e) => console.error("[woodcoreSync] trigger error:", loggableError(e)));
+    runBackgroundWork(() => syncWoodcoreMirror().catch((e) => console.error("[woodcoreSync] trigger error:", loggableError(e))));
     res.status(202).json({ started: true });
   }));
   app.get("/api/woodcore/sync", asyncHandler(async (req, res) => {
@@ -569,14 +596,14 @@ async function startServer() {
       res.status(500).json({ ok: false, status: "internal_error" });
     }
   };
-  app.post("/api/webhooks/cbs/:configId", cbsWebhookHandler);
-  app.post("/api/webhooks/woodcore/:configId", cbsWebhookHandler);
+  app.post("/api/webhooks/cbs/:configId", asyncHandler(cbsWebhookHandler));
+  app.post("/api/webhooks/woodcore/:configId", asyncHandler(cbsWebhookHandler));
 
   // ── Developer REST API (gap-closure plan WS-4) ─────────────────────────────
   // /api/v1/* — X-API-Key auth, rate-limited, request-logged; translates REST
   // onto the existing tRPC procedures (server/api/gateway.ts). /developers
   // serves the interactive API reference (Redoc over docs/openapi.yaml).
-  app.use("/api/v1", async (req, res, next) => {
+  app.use("/api/v1", asyncHandler(async (req, res, next) => {
     try {
       const { getApiGateway } = await import("../api/gateway");
       getApiGateway()(req, res, next);
@@ -584,7 +611,7 @@ async function startServer() {
       console.error("[api-gateway] mount error:", loggableError(err));
       res.status(500).json({ code: "INTERNAL", message: "API unavailable" });
     }
-  });
+  }));
   app.get("/developers", asyncHandler(async (_req, res) => {
     const { developerDocsHtml } = await import("../api/developerDocs");
     res.type("html").send(developerDocsHtml());
@@ -612,7 +639,7 @@ async function startServer() {
   // failure returns non-2xx, because Resend retries non-2xx for hours and a
   // business rejection will never succeed on retry. Answering 200 also refuses
   // to reveal whether an address exists, so this cannot be probed.
-  app.post("/api/webhooks/email/inbound", async (req, res) => {
+  app.post("/api/webhooks/email/inbound", asyncHandler(async (req, res) => {
     try {
       const rawBody =
         (req as express.Request & { rawBody?: Buffer }).rawBody ??
@@ -633,7 +660,7 @@ async function startServer() {
       console.error("[emailIngestion] handler threw:", loggableError(err));
       return res.status(200).json({ ok: true });
     }
-  });
+  }));
 
   // ── SHOPLINE Scheduled Sync Handlers ────────────────────────────────────────
   // POST /api/scheduled/shoplineSyncCycle — 15-min incremental sync for all stores
@@ -702,10 +729,15 @@ async function startServer() {
     jobEvents.on("progress", onProgress);
     const heartbeat = setInterval(() => res.write(": ping\n\n"), 25000);
 
-    req.on("close", () => {
+    const stopStream = () => {
       clearInterval(heartbeat);
       jobEvents.off("progress", onProgress);
       res.end();
+    };
+    const unregisterStop = applicationLifecycle.registerStop(stopStream);
+    req.on("close", () => {
+      unregisterStop();
+      stopStream();
     });
   }));
 
@@ -750,6 +782,14 @@ async function startServer() {
     serveStatic(app);
   }
 
+  // Shutdown may have begun while the routes above were imported. Every launch
+  // below would be refused anyway (startup lends no admission, see runRoot);
+  // stopping here also skips their imports and the listen.
+  if (!applicationLifecycle.isAcceptingWork()) {
+    console.log("[boot] startup_fenced", { stage: "before_background_work" });
+    return;
+  }
+
   // Shopify durable-queue evidence: build the live order and privacy queues and
   // read their BullMQ counts, so /api/health has evidence on a Redis-configured
   // instance. It adds no job and no merchant data to Redis.
@@ -761,67 +801,67 @@ async function startServer() {
   // would fail.
   // Nothing needs the result before traffic; the OAuth routes check readiness
   // themselves, bounded, on every request.
-  import("../connectors/shopify/runtimeQueueReadiness")
+  runBackgroundWork(() => import("../connectors/shopify/runtimeQueueReadiness")
     .then((readiness) => readiness.startShopifyQueueEvidence())
     .catch((error) =>
       console.error("[boot] Shopify durable queue readiness failed", {
         code: "shopify_durable_queue_readiness_failed",
         ...loggableError(error),
       }),
-    );
+    ));
 
   // Boot sweep: mark reconciliation jobs stuck in pending/running >2h as
   // failed — crash orphans from the pre-queue era or in-process restarts
   // (fire-and-forget; see server/reconciliationQueue.ts).
-  import("../reconciliationQueue")
+  runBackgroundWork(() => import("../reconciliationQueue")
     .then((q) => q.recoverStuckReconciliationJobs())
-    .catch((e) => console.error("[boot] stuck-job sweep failed:", loggableError(e)));
+    .catch((e) => console.error("[boot] stuck-job sweep failed:", loggableError(e))));
 
   // Shopify privacy admission writes a transactional outbox row. Redis is only
   // touched after commit; this recovery loop closes the commit/enqueue crash gap.
   // Failure is visible and leaves the outbox pending/retryable — it never turns
   // an accepted request into a false queued/completed state.
-  import("../connectors/shopify/privacyQueue")
+  runBackgroundWork(() => import("../connectors/shopify/privacyQueue")
     .then((q) => q.startShopifyPrivacyRecoveryLoop())
-    .catch((e) => console.error("[boot] Shopify privacy outbox recovery unavailable:", loggableError(e)));
+    .catch((e) => console.error("[boot] Shopify privacy outbox recovery unavailable:", loggableError(e))));
 
   // Scheduled Shopify order sync: the backstop behind webhooks, which Shopify
   // does not guarantee. Without REDIS_URL an order webhook cannot be queued and
   // is answered 503, so until Redis is provisioned this is the only automatic
   // order sync. Starts only when Shopify app credentials are configured.
-  import("../connectors/shopify/orderBackstop")
+  runBackgroundWork(() => import("../connectors/shopify/orderBackstop")
     .then((b) => b.startShopifyOrderBackstopLoop())
-    .catch((e) => console.error("[boot] Shopify order sync backstop unavailable:", loggableError(e)));
+    .catch((e) => console.error("[boot] Shopify order sync backstop unavailable:", loggableError(e))));
 
   // SHOPLINE realtime syncs are delayed jobs that outlive a restart. Start this
   // instance's worker now, so saved ones resume without waiting for the next
   // webhook. Fire-and-forget: BullMQ connects in the background.
-  import("../connectors/shopline/realtimeSync")
+  runBackgroundWork(() => import("../connectors/shopline/realtimeSync")
     .then((r) => r.startShoplineRealtimeWorker())
-    .catch((e) => console.error("[boot] SHOPLINE realtime worker unavailable:", loggableError(e)));
+    .catch((e) => console.error("[boot] SHOPLINE realtime worker unavailable:", loggableError(e))));
 
   // Seed global default resolution templates (idempotent; fire-and-forget so a
   // DB hiccup never blocks startup or the healthcheck).
-  seedDefaultResolutionTemplates()
+  runBackgroundWork(() => seedDefaultResolutionTemplates()
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} default resolution template(s)`); })
-    .catch((e) => console.error("[seed] resolution templates failed:", loggableError(e)));
+    .catch((e) => console.error("[seed] resolution templates failed:", loggableError(e))));
 
   // Seed Nigerian payment channel exception templates (idempotent; fire-and-forget).
-  seedNigerianExceptionDefaults()
+  runBackgroundWork(() => seedNigerianExceptionDefaults()
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} Nigerian channel exception template(s)`); })
-    .catch((e) => console.error("[seed] Nigerian exception templates failed:", loggableError(e)));
+    .catch((e) => console.error("[seed] Nigerian exception templates failed:", loggableError(e))));
 
   // Seed retail / e-commerce (SHOPLINE vertical) exception templates (idempotent).
-  import("../seedResolutionTemplates")
+  runBackgroundWork(() => import("../seedResolutionTemplates")
     .then((m) => m.seedRetailExceptionDefaults())
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} retail exception template(s)`); })
-    .catch((e) => console.error("[seed] retail exception templates failed:", loggableError(e)));
+    .catch((e) => console.error("[seed] retail exception templates failed:", loggableError(e))));
 
   // Seed Uganda market-pack exception templates (BoU framework; idempotent).
-  import("../seedResolutionTemplates")
+  runBackgroundWork(() => import("../seedResolutionTemplates")
     .then((m) => m.seedUgandaExceptionDefaults())
     .then((r) => { if (r.inserted > 0) console.log(`[seed] inserted ${r.inserted} Uganda exception template(s)`); })
-    .catch((e) => console.error("[seed] Uganda exception templates failed:", loggableError(e)));
+    .catch((e) => console.error("[seed] Uganda exception templates failed:", loggableError(e))));
 
   const preferredPort = parseInt(process.env.PORT || "3000");
   const port = await findAvailablePort(preferredPort);
@@ -832,9 +872,34 @@ async function startServer() {
 
   // Bind all container interfaces; Docker publishes this only through the
   // Compose-controlled host loopback mapping in on-premise deployments.
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${port}/`);
-  });
+  // A signal during the port search must not be followed by a listen, and a
+  // listen in flight must finish before startup (tracked work) settles.
+  if (!(await listenUnlessFenced(server, port, "0.0.0.0"))) {
+    console.log("[boot] startup_fenced", { stage: "before_listen" });
+    return;
+  }
+  console.log(`Server running on http://localhost:${port}/`);
 }
 
-startServer().catch(console.error);
+const app = express();
+const server = createServer(app);
+// Attached before startup begins: a signal from here on fences admission, then
+// waits for startup, like any other tracked work, before anything is closed.
+const shutdownHook = attachShutdownSignals(server, {
+  timeoutMs: readDrainTimeout(process.env.RECONCILEAI_DRAIN_TIMEOUT_MS),
+  closeResources: closeApplicationResources,
+});
+
+// Tracked, so the drain cannot report idle or close the pools while startup is
+// still importing, choosing a port or binding.
+void applicationLifecycle.runRoot("startup", () => startServer(app, server)).catch((error: unknown) => {
+  // Shutdown began before startup could: nothing was launched.
+  if (error instanceof MaintenanceAdmissionError) return;
+  console.error("[boot] startup_failed", loggableError(error));
+  process.exitCode = 1;
+  // A server that will never listen must not leave writers running behind it:
+  // routers.ts starts its producer loops at import, before startup runs.
+  void shutdownHook.shutdown().then(result => {
+    console.log(`[shutdown] ${result.status}; scope=tracked_process_only`);
+  });
+});
