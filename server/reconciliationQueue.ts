@@ -16,9 +16,10 @@
  *   - RETRY SIGNAL: the runner (routers.ts runReconciliation) swallows its own
  *     errors and marks the job "failed"; the handler reloads the status after
  *     the run and THROWS on failure so the queue drives the retry/backoff.
- *   - BOOT SWEEP: recoverStuckReconciliationJobs() marks jobs stuck in
- *     pending/running for >2h as failed (crash orphans under the in-process
- *     backend), so the dashboard never shows immortal spinners.
+ *   - BOOT SWEEP: recoverStuckReconciliationJobs() only marks >2h silent
+ *     pending/running crash orphans in a fresh development/test cloud process
+ *     without Redis or required durability, on a provably local database.
+ *     Durable/uncertain work is deferred.
  *   - ABANDONMENT GUARD: the sweep also stamps `abandonedAt`, and the handler
  *     treats an abandoned job as terminal. Marking the DB row failed does not
  *     delete the durable queue entry, so without this a BullMQ job delivered
@@ -36,6 +37,7 @@ import { reconciliationJobs, matches, exceptions as exceptionsTable, transaction
 import { createQueue, QueueOperationTimeoutError, type JobQueue } from "./jobQueue";
 import { ENV } from "./_core/env";
 import { loggableError } from "./dbErrors";
+import { classifyDatabaseTarget } from "./dbTarget";
 
 export interface ReconciliationRunPayload {
   jobId: number;
@@ -204,13 +206,11 @@ export function makeRunHandler(deps: RunHandlerDeps) {
     // the boot sweep's output indistinguishable from a retryable failure, and
     // the two must not be treated alike.
     //
-    // recoverStuckReconciliationJobs() marks a >2h pending/running job failed
-    // WITHOUT being able to delete the durable queue entry that may still exist
-    // for it. Under BullMQ that entry outlives the sweep and can be delivered
-    // afterwards — at which point this handler would reset the job's artifacts
-    // and re-run work the user has already been shown as failed, possibly while
-    // the original run is still alive on another worker. The sweep therefore
-    // stamps `abandonedAt`, and an abandoned job is terminal here.
+    // Legacy sweeps could mark a >2h pending/running job failed while a durable
+    // entry still existed. The restricted process-local sweep below does not
+    // clear those historical markers: an entry delivered afterwards must not
+    // reset artifacts and re-run work already shown as failed. `abandonedAt`
+    // remains terminal here, including the router's enqueue-ambiguity markers.
     if (state.abandonedAt != null) {
       console.warn(
         `[reconciliationQueue] job ${p.jobId} was abandoned by the recovery sweep at ` +
@@ -306,25 +306,49 @@ export async function enqueueReconciliationRun(payload: ReconciliationRunPayload
 
 // ─── Boot sweep for crash orphans ────────────────────────────────────────────
 
+/** Why startup recovery left stale rows alone. Fixed codes: safe to log. */
+type RecoveryDeferral =
+  | "redis_configured"
+  | "durability_required"
+  | "deployment_not_cloud"
+  | "environment_not_development_or_test"
+  | "database_not_local"
+  | "queue_cached";
+
 /**
- * Mark jobs stuck in pending/running for >2h as failed. Under the in-process
- * backend a crash orphans them permanently; under BullMQ retries finish well
- * inside the window, so anything older is genuinely dead either way.
+ * Silence during downtime or a long queue wait is not durable-work abandonment.
+ * Current missing Redis configuration cannot establish historical durability,
+ * and a cached queue may still be initializing or carrying accepted local work.
+ * Only retain the legacy orphan sweep in a fresh development/test cloud process
+ * with neither Redis nor a durability requirement. Do not construct or await a
+ * queue to justify a destructive recovery decision.
  *
- * Declaring a job dead has to make it dead in BOTH places it lives, because the
- * database row and the durable queue entry are separate facts:
- *
- *   1. `abandonedAt` is stamped alongside the failure. The handler treats an
- *      abandoned job as terminal, so a queue entry delivered after the sweep
- *      cannot reset the job's artifacts and re-run it. This is the load-bearing
- *      guard — it holds even if step 2 fails or the entry is mid-flight on
- *      another worker.
- *   2. The BullMQ entry itself is removed where the backend supports it, so the
- *      dead job stops consuming worker capacity and retry slots. Best-effort:
- *      an entry that is currently active cannot be removed, which is exactly
- *      the case step 1 already covers.
+ * The rows are only this process's to judge when the database is too. `pnpm
+ * dev` loads a .env that can name the production database (CLAUDE.md §12),
+ * whose stale rows may belong to production's durable queue, so the sweep also
+ * needs a database that is provably local (server/dbTarget.ts, loopback only).
  */
+function stuckJobRecoveryDeferral(): RecoveryDeferral | null {
+  if (process.env.REDIS_URL?.trim()) return "redis_configured";
+  if (ENV.reconciliationRequireDurableQueue) return "durability_required";
+  if (ENV.deploymentMode !== "cloud") return "deployment_not_cloud";
+  if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+    return "environment_not_development_or_test";
+  }
+  if (!classifyDatabaseTarget(process.env.DATABASE_URL).local) return "database_not_local";
+  if (queuePromise !== null) return "queue_cached";
+  return null;
+}
+
+function deferRecovery(reason: RecoveryDeferral): { recovered: number } {
+  console.warn("[reconciliationQueue] recovery_deferred_unproven_orphanhood", { reason });
+  return { recovered: 0 };
+}
+
 export async function recoverStuckReconciliationJobs(): Promise<{ recovered: number }> {
+  const deferral = stuckJobRecoveryDeferral();
+  if (deferral) return deferRecovery(deferral);
+
   const db = await getDb();
   if (!db) return { recovered: 0 };
   const cutoff = new Date(Date.now() - STUCK_JOB_MAX_AGE_MS);
@@ -349,10 +373,10 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
   //                 first beat.
   //   createdAt   — never started at all.
   //
-  // The heartbeat is what makes this a liveness test rather than an age test.
-  // A run declared dead here has been silent for the whole window, so it is
-  // genuinely not working — which matters because abandonment is terminal and
-  // the completion path discards the artifacts of an abandoned run.
+  // These signals narrow the legacy process-local orphan candidates. They do
+  // not prove durable orphanhood or distinguish downtime from abandonment.
+  // Completion/heartbeat races must still be rechecked inside the update;
+  // late completion retains its existing artifact-preserving contract.
   const lastActivity = sql`COALESCE(${reconciliationJobs.heartbeatAt}, ${reconciliationJobs.startedAt}, ${reconciliationJobs.createdAt})`;
   const stuck = await db
     .select({ id: reconciliationJobs.id })
@@ -363,6 +387,11 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
       isNull(reconciliationJobs.abandonedAt),
     ));
   if (stuck.length === 0) return { recovered: 0 };
+
+  // The database awaits above may have overlapped queue initialization. A
+  // cached promise is uncertainty, not permission to abandon its accepted work.
+  const lateDeferral = stuckJobRecoveryDeferral();
+  if (lateDeferral) return deferRecovery(lateDeferral);
 
   const ids = stuck.map((j) => j.id);
   const now = new Date();
@@ -401,8 +430,8 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
       isNotNull(reconciliationJobs.abandonedAt),
     ));
 
-  // Defence in depth (see 2 above) — never let a queue problem block the sweep.
-  // The rows are already marked abandoned, which is the guard that matters.
+  // Retain best-effort legacy cleanup only after conditional abandonment.
+  // In-process entries are not addressable; markers still guard later delivery.
   try {
     const queue = await getQueue();
     if (queue.remove) {

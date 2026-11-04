@@ -2,7 +2,7 @@
 
 ## Status and purpose
 
-This branch is a **review-only engineering prerequisite**, not an approved maintenance window, deployment, recovery rehearsal or completed backup control. It addresses the unsafe assumption that stopping admission or reaching a timeout means background writes have finished.
+Lifecycle increment 1 was merged and hardened through Claude's PR #214 review. That foundation addresses the unsafe assumption that stopping admission or reaching a timeout means background writes have finished. The narrow startup-recovery preservation increment described below remains a **review-only engineering prerequisite**, not a deployment, approved maintenance window, recovery rehearsal or completed backup control.
 
 ReconcileAI remains read-only evidence/control software at the financial boundary. This change does not authorise funds movement, autonomous exception closure, customer-data exports or destructive operations.
 
@@ -42,6 +42,18 @@ Only after tracked work and producer stops settle successfully does the signal a
 
 BullMQ local stop awaits acquisition/main-loop quiescence with `pause(false)`. A worker cleanup `error` emitted while `close()` resolves is still treated as unproved closure; the registry entry and cached failure are retained. The lifecycle proof is rechecked before database-pool closure and after resource closure, so a late fenced acquisition cannot turn an invalidated proof into `stopped`. Async route failures log fixed codes only, without incoming URLs or arbitrary rejection text.
 
+## Startup recovery preservation — review-only increment
+
+More than two hours without a heartbeat during downtime or a long queue wait does **not** prove that accepted durable reconciliation work was abandoned. `recoverStuckReconciliationJobs()` now defers before database access, candidate selection, abandonment updates or queue construction when Redis is configured, durability is required, the deployment is not explicitly cloud, `NODE_ENV` is not explicitly development/test, `DATABASE_URL` does not name a provably local database (`server/dbTarget.ts`: loopback only), or the reconciliation queue already has a cached promise. This includes on-premise mode, production with missing current Redis configuration, configured Redis outages or optional fallbacks, an in-progress queue initialization, and a development server whose `.env` names a shared or production database: that database's stale rows may belong to another deployment's durable queue, which a development process cannot see. A cached queue is not awaited or inspected to justify abandonment. Policy is rechecked after candidate selection before a legacy update, so queue initialization during the database awaits also vetoes abandonment.
+
+Deferral returns the unchanged `{ recovered: 0 }` contract and logs only the fixed non-secret code `[reconciliationQueue] recovery_deferred_unproven_orphanhood` with the first condition that applied as a fixed `reason`: `redis_configured`, `durability_required`, `deployment_not_cloud`, `environment_not_development_or_test`, `database_not_local` or `queue_cached`. It performs no abandonment or artifact writes, queue removal, marker clearing, re-enqueue, automatic replay or purge. Current missing configuration, an absent queue entry, or a test's lack of queue presence cannot establish historical orphanhood or authorise disposal of previously accepted work.
+
+The original two-hour, last-activity-based legacy orphan sweep remains limited to a fresh process-local development/test cloud context with no Redis configuration, no required durability, a provably local database and no cached reconciliation queue. Its `pending`/`running`, `COALESCE(heartbeatAt, startedAt, createdAt)`, and null-abandonment predicates remain reasserted in the conditional update. Recovery reports actual affected rows and preserves the completion/heartbeat race protections. Handler claim, retry, abandonment refusal, late-completion artifact preservation and normal queue behavior are unchanged; this limitation is not a new production in-process recovery guarantee.
+
+**Deferring ambiguous durable orphans can leave unresolved rows for separate reviewed disposition.** This is protection against false termination, not complete replay/resume, backlog repair or outage approval. Existing abandonment markers are not retroactively cleared. Held PR #209 and catch-up beyond the existing lookback remain separate, unresolved review gates.
+
+An idle-only maintenance window may avoid backlog recovery only if separately approved evidence proves every ingress/producer across every deployed copy is fenced and there are zero unresolved reconciliation rows and zero runnable/active/delayed retained entries, including retries, accepted outboxes, terminal hooks and acknowledgement gaps. Missing or incomplete evidence means no-go; local readiness, constructed-queue health and `tracked_process_only` drain results do not prove cluster-wide idle. Upstream retry/catch-up handling and any replay remain separately reviewed and approved.
+
 ## Coverage to review
 
 - Cold boot selection before normal writer-bearing imports.
@@ -51,6 +63,7 @@ BullMQ local stop awaits acquisition/main-loop quiescence with `pause(false)`. A
 - Scheduled reconciliation, SFTP, bucket ingestion, SLA, due-date monitoring, demo timeline and Shopify recovery/backstop timers.
 - Reconciliation descendant effects, heartbeat writes, queue factories and operations, local worker acquisition and terminal hooks.
 - Idempotent signal handling, bounded waits and pool closure after—not before—settled tracked work.
+- Synthetic stale pending/running preservation before dependency access for durable/uncertain configurations and cached queues; unchanged legacy update predicates, affected-row counts and completion/heartbeat race protections.
 
 ## Gates this increment does not close
 
