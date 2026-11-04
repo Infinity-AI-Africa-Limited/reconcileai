@@ -31,6 +31,7 @@ const NOW = new Date("2026-11-04T04:00:00.000Z");
 const OLD = new Date("2026-11-04T00:00:00.000Z");
 const CUTOFF = new Date("2026-11-04T02:00:00.000Z");
 const DEFER_CODE = "[reconciliationQueue] recovery_deferred_unproven_orphanhood";
+const LOCAL_DATABASE_URL = "mysql://synthetic:synthetic@127.0.0.1:3306/synthetic";
 
 function staleRows() {
   return [
@@ -54,6 +55,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   vi.stubEnv("NODE_ENV", "test");
   vi.stubEnv("REDIS_URL", undefined);
+  vi.stubEnv("DATABASE_URL", LOCAL_DATABASE_URL);
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   state.db = null;
@@ -74,7 +76,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function expectDeferredBeforeAccess() {
+async function expectDeferredBeforeAccess(reason: string) {
   const rows = staleRows();
   const snapshot = structuredClone(rows);
   const db = scriptedDb({ select: { [JOBS]: [rows, rows] }, update: { [JOBS]: [2] } });
@@ -91,7 +93,7 @@ async function expectDeferredBeforeAccess() {
   expect(state.remove).not.toHaveBeenCalled();
   expect(state.stats).not.toHaveBeenCalled();
   expect(console.warn).toHaveBeenCalledTimes(1);
-  expect(console.warn).toHaveBeenCalledWith(DEFER_CODE);
+  expect(console.warn).toHaveBeenCalledWith(DEFER_CODE, { reason });
   expect(console.error).not.toHaveBeenCalled();
 }
 
@@ -107,23 +109,23 @@ describe("when stale pending/running jobs have configured or required durability
       } else {
         state.createQueue.mockResolvedValue(mockQueue(availability === "fallback" ? "in-process" : "bullmq"));
       }
-      await expectDeferredBeforeAccess();
+      await expectDeferredBeforeAccess("redis_configured");
     },
   );
 
   it("should defer when durability is required but Redis is missing", async () => {
     state.env.reconciliationRequireDurableQueue = true;
-    await expectDeferredBeforeAccess();
+    await expectDeferredBeforeAccess("durability_required");
   });
 
   it("should defer in on-premise mode even without Redis or the explicit durable flag", async () => {
     state.env.deploymentMode = "on_premise";
-    await expectDeferredBeforeAccess();
+    await expectDeferredBeforeAccess("deployment_not_cloud");
   });
 
   it("should defer rather than infer a process-local boundary from an unknown deployment mode", async () => {
     state.env.deploymentMode = "unknown";
-    await expectDeferredBeforeAccess();
+    await expectDeferredBeforeAccess("deployment_not_cloud");
   });
 });
 
@@ -132,7 +134,7 @@ describe("when current missing Redis configuration cannot prove historical orpha
     "should preserve stale rows when NODE_ENV is %s rather than explicit development/test",
     async nodeEnv => {
       vi.stubEnv("NODE_ENV", nodeEnv);
-      await expectDeferredBeforeAccess();
+      await expectDeferredBeforeAccess("environment_not_development_or_test");
     },
   );
 });
@@ -147,7 +149,7 @@ describe("when a reconciliation queue is already cached", () => {
       state.createQueue.mockClear();
       // Neither a local backend nor missing current config authorises disposal
       // of accepted entries. Do not even inspect the existing queue.
-      await expectDeferredBeforeAccess();
+      await expectDeferredBeforeAccess("queue_cached");
     },
   );
 
@@ -158,7 +160,7 @@ describe("when a reconciliation queue is already cached", () => {
     const initializing = assertReconciliationQueueAvailable();
     state.createQueue.mockClear();
     try {
-      await expectDeferredBeforeAccess();
+      await expectDeferredBeforeAccess("queue_cached");
     } finally {
       resolveQueue(mockQueue());
       await initializing;
@@ -183,7 +185,23 @@ describe("when a reconciliation queue is already cached", () => {
     expect(state.enqueue).not.toHaveBeenCalled();
     expect(state.remove).not.toHaveBeenCalled();
     expect(console.warn).toHaveBeenCalledTimes(1);
-    expect(console.warn).toHaveBeenCalledWith(DEFER_CODE);
+    expect(console.warn).toHaveBeenCalledWith(DEFER_CODE, { reason: "queue_cached" });
+  });
+});
+
+describe("when development or test points at a database that is not provably local", () => {
+  // `pnpm dev` loads a .env that can name the production database (CLAUDE.md
+  // §12). Its stale rows may belong to production's durable queue, which a
+  // development process cannot see, so it must not judge them abandoned.
+  it.each([
+    ["a remote host", "mysql://synthetic:synthetic@db.synthetic.invalid:4000/app"],
+    ["a single-label host any network can define", "mysql://synthetic:synthetic@mysql:3306/app"],
+    ["unset", undefined],
+    ["unparseable", "not a database url"],
+  ])("should defer before access when DATABASE_URL is %s", async (_label, url) => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("DATABASE_URL", url);
+    await expectDeferredBeforeAccess("database_not_local");
   });
 });
 

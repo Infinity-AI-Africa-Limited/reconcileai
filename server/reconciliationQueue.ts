@@ -18,7 +18,8 @@
  *     the run and THROWS on failure so the queue drives the retry/backoff.
  *   - BOOT SWEEP: recoverStuckReconciliationJobs() only marks >2h silent
  *     pending/running crash orphans in a fresh development/test cloud process
- *     without Redis or required durability. Durable/uncertain work is deferred.
+ *     without Redis or required durability, on a provably local database.
+ *     Durable/uncertain work is deferred.
  *   - ABANDONMENT GUARD: the sweep also stamps `abandonedAt`, and the handler
  *     treats an abandoned job as terminal. Marking the DB row failed does not
  *     delete the durable queue entry, so without this a BullMQ job delivered
@@ -36,6 +37,7 @@ import { reconciliationJobs, matches, exceptions as exceptionsTable, transaction
 import { createQueue, QueueOperationTimeoutError, type JobQueue } from "./jobQueue";
 import { ENV } from "./_core/env";
 import { loggableError } from "./dbErrors";
+import { classifyDatabaseTarget } from "./dbTarget";
 
 export interface ReconciliationRunPayload {
   jobId: number;
@@ -304,6 +306,15 @@ export async function enqueueReconciliationRun(payload: ReconciliationRunPayload
 
 // ─── Boot sweep for crash orphans ────────────────────────────────────────────
 
+/** Why startup recovery left stale rows alone. Fixed codes: safe to log. */
+type RecoveryDeferral =
+  | "redis_configured"
+  | "durability_required"
+  | "deployment_not_cloud"
+  | "environment_not_development_or_test"
+  | "database_not_local"
+  | "queue_cached";
+
 /**
  * Silence during downtime or a long queue wait is not durable-work abandonment.
  * Current missing Redis configuration cannot establish historical durability,
@@ -311,20 +322,32 @@ export async function enqueueReconciliationRun(payload: ReconciliationRunPayload
  * Only retain the legacy orphan sweep in a fresh development/test cloud process
  * with neither Redis nor a durability requirement. Do not construct or await a
  * queue to justify a destructive recovery decision.
+ *
+ * The rows are only this process's to judge when the database is too. `pnpm
+ * dev` loads a .env that can name the production database (CLAUDE.md §12),
+ * whose stale rows may belong to production's durable queue, so the sweep also
+ * needs a database that is provably local (server/dbTarget.ts, loopback only).
  */
-function shouldDeferStuckJobRecovery(): boolean {
-  return Boolean(process.env.REDIS_URL?.trim())
-    || ENV.reconciliationRequireDurableQueue
-    || ENV.deploymentMode !== "cloud"
-    || (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test")
-    || queuePromise !== null;
+function stuckJobRecoveryDeferral(): RecoveryDeferral | null {
+  if (process.env.REDIS_URL?.trim()) return "redis_configured";
+  if (ENV.reconciliationRequireDurableQueue) return "durability_required";
+  if (ENV.deploymentMode !== "cloud") return "deployment_not_cloud";
+  if (process.env.NODE_ENV !== "development" && process.env.NODE_ENV !== "test") {
+    return "environment_not_development_or_test";
+  }
+  if (!classifyDatabaseTarget(process.env.DATABASE_URL).local) return "database_not_local";
+  if (queuePromise !== null) return "queue_cached";
+  return null;
+}
+
+function deferRecovery(reason: RecoveryDeferral): { recovered: number } {
+  console.warn("[reconciliationQueue] recovery_deferred_unproven_orphanhood", { reason });
+  return { recovered: 0 };
 }
 
 export async function recoverStuckReconciliationJobs(): Promise<{ recovered: number }> {
-  if (shouldDeferStuckJobRecovery()) {
-    console.warn("[reconciliationQueue] recovery_deferred_unproven_orphanhood");
-    return { recovered: 0 };
-  }
+  const deferral = stuckJobRecoveryDeferral();
+  if (deferral) return deferRecovery(deferral);
 
   const db = await getDb();
   if (!db) return { recovered: 0 };
@@ -367,10 +390,8 @@ export async function recoverStuckReconciliationJobs(): Promise<{ recovered: num
 
   // The database awaits above may have overlapped queue initialization. A
   // cached promise is uncertainty, not permission to abandon its accepted work.
-  if (shouldDeferStuckJobRecovery()) {
-    console.warn("[reconciliationQueue] recovery_deferred_unproven_orphanhood");
-    return { recovered: 0 };
-  }
+  const lateDeferral = stuckJobRecoveryDeferral();
+  if (lateDeferral) return deferRecovery(lateDeferral);
 
   const ids = stuck.map((j) => j.id);
   const now = new Date();
