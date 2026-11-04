@@ -31,7 +31,6 @@ import {
   measureTenantDuplicates,
   tenantsWithDuplicateRetailExceptions,
 } from "./duplicateRetailExceptions";
-import { appRouter } from "./routers";
 
 const url = process.env.DATABASE_URL;
 const localDatabase = Boolean(url) && classifyDatabaseTarget(url).local;
@@ -39,6 +38,7 @@ const DAY = 24 * 60 * 60_000;
 const CATEGORY = "retail_settlement_shortfall";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
+type AppRouter = (typeof import("./routers"))["appRouter"];
 
 describe.runIf(localDatabase)("when duplicate retail exceptions are handled on a real database", () => {
   // Synthetic job and transaction ids no real row has (no foreign keys).
@@ -55,6 +55,11 @@ describe.runIf(localDatabase)("when duplicate retail exceptions are handled on a
   const txn = (n: number) => base + n;
   const filed = new Date(Date.now() - 3 * DAY);
   let db: Db;
+  // Loaded in the guarded beforeAll, never at module scope. Importing the
+  // router starts its boot services (the scheduler, the pollers, the demo
+  // pre-warm), and the pre-warm writes. A suite skipped because DATABASE_URL
+  // is not local must not start them against wherever it points (Greptile, #222).
+  let appRouter: AppRouter;
 
   const insertedId = (result: unknown) => Number((result as { insertId?: number }).insertId);
 
@@ -146,6 +151,7 @@ describe.runIf(localDatabase)("when duplicate retail exceptions are handled on a
     const found = await getDb();
     if (!found) throw new Error("DATABASE_URL is local, but no database connection was made");
     db = found;
+    ({ appRouter } = await import("./routers"));
     for (const key of ORG_KEYS) {
       const [result] = await db
         .insert(organizations)
