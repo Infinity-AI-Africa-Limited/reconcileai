@@ -1,6 +1,8 @@
 import mysql from "mysql2";
 import { loggableError } from "./dbErrors";
 
+const appPools = new Set<mysql.Pool>();
+
 /**
  * Every session the server opens on its own database runs in UTC.
  *
@@ -63,5 +65,20 @@ export function pinSessionTimeZone(
 export function createAppPool(uri: string): mysql.Pool {
   const pool = mysql.createPool({ uri });
   pinSessionTimeZone(pool);
+  appPools.add(pool);
   return pool;
+}
+
+/** Shutdown only: never close a pool while a tracked task is still using it. */
+export async function closeAppPools(): Promise<void> {
+  const results = await Promise.allSettled([...appPools].map(pool =>
+    new Promise<void>((resolve, reject) => {
+      pool.end(error => {
+        if (error) { reject(new Error("app_pool_close_failed")); return; }
+        appPools.delete(pool);
+        resolve();
+      });
+    }),
+  ));
+  if (results.some(result => result.status === "rejected")) throw new Error("app_pool_close_failed");
 }

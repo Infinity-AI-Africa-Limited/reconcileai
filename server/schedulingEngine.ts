@@ -8,6 +8,7 @@ import { sendReconciliationReport } from "./emailReportService";
 import { isTenantId } from "@shared/tenantId";
 import { loggableError } from "./dbErrors";
 import { stackFrames, errorSummary } from "./errorText";
+import { applicationLifecycle, runBackgroundWork } from "./maintenance/lifecycle";
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -280,6 +281,7 @@ export async function executeScheduledTask(taskId: number): Promise<{
 // ─── Scheduler Tick (called periodically) ───────────────────────────
 
 let schedulerInterval: ReturnType<typeof setInterval> | null = null;
+applicationLifecycle.registerStop(stopScheduler);
 
 /** Transient DB error codes that warrant a reconnect + retry. */
 const DB_TRANSIENT_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "PROTOCOL_CONNECTION_LOST"]);
@@ -350,14 +352,15 @@ export async function schedulerTick(): Promise<void> {
 }
 
 export function startScheduler(intervalMs: number = 60000): void {
+  if (!applicationLifecycle.isAcceptingWork()) return;
   if (schedulerInterval) {
     console.warn("[Scheduler] Already running");
     return;
   }
   console.log(`[Scheduler] Starting with ${intervalMs}ms interval`);
-  schedulerInterval = setInterval(schedulerTick, intervalMs);
+  schedulerInterval = setInterval(() => runBackgroundWork(() => schedulerTick()), intervalMs);
   // Run immediately on start
-  schedulerTick().catch((err) => console.error("[Scheduler] Initial tick failed:", loggableError(err)));
+  runBackgroundWork(() => schedulerTick());
 }
 
 export function stopScheduler(): void {

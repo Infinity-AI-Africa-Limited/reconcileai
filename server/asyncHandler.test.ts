@@ -18,6 +18,8 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { asyncHandler } from "./_core/asyncHandler";
 
+import { applicationLifecycle, MaintenanceAdmissionError } from "./maintenance/lifecycle";
+
 /**
  * Call a rejecting handler the way Express 4 does — invoke it, ignore what it
  * returns — in a fresh Node process, then report whether that process lived.
@@ -165,22 +167,18 @@ describe("when a route handler's promise rejects", () => {
     expect(escaped).toHaveLength(0);
   });
 
-  it("should log the route, so the next one is diagnosable without a repro", async () => {
+  it("should log fixed diagnostic codes without an incoming URL or arbitrary error text", async () => {
     await withRejectionWatch(() => {
       asyncHandler(async () => {
-        throw new Error("boom");
-      })(fakeReq("/api/woodcore/sync"), fakeRes().res as never, (() => {}) as never);
+        throw new Error("fixture_private_payload");
+      })({ path: "/api/woodcore/sync", method: "POST", originalUrl: "/api/woodcore/sync?key=fixture_private_link", headers: {} } as never, fakeRes().res as never, (() => {}) as never);
     });
-    // What failed and where, never the error itself: Node would print its
-    // message, which for a database error is the query and its parameters.
     expect(errorLog).toHaveBeenCalledWith(
-      expect.stringContaining("POST /api/woodcore/sync"),
-      expect.objectContaining({
-        error: "Error",
-        message: "boom",
-        frames: expect.arrayContaining([expect.stringMatching(/^at .*asyncHandler\.test\.ts/)]),
-      }),
+      "[asyncHandler] route_failure",
+      { code: "async_route_failed", boundary: "interactive" },
     );
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("fixture_private_payload");
+    expect(JSON.stringify(errorLog.mock.calls)).not.toContain("fixture_private_link");
   });
 });
 
@@ -206,5 +204,23 @@ describe("when a route handler behaves", () => {
     });
     expect(escaped).toHaveLength(0);
     expect(saw.statusCode).toBe(500);
+  });
+});
+
+describe("when maintenance admission refuses a disconnected caller", () => {
+  it("should not turn a failed retry response into an unhandled rejection", async () => {
+    const admission = vi.spyOn(applicationLifecycle, "run").mockRejectedValueOnce(new MaintenanceAdmissionError());
+    try {
+      const handler = vi.fn(async () => {});
+      const hostile = { headersSent: false, setHeader() { throw new Error("fixture_socket_gone"); } };
+      const escaped = await withRejectionWatch(() => {
+        asyncHandler(handler)(fakeReq(), hostile as never, (() => {}) as never);
+      });
+      expect(escaped).toHaveLength(0);
+      expect(handler).not.toHaveBeenCalled();
+      expect(errorLog).not.toHaveBeenCalled();
+    } finally {
+      admission.mockRestore();
+    }
   });
 });
