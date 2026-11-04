@@ -3,6 +3,7 @@
  * Durable/uncertain work must be preserved before DB access or queue creation;
  * the fresh process-local legacy path retains its conditional race protections.
  */
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { JobQueue } from "./jobQueue";
 import type { ReconciliationRunPayload } from "./reconciliationQueue";
@@ -294,5 +295,46 @@ describe("when a fresh development/test cloud process has no Redis or required d
     expect(state.getDb).toHaveBeenCalledTimes(1);
     expect(state.createQueue).not.toHaveBeenCalled();
     expect(state.remove).not.toHaveBeenCalled();
+  });
+});
+
+describe("when an instance restarts with reconciliation runs retained in Redis", () => {
+  it("should build the worker at boot, so retained runs resume without anyone creating a new run", async () => {
+    vi.stubEnv("REDIS_URL", "redis://synthetic.invalid:6379");
+    state.createQueue.mockResolvedValue(mockQueue("bullmq"));
+    const { startReconciliationWorker } = await import("./reconciliationQueue");
+
+    await startReconciliationWorker();
+
+    expect(state.createQueue).toHaveBeenCalledTimes(1);
+    expect(state.createQueue).toHaveBeenCalledWith("reconciliation-runs", expect.any(Function), expect.objectContaining({ uniqueJobNames: true }));
+    expect(state.enqueue).not.toHaveBeenCalled(); // delivery only: nothing is re-enqueued or replayed
+    expect(state.remove).not.toHaveBeenCalled();
+  });
+
+  it("should leave the startup sweep deferred while the worker starts", async () => {
+    vi.stubEnv("REDIS_URL", "redis://synthetic.invalid:6379");
+    state.createQueue.mockResolvedValue(mockQueue("bullmq"));
+    const { recoverStuckReconciliationJobs, startReconciliationWorker } = await import("./reconciliationQueue");
+
+    const [sweep] = await Promise.all([recoverStuckReconciliationJobs(), startReconciliationWorker()]);
+
+    expect(sweep).toEqual({ recovered: 0 });
+    expect(state.getDb).not.toHaveBeenCalled();
+    expect(console.warn).toHaveBeenCalledWith(DEFER_CODE, { reason: "redis_configured" });
+    expect(state.createQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("should not build an in-process queue at boot: it holds nothing across a restart, and would defer the development sweep", async () => {
+    const { startReconciliationWorker } = await import("./reconciliationQueue");
+    await startReconciliationWorker();
+    expect(state.createQueue).not.toHaveBeenCalled();
+  });
+
+  it("should be started by the server's boot sequence", () => {
+    const boot = readFileSync(new URL("./_core/index.ts", import.meta.url), "utf8");
+    const hook = boot.indexOf('.then((q) => q.startReconciliationWorker())');
+    expect(hook).toBeGreaterThan(-1);
+    expect(boot.slice(Math.max(0, hook - 120), hook)).toContain('import("../reconciliationQueue")');
   });
 });
