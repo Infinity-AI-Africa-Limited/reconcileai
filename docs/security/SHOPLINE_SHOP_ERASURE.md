@@ -88,8 +88,14 @@ Reuse Shopify's guarded erasure; do not fork it.
    - `sl_connector_shop_redaction_jobs` has the same lease, attempt and
      checkpoint columns as `shopify_shop_redaction_jobs`, linked to the GDPR
      request row.
-   - A receipt table outside the tenant holds counts and timestamps only, so
-     proof of erasure survives the erasure.
+   - A receipt table outside the tenant holds the request's hash, when it
+     was received and met, and the manifest's counts. It holds no shop domain
+     or other identifier.
+   - **The receipt is the completion record.** The erasure deletes the
+     tenant's `sl_connector_gdpr_requests` rows with everything else
+     (`eraseTenantWorkspace` lists the table), so the request row cannot be
+     marked `completed` afterwards. The row disappearing is also what takes
+     the request off the deadline report.
 3. **Admission when the request arrives**, in one transaction:
    1. Lock the organisation row.
    2. Refuse unless the store is provably uninstalled (see the first open
@@ -110,11 +116,10 @@ Reuse Shopify's guarded erasure; do not fork it.
    3. Wait for in-flight uploads to settle (`TENANT_UPLOAD_DEADLINE_MS` plus a
       margin from the first claim).
    4. Delete the tenant's stored files.
-   5. Erase its rows in one transaction, under the organisation lock, after
-      re-checking the fence.
-   6. Write the receipt.
-   7. Mark the GDPR request `completed`, with the manifest's total as
-      `recordsAffected`.
+   5. In one transaction, under the organisation lock, after re-checking the
+      fence: erase the tenant's rows, including its GDPR request rows, and
+      write the receipt with the manifest's counts. Both commit, or neither
+      does.
 
    Failures are retried with backoff, then parked for a person.
 5. **The deadline report already exists.** `gdprDeadlines.ts` reports open
@@ -163,5 +168,13 @@ Reuse Shopify's guarded erasure; do not fork it.
 The 30 days run from `receivedAt` on the request row, and the owner's email
 gives the due date. Either ship the erasure above before then, or erase the
 tenant by hand under review: a reviewed, dry-run-first script, never ad-hoc
-SQL. Then mark the request `completed`, with a note naming what was erased.
+SQL.
+
+Until the receipt table exists, the hand-run script keeps the request row as
+the record, and does so in the same transaction as the erasure:
+- it erases everything else;
+- it marks the row `completed`, with `recordsAffected` and a note naming what
+  was erased;
+- it clears the row's `shopDomain`, keeping only `subjectHash`.
+
 Both routes are production data changes, and both need the owner's approval.

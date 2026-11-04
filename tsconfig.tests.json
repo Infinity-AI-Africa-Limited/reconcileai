@@ -76,6 +76,7 @@
     "server/connectors/shopify/tokenStore.test.ts",
     "server/connectors/shopify/webhookBody.test.ts",
     "server/connectors/shopify/webhooks.test.ts",
+    "server/connectors/shopline/dailyBatchGdprReport.test.ts",
     "server/connectors/shopline/gdprDeadlines.db.test.ts",
     "server/connectors/shopline/gdprDeadlines.test.ts",
     "server/connectors/shopline/gdprShopRedact.test.ts",
