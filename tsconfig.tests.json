@@ -20,6 +20,7 @@
   "files": [
     ".github/scripts/startTestMysql.test.ts",
     "scripts/bootstrapAdminGuard.test.ts",
+    "scripts/productionWorkloadPreflight.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
     "client/src/lib/exceptionWorkflowPresentation.test.ts",
     "client/src/lib/exceptionWorkflowPanel.test.ts",
