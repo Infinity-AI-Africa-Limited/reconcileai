@@ -1,4 +1,5 @@
 import { createQueue, type EnqueueOptions, type JobQueue, type QueueStats } from "../../jobQueue";
+import { ENV } from "../../_core/env";
 import { handleShopifyWebhookSync, markShopifyWebhookSyncFailed } from "./syncOrchestrator";
 import { handleShopifyManualSync, type ShopifyManualSyncPayload } from "./manualSync";
 
@@ -104,4 +105,19 @@ function manualQueue(): Promise<JobQueue<ShopifyManualSyncPayload>> {
 export async function enqueueShopifyManualSync(payload: ShopifyManualSyncPayload): Promise<void> {
   const queue = await manualQueue();
   await queue.enqueue(...shopifyManualSyncJob(payload));
+}
+
+/**
+ * Build this instance's manual-sync worker at boot, so refreshes a merchant
+ * requested before a restart run without waiting for the next request. Until
+ * now the worker was built only by a request.
+ *
+ * Only where it can run: the queue requires Redis (`requireDurable`), and the
+ * sync requires the Shopify app's credentials, the same condition the order
+ * backstop starts on. The caller does not await Redis before `server.listen`.
+ */
+export async function startShopifyManualSyncWorker(): Promise<void> {
+  if (!process.env.REDIS_URL?.trim()) return;
+  if (!ENV.shopifyClientId || !ENV.shopifyClientSecret) return;
+  await manualQueue();
 }

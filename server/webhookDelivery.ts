@@ -178,9 +178,29 @@ function getQueue(): Promise<JobQueue<DeliveryJob>> {
     queuePromise = createQueue<DeliveryJob>("webhook-delivery", attemptDelivery, {
       attempts: MAX_ATTEMPTS,
       backoffMs: BACKOFF_BASE_MS,
+    }).catch((error) => {
+      // Never cache a failed build: one refusal (Redis not up yet when the boot
+      // start below runs, say) would otherwise fail every later dispatch with
+      // that stale error until the process restarts.
+      queuePromise = null;
+      throw error;
     });
   }
   return queuePromise;
+}
+
+/**
+ * Build this instance's delivery worker at boot, so deliveries retained in Redis
+ * through a restart, retries waiting out their backoff included, are attempted
+ * without waiting for the next event to be dispatched. Until now the worker was
+ * built only by a dispatch.
+ *
+ * Durable backend only: an in-process queue holds nothing across a restart. The
+ * caller does not await Redis before `server.listen` (CLAUDE.md §10).
+ */
+export async function startWebhookDeliveryWorker(): Promise<void> {
+  if (!process.env.REDIS_URL?.trim()) return;
+  await getQueue();
 }
 
 // ─── Dispatch (called from routers/gateway) ──────────────────────────────────
