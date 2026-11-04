@@ -39,8 +39,11 @@ describe.runIf(localDatabase)("when open SHOPLINE GDPR requests are counted in M
   it("should count open requests, and which of them are past the 30-day deadline", async () => {
     const before = await findOpenShoplineGdprRequests(db as never, NOW);
     const rows = [
-      // Open: one overdue (31 days), one not (29 days).
+      // Open: two overdue (31 and 45 days), one not (29 days). Uneven on
+      // purpose: one row each side of the cutoff counts 1 whichever way the
+      // comparison points, so a flipped cutoff would pass unseen.
       { status: "received" as const, receivedAt: new Date(NOW.getTime() - 31 * DAY) },
+      { status: "received" as const, receivedAt: new Date(NOW.getTime() - 45 * DAY) },
       { status: "received" as const, receivedAt: new Date(NOW.getTime() - 29 * DAY) },
       // Settled one way or another: never counted, however old.
       { status: "completed" as const, receivedAt: new Date(NOW.getTime() - 40 * DAY) },
@@ -58,9 +61,9 @@ describe.runIf(localDatabase)("when open SHOPLINE GDPR requests are counted in M
     }
 
     const after = await findOpenShoplineGdprRequests(db as never, NOW);
-    expect((after?.requests ?? 0) - (before?.requests ?? 0)).toBe(2);
-    expect((after?.overdue ?? 0) - (before?.overdue ?? 0)).toBe(1);
+    expect((after?.requests ?? 0) - (before?.requests ?? 0)).toBe(3);
+    expect((after?.overdue ?? 0) - (before?.overdue ?? 0)).toBe(2);
     expect(after?.oldestReceivedAt).toBeInstanceOf(Date);
-    expect(after!.oldestReceivedAt.getTime()).toBeLessThanOrEqual(NOW.getTime() - 31 * DAY);
+    expect(after!.oldestReceivedAt.getTime()).toBeLessThanOrEqual(NOW.getTime() - 45 * DAY);
   });
 });
