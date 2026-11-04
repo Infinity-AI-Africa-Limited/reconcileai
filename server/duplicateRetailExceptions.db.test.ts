@@ -12,7 +12,16 @@
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { auditChainLocks, auditLogs, exceptions, exceptionWorkflows, organizations } from "../drizzle/schema";
+import {
+  agentMemory,
+  auditChainLocks,
+  auditLogs,
+  exceptionPatternSignatures,
+  exceptions,
+  exceptionWorkflows,
+  organizations,
+  transactions,
+} from "../drizzle/schema";
 import { getDb } from "./db";
 import { classifyDatabaseTarget } from "./dbTarget";
 import {
@@ -22,6 +31,7 @@ import {
   measureTenantDuplicates,
   tenantsWithDuplicateRetailExceptions,
 } from "./duplicateRetailExceptions";
+import { appRouter } from "./routers";
 
 const url = process.env.DATABASE_URL;
 const localDatabase = Boolean(url) && classifyDatabaseTarget(url).local;
@@ -31,9 +41,16 @@ const CATEGORY = "retail_settlement_shortfall";
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
 
 describe.runIf(localDatabase)("when duplicate retail exceptions are handled on a real database", () => {
-  const base = 910_000_000 + Math.floor(Math.random() * 1_000_000) * 4;
-  const org = { main: base, other: base + 1, fresh: base + 2, race: base + 3 };
-  const orgIds = Object.values(org);
+  // Synthetic job and transaction ids no real row has (no foreign keys).
+  const base = 910_000_000 + Math.floor(Math.random() * 1_000_000);
+  // Organisation ids are assigned by the database, never chosen here. Importing
+  // the router starts its boot services, and the demo pre-warm creates an
+  // organisation with an auto-increment id while these are inserted. An
+  // explicit id N moves AUTO_INCREMENT to N+1, so that insert took the next
+  // chosen id and the suite failed on a duplicate key.
+  const ORG_KEYS = ["main", "other", "fresh", "race", "closedKeeper", "memoryBefore", "memoryDuring"] as const;
+  const org = {} as Record<(typeof ORG_KEYS)[number], number>;
+  const orgIds = () => Object.values(org);
   // Transaction ids no real row has: no job or transaction owns these rows.
   const txn = (n: number) => base + n;
   const filed = new Date(Date.now() - 3 * DAY);
@@ -71,6 +88,48 @@ describe.runIf(localDatabase)("when duplicate retail exceptions are handled on a
     });
   }
 
+  /** A real transaction row: `superAgent.addMemory` joins an exception to it. */
+  async function transactionOf(organizationId: number): Promise<number> {
+    const [result] = await db.insert(transactions).values({
+      organizationId,
+      batchId: base,
+      channelId: base,
+      userId: 1,
+      amount: "10.00",
+      transactionDate: filed,
+      debitCredit: "credit",
+      counterparty: "Stripe",
+    });
+    return insertedId(result);
+  }
+
+  /** An operations user of the tenant, calling the real procedure. */
+  function operator(organizationId: number) {
+    return appRouter.createCaller({
+      user: {
+        id: 9101,
+        openId: `dup-proof-${organizationId}`,
+        name: "Operator",
+        email: "operator@example.invalid",
+        role: "operations",
+        organizationId,
+        isGuest: false,
+      },
+      req: { headers: {}, ip: "127.0.0.1" },
+      res: { cookie: () => {}, clearCookie: () => {} },
+    } as never);
+  }
+
+  const memoryFor = (exceptionId: number) => ({
+    exceptionId,
+    exceptionCategory: CATEGORY,
+    amountRange: "0-100k" as const,
+    resolution: "Matched by hand",
+    outcome: "resolved" as const,
+    reasoning: "synthetic",
+    embeddingText: "synthetic",
+  });
+
   async function rows(ids: number[]) {
     const found = await db.select().from(exceptions).where(inArray(exceptions.id, ids));
     return new Map(found.map((row) => [row.id, row]));
@@ -87,18 +146,24 @@ describe.runIf(localDatabase)("when duplicate retail exceptions are handled on a
     const found = await getDb();
     if (!found) throw new Error("DATABASE_URL is local, but no database connection was made");
     db = found;
-    for (const id of orgIds) {
-      await db.insert(organizations).values({ id, name: `Duplicate proof ${id}`, code: `DUPPROOF_${id}`, isDemo: true });
+    for (const key of ORG_KEYS) {
+      const [result] = await db
+        .insert(organizations)
+        .values({ name: `Duplicate proof ${base} ${key}`, code: `DUPPROOF_${base}_${key}`, isDemo: true });
+      org[key] = insertedId(result);
     }
   });
 
   afterAll(async () => {
     if (!db) return;
-    await db.delete(exceptionWorkflows).where(inArray(exceptionWorkflows.organizationId, orgIds));
-    await db.delete(exceptions).where(inArray(exceptions.organizationId, orgIds));
-    await db.delete(auditLogs).where(inArray(auditLogs.organizationId, orgIds));
-    await db.delete(auditChainLocks).where(inArray(auditChainLocks.chainKey, orgIds));
-    await db.delete(organizations).where(inArray(organizations.id, orgIds));
+    await db.delete(exceptionWorkflows).where(inArray(exceptionWorkflows.organizationId, orgIds()));
+    await db.delete(agentMemory).where(inArray(agentMemory.organizationId, orgIds()));
+    await db.delete(exceptionPatternSignatures).where(inArray(exceptionPatternSignatures.organizationId, orgIds()));
+    await db.delete(exceptions).where(inArray(exceptions.organizationId, orgIds()));
+    await db.delete(transactions).where(inArray(transactions.organizationId, orgIds()));
+    await db.delete(auditLogs).where(inArray(auditLogs.organizationId, orgIds()));
+    await db.delete(auditChainLocks).where(inArray(auditChainLocks.chainKey, orgIds()));
+    await db.delete(organizations).where(inArray(organizations.id, orgIds()));
   });
 
   describe("when a tenant holds every kind of duplicate group", () => {
@@ -212,6 +277,74 @@ describe.runIf(localDatabase)("when duplicate retail exceptions are handled on a
       expect(after.get(assigned)).toMatchObject({ status: "open", assignedTo: 5 });
       expect(after.get(enrolled)?.status).toBe("open");
       expect(after.get(keeper)?.status).toBe("open");
+    });
+  });
+
+  describe("when a person closes the kept copy between the plan and the commit", () => {
+    it("should leave the other copy open, as a fresh plan would (Greptile, #222)", async () => {
+      const keeper = await file(org.closedKeeper, txn(1));
+      const copy = await file(org.closedKeeper, txn(1));
+
+      const result = await closeTenantDuplicates(db, org.closedKeeper, {
+        afterPlan: async (plans) => {
+          expect(plans[0]).toMatchObject({ keeperId: keeper, close: [copy] });
+          await db
+            .update(exceptions)
+            .set({ status: "resolved", resolvedBy: 5, resolvedAt: new Date() })
+            .where(eq(exceptions.id, keeper));
+        },
+      });
+
+      expect(result).toMatchObject({ closed: 0, skipped: 1 });
+      expect((await rows([copy])).get(copy)?.status).toBe("open");
+      expect(await auditRecords(org.closedKeeper)).toHaveLength(0);
+    });
+  });
+
+  describe("when someone saves a memory against a copy", () => {
+    it("should skip a copy whose memory was saved before the batch locked it", async () => {
+      const transactionId = await transactionOf(org.memoryBefore);
+      await file(org.memoryBefore, transactionId);
+      const copy = await file(org.memoryBefore, transactionId);
+
+      const result = await closeTenantDuplicates(db, org.memoryBefore, {
+        afterPlan: async () => {
+          await operator(org.memoryBefore).superAgent.addMemory(memoryFor(copy));
+        },
+      });
+
+      expect(result).toMatchObject({ closed: 0, skipped: 1 });
+      expect((await rows([copy])).get(copy)?.status).toBe("open");
+    });
+
+    it("should make a memory saved during the batch wait for it, so the batch never decides on stale work (Greptile, #222)", async () => {
+      const transactionId = await transactionOf(org.memoryDuring);
+      const keeper = await file(org.memoryDuring, transactionId);
+      const copy = await file(org.memoryDuring, transactionId);
+      let saving: Promise<unknown> | undefined;
+      let settledInsideBatch = false;
+
+      const result = await closeTenantDuplicates(db, org.memoryDuring, {
+        afterLock: async () => {
+          saving = operator(org.memoryDuring).superAgent.addMemory(memoryFor(copy));
+          saving.then(
+            () => { settledInsideBatch = true; },
+            () => { settledInsideBatch = true; },
+          );
+          // Long enough for an unlocked insert to commit many times over.
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          expect(settledInsideBatch, "addMemory finished while the batch held the copy's lock").toBe(false);
+        },
+      });
+      await saving;
+
+      // In order: the copy was dismissed, then the memory was saved against it.
+      expect(result).toMatchObject({ closed: 1, skipped: 0 });
+      const after = await rows([keeper, copy]);
+      expect(after.get(copy)?.status).toBe("dismissed");
+      expect(after.get(keeper)?.status).toBe("open");
+      const memories = await db.select().from(agentMemory).where(eq(agentMemory.exceptionId, copy));
+      expect(memories).toHaveLength(1);
     });
   });
 });

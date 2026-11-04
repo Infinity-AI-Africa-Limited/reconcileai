@@ -197,21 +197,29 @@ export async function tenantsWithDuplicateRetailExceptions(db: DbExecutor): Prom
   return rows.map((row) => row.organizationId).sort((left, right) => left - right);
 }
 
-/** Ids, among `ids`, that another table links work to. */
-async function linkedIds(db: DbExecutor, organizationId: number, ids: number[], lockWorkflows: boolean): Promise<Set<number>> {
+/**
+ * Ids, among `ids`, that another table links work to.
+ *
+ * `lock`: when closing, every read is a locking read, taken after the copies'
+ * own row locks. Two reasons:
+ * - **Order.** It is the order a governed Start (exception, then workflow) and
+ *   `superAgent.addMemory` (exception, then memory) take their locks. Either
+ *   writer committed before this batch locked the copy, and is seen here, or it
+ *   waits until the batch commits.
+ * - **Freshness.** A locking read sees the latest committed rows. A plain read
+ *   would not on TiDB: it answers from the snapshot taken when the transaction
+ *   began, which can predate a writer that committed while this batch waited
+ *   for its locks.
+ */
+async function linkedIds(db: DbExecutor, organizationId: number, ids: number[], lock: boolean): Promise<Set<number>> {
   const linked = new Set<number>();
   for (let index = 0; index < ids.length; index += ID_CHUNK) {
     const chunk = ids.slice(index, index + ID_CHUNK);
-    // Locked when closing, in the order a governed Start takes its locks
-    // (exception, then workflow), so a Start racing this either commits first
-    // and is seen here, or waits until this commits and then refuses a case
-    // that is no longer open.
-    const workflowRead = db
-      .select({ id: exceptionWorkflows.exceptionId })
-      .from(exceptionWorkflows)
-      .where(and(eq(exceptionWorkflows.organizationId, organizationId), inArray(exceptionWorkflows.exceptionId, chunk)));
-    const [workflows, drafts, memories] = await Promise.all([
-      lockWorkflows ? workflowRead.for("update") : workflowRead,
+    const reads = [
+      db
+        .select({ id: exceptionWorkflows.exceptionId })
+        .from(exceptionWorkflows)
+        .where(and(eq(exceptionWorkflows.organizationId, organizationId), inArray(exceptionWorkflows.exceptionId, chunk))),
       db
         .select({ id: agentActionDrafts.exceptionId })
         .from(agentActionDrafts)
@@ -220,8 +228,11 @@ async function linkedIds(db: DbExecutor, organizationId: number, ids: number[], 
         .select({ id: agentMemory.exceptionId })
         .from(agentMemory)
         .where(and(eq(agentMemory.organizationId, organizationId), inArray(agentMemory.exceptionId, chunk))),
-    ]);
-    for (const row of [...workflows, ...drafts, ...memories]) if (row.id !== null) linked.add(row.id);
+    ];
+    // One after another, so the locks are taken in a fixed order.
+    for (const read of reads) {
+      for (const row of await (lock ? read.for("update") : read)) if (row.id !== null) linked.add(row.id);
+    }
   }
   return linked;
 }
@@ -358,6 +369,8 @@ export interface CloseDuplicatesDeps {
   now?: () => Date;
   /** Test-only checkpoint between planning and the closing transaction. */
   afterPlan?: (plans: readonly DuplicateGroupPlan[]) => Promise<void> | void;
+  /** Test-only checkpoint inside a batch, once its copies are locked. */
+  afterLock?: () => Promise<void> | void;
 }
 
 /**
@@ -390,7 +403,7 @@ export async function closeTenantDuplicates(
   let closed = 0;
   for (let index = 0; index < closures.length; index += CLOSURES_PER_TRANSACTION) {
     const batch = closures.slice(index, index + CLOSURES_PER_TRANSACTION);
-    closed += await db.transaction((tx) => closeBatch(tx, organizationId, batch, now));
+    closed += await db.transaction((tx) => closeBatch(tx, organizationId, batch, now, deps.afterLock));
   }
   return {
     organizationId,
@@ -406,6 +419,7 @@ async function closeBatch(
   organizationId: number,
   batch: Array<{ id: number; keeperId: number }>,
   now: Date,
+  afterLock?: () => Promise<void> | void,
 ): Promise<number> {
   const ids = [...new Set(batch.flatMap((closure) => [closure.id, closure.keeperId]))].sort((left, right) => left - right);
   const locked = await tx
@@ -414,6 +428,7 @@ async function closeBatch(
     .where(and(inlineRetail(organizationId), inArray(exceptions.id, ids)))
     .orderBy(exceptions.id)
     .for("update");
+  await afterLock?.();
   const linked = await linkedIds(tx, organizationId, batch.map((closure) => closure.id), true);
   const byId = new Map(toCandidates(locked, linked).map((row) => [row.id, row]));
 
@@ -425,6 +440,10 @@ async function closeBatch(
       keeper !== undefined &&
       copy.status === "open" &&
       !copy.touched &&
+      // The kept copy must still be awaiting a person. If someone closed it
+      // after the plan, this copy now sits beside a decided one: a pair the
+      // plan reports and never dismisses (Greptile, #222).
+      AWAITING_A_PERSON.includes(keeper.status) &&
       copy.transactionId === keeper.transactionId &&
       copy.subCategory === keeper.subCategory
     );
