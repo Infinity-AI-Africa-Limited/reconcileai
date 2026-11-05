@@ -103,7 +103,10 @@ export const DB_SURFACES = Object.freeze([
   // The 15-minute SHOPLINE cycle replays these while attempts stay under 3
   // (WEBHOOK_MAX_ATTEMPTS, connectors/shopline/webhookHandler.ts).
   { id: "sl_connector_webhook_events.acknowledged_unprocessed", group: "accepted", kind: "work", table: "sl_connector_webhook_events", where: "status IN ('pending','processing','failed') AND attempts < 3", time: "receivedAt" },
-  { id: "sl_connector_gdpr_requests.received", group: "accepted", kind: "work", table: "sl_connector_gdpr_requests", where: "status = 'received'", time: "receivedAt" },
+  // Since #221, `received` is an open shop/redact: the store is uninstalled but
+  // no SHOPLINE shop erasure exists yet, and the owner is emailed until it is
+  // met (gdprDeadlines.ts). No process works it, so no replacement can cut it off.
+  { id: "sl_connector_gdpr_requests.received", group: "accepted", kind: "parked", table: "sl_connector_gdpr_requests", where: "status = 'received'", time: "receivedAt" },
   { id: "wc_connector_webhook_events.received", group: "accepted", kind: "work", table: "wc_connector_webhook_events", where: "status = 'received'", time: "receivedAt" },
   { id: "wc_connector_dead_letters.retryable", group: "accepted", kind: "work", table: "wc_connector_dead_letters", where: "status IN ('pending','retrying')", time: "createdAt" },
   { id: "data_deletion_requests.open", group: "accepted", kind: "work", table: "data_deletion_requests", where: "status IN ('pending','in_progress')", time: "createdAt" },

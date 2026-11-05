@@ -431,7 +431,7 @@ describe("when the verdicts are judged", () => {
       "shopify_connector_stores.redacting": "accepted/work",
       "organizations.redacting": "accepted/work",
       "sl_connector_webhook_events.acknowledged_unprocessed": "accepted/work",
-      "sl_connector_gdpr_requests.received": "accepted/work",
+      "sl_connector_gdpr_requests.received": "accepted/parked",
       "wc_connector_webhook_events.received": "accepted/work",
       "wc_connector_dead_letters.retryable": "accepted/work",
       "data_deletion_requests.open": "accepted/work",
