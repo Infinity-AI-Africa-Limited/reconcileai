@@ -591,7 +591,7 @@ All tables are in `drizzle/connector_schema.ts`, prefixed `sl_connector_*`:
 | `sl_connector_tokens` | Encrypted OAuth tokens per store (AES-256-GCM, 10h TTL) | `tenant_required` |
 | `sl_connector_webhook_events` | Idempotent webhook event log (deduped on `webhookId`, DLQ linkage) | `tenant_required` |
 | `sl_connector_subscriptions` | Billing lifecycle state (planId, status, trial dates, billing attempts) | `tenant_required` |
-| `sl_connector_billing_charges` | One row per app-subscription charge (`bizOrderNo`): which outcomes took effect, and how often a delivery of it was processed (migration 0118, see §2B.2) | `tenant_required` |
+| `sl_connector_billing_charges` | One row per app-subscription charge (`bizOrderNo`): which outcomes took effect, and how often a delivery of it was processed (migration 0119, see §2B.2) | `tenant_required` |
 
 **Subscription statuses:** `trialing` → `active` → `past_due` → `expired` / `cancelled`
 
