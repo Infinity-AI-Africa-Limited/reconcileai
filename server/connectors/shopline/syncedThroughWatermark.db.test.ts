@@ -8,9 +8,10 @@
  */
 import { and, eq, gt, sql } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import mysql from "mysql2/promise";
+import type { Pool } from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
+import { createAppPool } from "../../dbSession";
 import { classifyDatabaseTarget } from "../../dbTarget";
 import { recordSyncOutcome, rewindCatchUp, type SyncReport } from "./syncOrchestrator";
 
@@ -39,14 +40,15 @@ function report(from: Date, to: Date, error?: string): SyncReport {
 }
 
 describe.runIf(localDatabase)("when a sync or an operator writes the SHOPLINE catch-up watermark", () => {
-  let pool: mysql.Pool;
+  let pool: Pool;
   let db: MySql2Database;
   // An organisation no real tenant uses, cleaned up after.
   const organizationId = 920_000_000 + Math.floor(Math.random() * 1_000_000);
   let nextHandle = 0;
 
   beforeAll(async () => {
-    pool = mysql.createPool({ uri: url, timezone: "Z", connectionLimit: 1 });
+    // Built as production builds its pools: every session in UTC (CLAUDE.md §12).
+    pool = createAppPool(url!).promise();
     db = drizzle(pool);
   });
 
