@@ -304,6 +304,22 @@ export async function enqueueReconciliationRun(payload: ReconciliationRunPayload
   await queue.enqueue(`job-${payload.jobId}`, payload);
 }
 
+/**
+ * Build this instance's worker at boot, so runs retained in Redis through a
+ * restart are delivered normally instead of waiting for someone to create
+ * another reconciliation. Until #215's review nothing did this: the worker was
+ * built only by job creation, or by the startup sweep's cleanup when it
+ * abandoned something, and that sweep no longer runs where work is retained.
+ *
+ * Durable backend only. An in-process queue holds nothing across a restart, and
+ * building one would make the development sweep defer (`queue_cached`). The
+ * caller does not await Redis before `server.listen` (CLAUDE.md §10).
+ */
+export async function startReconciliationWorker(): Promise<void> {
+  if (!process.env.REDIS_URL?.trim()) return;
+  await getQueue();
+}
+
 // ─── Boot sweep for crash orphans ────────────────────────────────────────────
 
 /** Why startup recovery left stale rows alone. Fixed codes: safe to log. */

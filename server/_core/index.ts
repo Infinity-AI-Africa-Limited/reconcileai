@@ -810,12 +810,18 @@ async function startServer(app: express.Express, server: Server) {
       }),
     ));
 
-  // Boot sweep: mark reconciliation jobs stuck in pending/running >2h as
-  // failed — crash orphans from the pre-queue era or in-process restarts
-  // (fire-and-forget; see server/reconciliationQueue.ts).
+  // Boot sweep: in development/test on a local database only, mark jobs stuck
+  // in pending/running >2h as failed. Everywhere else it defers: silence is not
+  // proof that retained work was abandoned (see server/reconciliationQueue.ts).
   runBackgroundWork(() => import("../reconciliationQueue")
     .then((q) => q.recoverStuckReconciliationJobs())
     .catch((e) => console.error("[boot] stuck-job sweep failed:", loggableError(e))));
+
+  // Reconciliation runs retained in Redis through a restart resume now, not
+  // when someone next creates a run. Fire-and-forget, like the SHOPLINE worker.
+  runBackgroundWork(() => import("../reconciliationQueue")
+    .then((q) => q.startReconciliationWorker())
+    .catch((e) => console.error("[boot] reconciliation worker unavailable:", loggableError(e))));
 
   // Shopify privacy admission writes a transactional outbox row. Redis is only
   // touched after commit; this recovery loop closes the commit/enqueue crash gap.
@@ -839,6 +845,16 @@ async function startServer(app: express.Express, server: Server) {
   runBackgroundWork(() => import("../connectors/shopline/realtimeSync")
     .then((r) => r.startShoplineRealtimeWorker())
     .catch((e) => console.error("[boot] SHOPLINE realtime worker unavailable:", loggableError(e))));
+
+  // Outbound webhook deliveries and Shopify manual syncs retained in Redis
+  // through a restart resume now, not when the next one is dispatched or
+  // requested. Durable queues only; fire-and-forget, like the worker above.
+  runBackgroundWork(() => import("../webhookDelivery")
+    .then((m) => m.startWebhookDeliveryWorker())
+    .catch((e) => console.error("[boot] webhook delivery worker unavailable:", loggableError(e))));
+  runBackgroundWork(() => import("../connectors/shopify/syncQueue")
+    .then((m) => m.startShopifyManualSyncWorker())
+    .catch((e) => console.error("[boot] Shopify manual sync worker unavailable:", loggableError(e))));
 
   // Seed global default resolution templates (idempotent; fire-and-forget so a
   // DB hiccup never blocks startup or the healthcheck).

@@ -17,11 +17,14 @@
  * webhooks are app-scoped, so they may not carry the shop-domain header the
  * store webhooks use.
  */
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { getDb } from "../../db";
 import {
+  slConnectorBillingCharges,
   slConnectorSubscriptions,
   slConnectorStores,
+  type SlConnectorBillingCharge,
+  type SlConnectorSubscription,
 } from "../../../drizzle/connector_schema";
 import {
   TIER_1_FREE_TRIAL_DAYS,
@@ -273,85 +276,272 @@ export async function handleSubscriptionExpiration(
   );
 }
 
-/**
- * appsubscription/paid — a payment was finalised.
- *
- * `status` drives the outcome: 200 confirms the subscription (clears grace and
- * failure counters); 400 is a failed charge (counts toward past_due and starts
- * the grace buffer); 300 is a cancellation.
- */
-export async function handleSubscriptionPaid(
-  db: Db,
-  organizationId: number,
-  slStoreId: number,
-  payload: AppSubscriptionPaidPayload,
-): Promise<void> {
-  const status = payload.status;
-  const paidAt = payload.subTime ? new Date(payload.subTime) : new Date();
+/** Longest `bizOrderNo` the charge ledger can store (`sl_connector_billing_charges.bizOrderNo`). */
+const BIZ_ORDER_NO_MAX_LENGTH = 128;
 
-  const where = and(
-    eq(slConnectorSubscriptions.slStoreId, slStoreId),
-    eq(slConnectorSubscriptions.organizationId, organizationId),
+/**
+ * The charge a paid delivery reports, as the ledger keys it, or null when the
+ * payload names none we can key on. SHOPLINE documents `bizOrderNo` as a
+ * string; a safe integer is taken as its digits. An over-long value is refused
+ * rather than truncated, because two charges sharing a prefix would become one.
+ */
+export function billingChargeRef(bizOrderNo: unknown): string | null {
+  const raw = Number.isSafeInteger(bizOrderNo) ? String(bizOrderNo) : bizOrderNo;
+  if (typeof raw !== "string") return null;
+  const ref = raw.trim();
+  return ref.length > 0 && ref.length <= BIZ_ORDER_NO_MAX_LENGTH ? ref : null;
+}
+
+/**
+ * What one `appsubscription/paid` delivery did.
+ *
+ * - `succeeded`, `cancelled`, `failure_counted`: this outcome of this charge
+ *   took effect, for the first time.
+ * - `duplicate`: an earlier delivery already applied this outcome of this
+ *   charge. SHOPLINE retries deliveries, and two subscriptions to one topic
+ *   deliver each event twice under two webhook ids.
+ * - `stale_failure`: a failure reported for a charge that has already
+ *   succeeded or been cancelled. It is not news, so it never re-opens failures.
+ * - `failure_unidentified`: a failure with no charge reference. Nothing tells
+ *   it apart from a re-delivery, so it is recorded and never counted.
+ * - `no_subscription`: the store has no subscription row to apply it to.
+ */
+export type PaidDeliveryOutcome =
+  | "succeeded"
+  | "cancelled"
+  | "failure_counted"
+  | "duplicate"
+  | "stale_failure"
+  | "failure_unidentified"
+  | "no_subscription";
+
+/** One charge's ledger row, confined to its store and the store's tenant. */
+function chargeOf(organizationId: number, slStoreId: number, bizOrderNo: string) {
+  return and(
+    eq(slConnectorBillingCharges.slStoreId, slStoreId),
+    eq(slConnectorBillingCharges.organizationId, organizationId),
+    eq(slConnectorBillingCharges.bizOrderNo, bizOrderNo),
   );
+}
+
+/** The changes one delivery makes. Decided under the locks, from the locked rows. */
+interface PaidDeliveryDecision {
+  outcome: Exclude<PaidDeliveryOutcome, "no_subscription">;
+  subscription?: Partial<SlConnectorSubscription>;
+  charge?: Partial<SlConnectorBillingCharge>;
+}
+
+/**
+ * Apply each outcome of a charge once.
+ *
+ * A failure counts toward past_due only the first time its charge reports one,
+ * and never once the charge has succeeded or been cancelled: a failure
+ * re-delivered after the store paid must not re-open the count. A success or
+ * cancellation re-delivered later must not undo what happened since, such as a
+ * newer failed charge or a re-subscription. Without a charge reference only
+ * success and cancellation still apply, as before; they set state rather than
+ * count, so a repeat back to back changes nothing.
+ */
+function decidePaidDelivery(input: {
+  status: number | undefined;
+  chargeRef: string | null;
+  charge: SlConnectorBillingCharge | null;
+  sub: SlConnectorSubscription;
+  paidAt: Date;
+  now: Date;
+}): PaidDeliveryDecision {
+  const { status, chargeRef, charge, sub, paidAt, now } = input;
+  const delivered = charge ? { deliveries: charge.deliveries + 1 } : undefined;
 
   // ── Success ───────────────────────────────────────────────────────────────
   if (status === SHOPLINE_BILLING_PAID_STATUS.SUCCESS) {
-    await db
-      .update(slConnectorSubscriptions)
-      .set({
+    if (charge?.succeededAt) return { outcome: "duplicate", charge: delivered };
+    return {
+      outcome: "succeeded",
+      subscription: {
         status: "active",
         activatedAt: paidAt,
         currentPeriodStart: paidAt,
         graceEndsAt: null, // successful charge clears any grace buffer
         failedBillingAttempts: 0,
         lastFailureReason: null,
-      })
-      .where(where);
-    console.info(`[SHOPLINE Billing] Payment succeeded: store=${slStoreId}, order=${payload.bizOrderNo ?? "?"}`);
-    return;
+      },
+      charge: charge ? { ...delivered, succeededAt: now } : undefined,
+    };
   }
 
   // ── Cancelled ─────────────────────────────────────────────────────────────
   if (status === SHOPLINE_BILLING_PAID_STATUS.CANCELLED) {
-    await db
-      .update(slConnectorSubscriptions)
-      .set({ status: "cancelled", cancelledAt: paidAt })
-      .where(where);
-    console.info(`[SHOPLINE Billing] Payment cancelled: store=${slStoreId}, order=${payload.bizOrderNo ?? "?"}`);
-    return;
+    if (charge?.cancelledAt) return { outcome: "duplicate", charge: delivered };
+    return {
+      outcome: "cancelled",
+      subscription: { status: "cancelled", cancelledAt: paidAt },
+      charge: charge ? { ...delivered, cancelledAt: now } : undefined,
+    };
   }
 
   // ── Failed ────────────────────────────────────────────────────────────────
-  const [existing] = await db
-    .select()
-    .from(slConnectorSubscriptions)
-    .where(where)
-    .limit(1);
+  if (chargeRef === null || charge === null) {
+    return {
+      outcome: "failure_unidentified",
+      subscription: {
+        lastFailureReason: `Payment failed (status ${status ?? "unknown"}) with no charge reference (bizOrderNo), so it was not counted toward past_due`,
+      },
+    };
+  }
+  if (charge.failureCountedAt) return { outcome: "duplicate", charge: delivered };
+  if (charge.succeededAt || charge.cancelledAt) return { outcome: "stale_failure", charge: delivered };
 
-  const attempts = (existing?.failedBillingAttempts ?? 0) + 1;
+  const attempts = sub.failedBillingAttempts + 1;
   // After 3 failed charges, mark past_due (SHOPLINE applies its own threshold
   // too); before that, preserve the existing status.
   const goesPastDue = attempts >= 3;
-  const newStatus = goesPastDue ? "past_due" : (existing?.status ?? "active");
-  // Entering past_due starts the grace buffer once — repeated failures must not
-  // extend it.
-  const graceEndsAt = goesPastDue
-    ? ((existing?.graceEndsAt as Date | null | undefined) ?? graceDeadline(paidAt))
-    : ((existing?.graceEndsAt as Date | null | undefined) ?? null);
-
-  await db
-    .update(slConnectorSubscriptions)
-    .set({
-      status: newStatus,
-      graceEndsAt,
+  return {
+    outcome: "failure_counted",
+    subscription: {
+      status: goesPastDue ? "past_due" : sub.status,
+      // Entering past_due starts the grace buffer once — repeated failures must
+      // not extend it.
+      graceEndsAt: goesPastDue ? (sub.graceEndsAt ?? graceDeadline(paidAt)) : sub.graceEndsAt,
       failedBillingAttempts: attempts,
-      lastFailureReason: `Payment failed (status ${status ?? "unknown"}, order ${payload.bizOrderNo ?? "?"})`,
-    })
-    .where(where);
+      lastFailureReason: `Payment failed (status ${status ?? "unknown"}, order ${chargeRef})`,
+    },
+    charge: { ...delivered, failureCountedAt: now },
+  };
+}
 
-  console.warn(
-    `[SHOPLINE Billing] Payment failed: store=${slStoreId}, attempts=${attempts}, status=${status}`,
-  );
+/**
+ * appsubscription/paid — a payment was finalised.
+ *
+ * `status` drives the outcome: 200 confirms the subscription (clears grace and
+ * failure counters); 400 is a failed charge (counts toward past_due and starts
+ * the grace buffer); 300 is a cancellation.
+ *
+ * Idempotent per CHARGE (`bizOrderNo`), not per delivery. Webhook dedupe keys
+ * on `X-Shopline-Webhook-Id`, and one charge can arrive under several: two
+ * subscriptions to this topic (a legacy Partner Portal configuration beside
+ * the one the connector registers) each deliver it with their own id. Counting
+ * per delivery would count one failed charge twice and cut the merchant's
+ * grace short. The charge ledger (`sl_connector_billing_charges`) records which
+ * outcomes of each charge have taken effect.
+ *
+ * This assumes `bizOrderNo` names one charge attempt. If SHOPLINE reuses it
+ * across retries of one renewal, those retries count once. That under-counts,
+ * which is the safe direction: SHOPLINE's own expiration (expireType 3) still
+ * ends access when its grace runs out.
+ */
+export async function handleSubscriptionPaid(
+  db: Db,
+  organizationId: number,
+  slStoreId: number,
+  payload: AppSubscriptionPaidPayload,
+): Promise<PaidDeliveryOutcome> {
+  const status = payload.status;
+  const chargeRef = billingChargeRef(payload.bizOrderNo);
+
+  const applied = await db.transaction(async (tx) => {
+    // Every delivery for this store is applied under the subscription row's
+    // lock, one at a time, so two deliveries of one charge cannot both count
+    // it and two different charges cannot overwrite each other's count. It is
+    // the first statement, so there is one lock order.
+    const [sub] = await tx
+      .select()
+      .from(slConnectorSubscriptions)
+      .where(
+        and(
+          eq(slConnectorSubscriptions.slStoreId, slStoreId),
+          eq(slConnectorSubscriptions.organizationId, organizationId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!sub) return { outcome: "no_subscription" as const };
+
+    // Read after the lock: a delivery that queued behind another must not act
+    // on a clock from before the wait.
+    const now = new Date();
+    const paidAt = payload.subTime ? new Date(payload.subTime) : now;
+
+    let charge: SlConnectorBillingCharge | null = null;
+    if (chargeRef !== null) {
+      await tx
+        .insert(slConnectorBillingCharges)
+        .values({ organizationId, slStoreId, bizOrderNo: chargeRef, deliveries: 0 })
+        .onDuplicateKeyUpdate({ set: { bizOrderNo: sql`${slConnectorBillingCharges.bizOrderNo}` } });
+      // A locking read: TiDB answers a plain read from the snapshot this
+      // transaction began with, which can predate the delivery that held the
+      // lock before it and has since committed.
+      const [row] = await tx
+        .select()
+        .from(slConnectorBillingCharges)
+        .where(chargeOf(organizationId, slStoreId, chargeRef))
+        .limit(1)
+        .for("update");
+      if (!row) throw new Error("SHOPLINE billing charge row missing after insert");
+      charge = row;
+    }
+
+    const decision = decidePaidDelivery({ status, chargeRef, charge, sub, paidAt, now });
+    if (decision.charge && chargeRef !== null) {
+      await tx
+        .update(slConnectorBillingCharges)
+        .set(decision.charge)
+        .where(chargeOf(organizationId, slStoreId, chargeRef));
+    }
+    if (decision.subscription) {
+      await tx
+        .update(slConnectorSubscriptions)
+        .set(decision.subscription)
+        .where(
+          and(
+            eq(slConnectorSubscriptions.slStoreId, slStoreId),
+            eq(slConnectorSubscriptions.organizationId, organizationId),
+          ),
+        );
+    }
+    return {
+      outcome: decision.outcome,
+      failedBillingAttempts: decision.subscription?.failedBillingAttempts ?? sub.failedBillingAttempts,
+      deliveries: decision.charge?.deliveries ?? charge?.deliveries,
+    };
+  });
+
+  // Logged after the commit, so a line never reports a change that rolled back.
+  const order = chargeRef ?? "?";
+  switch (applied.outcome) {
+    case "succeeded":
+      console.info(`[SHOPLINE Billing] Payment succeeded: store=${slStoreId}, order=${order}`);
+      break;
+    case "cancelled":
+      console.info(`[SHOPLINE Billing] Payment cancelled: store=${slStoreId}, order=${order}`);
+      break;
+    case "failure_counted":
+      console.warn(
+        `[SHOPLINE Billing] Payment failed: store=${slStoreId}, order=${order}, attempts=${applied.failedBillingAttempts}, status=${status}`,
+      );
+      break;
+    case "duplicate":
+      console.info(
+        `[SHOPLINE Billing] Charge outcome already applied, delivery ignored: store=${slStoreId}, order=${order}, status=${status}, deliveries=${applied.deliveries}`,
+      );
+      break;
+    case "stale_failure":
+      console.warn(
+        `[SHOPLINE Billing] Failure for a charge that already succeeded or was cancelled, not counted: store=${slStoreId}, order=${order}, deliveries=${applied.deliveries}`,
+      );
+      break;
+    case "failure_unidentified":
+      console.warn(
+        `[SHOPLINE Billing] Payment failed with no charge reference (bizOrderNo), not counted: store=${slStoreId}, status=${status}`,
+      );
+      break;
+    case "no_subscription":
+      console.warn(
+        `[SHOPLINE Billing] No subscription for store=${slStoreId}; paid delivery not applied (status=${status}, order=${order})`,
+      );
+      break;
+  }
+  return applied.outcome;
 }
 
 /**
