@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { processBillingWebhook, hasActiveSubscription, getStoreSubscription, isSyncBlockedBySubscription } from "./connectors/shopline/billingWebhook";
+import { billingLedgerFake } from "./connectors/shopline/billingLedger.testkit";
 import { SHOPLINE_BILLING_WEBHOOK_TOPICS, TIER_1_SUBSCRIPTION_BANDS, SHOPLINE_WEBHOOK_TOPICS } from "../shared/shoplineConstants";
 
 // ─── Constants validation ─────────────────────────────────────────────────────
@@ -143,16 +144,23 @@ describe("processBillingWebhook dispatcher", () => {
   });
 
   it("routes appsubscription/paid", async () => {
-    await expect(
-      processBillingWebhook(mockDb as any, 1, 1, "appsubscription/paid", {
-        appkey: "k",
-        bizOrderNo: "PAY20240726123456",
-        handle: "acme",
-        status: 200,
-        subId: "6578332207010012345",
-        subTime: 1722000000000,
-      }),
-    ).resolves.not.toThrow();
+    // The paid handler runs in a transaction over a charge ledger, which this
+    // chain mock does not model; billingLedgerFake does.
+    const ledger = billingLedgerFake({ organizationId: 1, slStoreId: 2, subscription: { status: "past_due", failedBillingAttempts: 3 } });
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+
+    await processBillingWebhook(ledger.db as never, 1, 2, "appsubscription/paid", {
+      appkey: "k",
+      bizOrderNo: "PAY20240726123456",
+      handle: "acme",
+      status: 200,
+      subId: "6578332207010012345",
+      subTime: 1722000000000,
+    });
+
+    expect(ledger.subscription()).toMatchObject({ status: "active", failedBillingAttempts: 0 });
+    expect(ledger.charges()).toMatchObject([{ bizOrderNo: "PAY20240726123456", deliveries: 1 }]);
+    info.mockRestore();
   });
 
   it("routes appsubscription/expiration", async () => {
@@ -329,11 +337,9 @@ describe("Webhook topic routing (billing topics through main dispatcher)", () =>
 import {
   handleSubscriptionCreate,
   handleSubscriptionExpiration,
-  handleSubscriptionPaid,
 } from "./connectors/shopline/billingWebhook";
 import {
   SHOPLINE_BILLING_EXPIRE_TYPE,
-  SHOPLINE_BILLING_PAID_STATUS,
   TIER_1_GRACE_PERIOD_DAYS,
 } from "../shared/shoplineConstants";
 
@@ -395,50 +401,10 @@ describe("appsubscription/create — real payload shape", () => {
   });
 });
 
-describe("appsubscription/paid — status drives outcome", () => {
-  it("status 200 activates and clears the grace buffer", async () => {
-    const { db, captured } = mkWriteDb([{ failedBillingAttempts: 2, status: "past_due" }]);
-    await handleSubscriptionPaid(db, 1, 10, {
-      handle: "acme",
-      status: SHOPLINE_BILLING_PAID_STATUS.SUCCESS,
-      subTime: Date.now(),
-    });
-    const row = captured.at(-1)!;
-    expect(row.status).toBe("active");
-    expect(row.graceEndsAt).toBeNull();
-    expect(row.failedBillingAttempts).toBe(0);
-  });
-
-  it("status 300 cancels the subscription", async () => {
-    const { db, captured } = mkWriteDb([{}]);
-    await handleSubscriptionPaid(db, 1, 10, {
-      handle: "acme",
-      status: SHOPLINE_BILLING_PAID_STATUS.CANCELLED,
-    });
-    expect(captured.at(-1)!.status).toBe("cancelled");
-  });
-
-  it("status 400 counts a failure; 3rd failure sets past_due + starts grace", async () => {
-    const { db, captured } = mkWriteDb([{ failedBillingAttempts: 2, status: "active", graceEndsAt: null }]);
-    await handleSubscriptionPaid(db, 1, 10, {
-      handle: "acme",
-      status: SHOPLINE_BILLING_PAID_STATUS.FAILED,
-    });
-    const row = captured.at(-1)!;
-    expect(row.failedBillingAttempts).toBe(3);
-    expect(row.status).toBe("past_due");
-    expect(row.graceEndsAt).toBeInstanceOf(Date);
-  });
-
-  it("an early failure does not yet flip status or start grace", async () => {
-    const { db, captured } = mkWriteDb([{ failedBillingAttempts: 0, status: "active", graceEndsAt: null }]);
-    await handleSubscriptionPaid(db, 1, 10, { handle: "acme", status: 400 });
-    const row = captured.at(-1)!;
-    expect(row.failedBillingAttempts).toBe(1);
-    expect(row.status).toBe("active");
-    expect(row.graceEndsAt).toBeNull();
-  });
-});
+// appsubscription/paid — status 200/300/400, and applying each charge's outcome
+// once however often it is delivered — is covered in
+// connectors/shopline/billingChargeIdempotency.test.ts, over a ledger whose
+// writes land. The chain mock below cannot model its transaction.
 
 describe("appsubscription/expiration — expireType semantics", () => {
   it.each([

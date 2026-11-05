@@ -17,7 +17,7 @@
  *   - The scheduled polling job (every 15 min)
  *   - Manual "Sync Now" from the merchant dashboard
  */
-import { and, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, eq, gt, gte, inArray, isNull, lte, or } from "drizzle-orm";
 import { getDb, sanitizeRef, type DbExecutor } from "../../db";
 import {
   insertTransactionsWithExecutor,
@@ -71,6 +71,27 @@ export interface SyncOptions {
   triggeredBy?: number;
   /** If true, skip reconciliation (just ingest) */
   ingestOnly?: boolean;
+  /**
+   * Reconcile against unmatched rows from this earlier instant, while still
+   * fetching only [from, to].
+   *
+   * A catch-up step sets it, so a pair split by the seam between two steps
+   * still meets: the order fetched by one step, its payment by the next.
+   *
+   * With it set, reconciliation runs even when this cycle stored nothing new.
+   * An earlier step may have held orders back for it (`holdOrdersFrom`), and a
+   * held order that is never reconciled is never matched or raised.
+   */
+  reconcileFrom?: Date;
+  /**
+   * Raise no exception for an ORDER dated at or after this. The next step,
+   * whose `reconcileFrom` reaches back over it, matches it or raises it.
+   *
+   * Set on every step of a catch-up walk except the one that ends at now. At a
+   * step's end an order's payment may simply not have been fetched yet, and an
+   * exception raised for it stays open after the payment matches.
+   */
+  holdOrdersFrom?: Date;
 }
 
 export interface SyncReport {
@@ -127,18 +148,93 @@ async function persistSyncOutcome(slStoreId: number, report: SyncReport): Promis
   try {
     const db = await getDb();
     if (!db) return;
-    const now = new Date();
-    await db
-      .update(slConnectorStores)
-      .set(
-        report.success
-          ? { lastSyncAt: now, lastSyncAttemptAt: now, lastSyncError: null }
-          : { lastSyncAttemptAt: now, lastSyncError: (report.error ?? "unknown error").slice(0, 2000) },
-      )
-      .where(eq(slConnectorStores.id, slStoreId));
+    await recordSyncOutcome(db, slStoreId, report, new Date());
   } catch (err) {
     console.error(`[SHOPLINE] Failed to record sync outcome for store=${slStoreId}:`, loggableError(err));
   }
+}
+
+/**
+ * Write a sync's outcome to its store row: the attempt, and on success the
+ * catch-up watermark (`syncedThroughAt`).
+ *
+ * The watermark moves to the window's end ONLY when the window starts at or
+ * before it. Otherwise there is an unread gap between the two, and moving past
+ * it would hide the gap for good. That is what happened while `lastSyncAt` was
+ * the watermark: every success wrote the wall clock there. A realtime sync, the
+ * daily batch or "Sync Now", each reading the last 24 hours, therefore made
+ * everything older than a day unreachable once a store had been dark that long.
+ * Those windows still sync and reconcile; they just leave the watermark where
+ * it is, and the 15-minute poll walks the gap.
+ *
+ * - It never moves backwards. A slow cycle that finishes after a newer one
+ *   must not reopen ground the newer one covered.
+ * - It takes the window's END, not the clock at completion. A cycle that ran for
+ *   minutes would otherwise claim records that arrived while it ran.
+ * - Both conditions sit in the UPDATE's WHERE, so two cycles finishing together
+ *   cannot interleave a read and a write.
+ * - A store that has never synced takes its first successful window's end as
+ *   its starting point. History before install is the backfill's job
+ *   (`runHistoricalBackfill`).
+ */
+export async function recordSyncOutcome(
+  db: DbExecutor,
+  slStoreId: number,
+  report: SyncReport,
+  now: Date,
+): Promise<void> {
+  if (!report.success) {
+    await db
+      .update(slConnectorStores)
+      .set({ lastSyncAttemptAt: now, lastSyncError: (report.error ?? "unknown error").slice(0, 2000) })
+      .where(eq(slConnectorStores.id, slStoreId));
+    return;
+  }
+  await db
+    .update(slConnectorStores)
+    .set({ lastSyncAt: now, lastSyncAttemptAt: now, lastSyncError: null })
+    .where(eq(slConnectorStores.id, slStoreId));
+  await db
+    .update(slConnectorStores)
+    .set({ syncedThroughAt: report.window.to })
+    .where(
+      and(
+        eq(slConnectorStores.id, slStoreId),
+        or(
+          isNull(slConnectorStores.syncedThroughAt),
+          and(
+            lte(slConnectorStores.syncedThroughAt, report.window.to),
+            gte(slConnectorStores.syncedThroughAt, report.window.from),
+          ),
+        ),
+      ),
+    );
+}
+
+/**
+ * Move every active store's catch-up watermark back to `to`, so the poll
+ * re-reads from there. This is the only write that moves it backwards. It is
+ * an operator's lever, reached through `shoplineSyncCycle?catchUpFrom=`.
+ *
+ * It exists for data that a sync running before the watermark rule existed
+ * skipped. Production recovering from an outage on older code is exactly that:
+ * the old code wrote the clock as the watermark, so the outage's gap is lost
+ * to it until someone points the poll back at its start.
+ *
+ * - Backwards only: a store already behind `to` is left where it is.
+ * - A store that has never synced keeps NULL (its history is the install
+ *   backfill's job).
+ * - Re-reading is safe. Ingest skips records it already holds, and
+ *   reconciliation does not raise an exception that is already open.
+ *
+ * Returns how many stores moved.
+ */
+export async function rewindCatchUp(db: DbExecutor, to: Date): Promise<number> {
+  const result = await db
+    .update(slConnectorStores)
+    .set({ syncedThroughAt: to })
+    .where(and(eq(slConnectorStores.status, "active"), gt(slConnectorStores.syncedThroughAt, to)));
+  return (result as unknown as { affectedRows?: number }[])[0]?.affectedRows ?? 0;
 }
 
 /**
@@ -553,24 +649,31 @@ async function runSyncCycleInner(opts: SyncOptions): Promise<SyncReport> {
       console.info(
         `[SHOPLINE] Reconciliation skipped for store=${storeHandle} — payments feed unavailable; ingested ${allRows.length} row(s) only`,
       );
-    } else if (!opts.ingestOnly && allRows.length > 0) {
-      const result = await runReconciliationOnPersistedData(
-        db,
-        opts.organizationId,
+    } else if (!opts.ingestOnly && (allRows.length > 0 || opts.reconcileFrom)) {
+      // No `orderRefs`: this pass restricts nothing. It only holds back the
+      // broken pairs, and on a catch-up step the orders the next step will
+      // judge. Passing `orderRefs: []` would mean "no refs qualify" and match
+      // nothing at all.
+      const scope: ReconciliationScope = {
+        ...(brokenPairRefs.length > 0 ? { excludeOrderRefs: brokenPairRefs } : {}),
+        ...(opts.holdOrdersFrom ? { flag: { orderSideBefore: opts.holdOrdersFrom } } : {}),
+      };
+      const result = await reconcileStoreUnderLock(db, {
+        organizationId: opts.organizationId,
+        storeId: opts.slStoreId,
         ordersChannelId,
         paymentsChannelId,
-        from,
+        from: opts.reconcileFrom ?? from,
         to,
-        store.currency ?? "USD",
-        // No `orderRefs`: this pass restricts nothing and only holds back the
-        // broken pairs. Passing `orderRefs: []` would mean "no refs qualify"
-        // and match nothing at all.
-        brokenPairRefs.length > 0
-          ? { excludeOrderRefs: brokenPairRefs }
-          : undefined,
-      );
-      matchedCount = result.matchedCount;
-      exceptionCount = result.exceptionCount;
+        currency: store.currency ?? "USD",
+        scope: Object.keys(scope).length > 0 ? scope : undefined,
+      });
+      if (result) {
+        matchedCount = result.matchedCount;
+        exceptionCount = result.exceptionCount;
+      } else {
+        console.info(`[SHOPLINE] store=${storeHandle} stopped being active before reconciliation; nothing reconciled`);
+      }
     }
 
     // Step 6 (lastSyncAt) is handled by persistSyncOutcome in the runSyncCycle
@@ -739,8 +842,11 @@ export async function resolveChannelIds(
  * cover a fraction of one provider's settlements: reconciling every unmatched
  * order in the window flags orders whose evidence simply has not arrived, and
  * flags them again on every later import. With a scope, only the named orders
- * (on both legs) are reconciled, and an exception already unresolved for the
- * same transaction and category is not raised a second time.
+ * (on both legs) are reconciled.
+ *
+ * No pass raises an exception that is already raised for the same transaction
+ * and category. A re-read of a window also respects one a person has closed;
+ * see `runReconciliationOnPersistedData`.
  */
 export interface ReconciliationScope {
   /**
@@ -777,6 +883,8 @@ export interface ReconciliationScope {
 
 /** Exception states that still await a person — raising another is a duplicate. */
 const UNRESOLVED_EXCEPTION_STATUSES = ["open", "in_review", "escalated"] as const;
+/** Every state, decided ones included — see runReconciliationOnPersistedData. */
+const ANY_EXCEPTION_STATUS = [...UNRESOLVED_EXCEPTION_STATUSES, "resolved", "dismissed"] as const;
 const SCOPE_LOOKUP_CHUNK = 500;
 
 /** The retail engine's settings for inline reconciliation and its classifications. */
@@ -855,7 +963,7 @@ export function withShopifyRefundEvent<T extends { shopifyRefundId: string; rawD
 
 async function selectUnmatchedLeg(
   db: DbExecutor,
-  params: { organizationId: number; channelId: number; from: Date; to: Date; orderRefs?: string[] },
+  params: { organizationId: number; channelId: number; from: Date; to: Date; orderRefs?: string[]; lock?: boolean },
 ): Promise<Array<typeof transactions.$inferSelect>> {
   const conditions = (refs?: string[]) =>
     and(
@@ -866,42 +974,54 @@ async function selectUnmatchedLeg(
       lte(transactions.transactionDate, params.to),
       refs ? inArray(transactions.transactionRef, refs) : undefined,
     );
-  if (!params.orderRefs) return db.select().from(transactions).where(conditions());
+  const read = (refs?: string[]) => {
+    const query = db.select().from(transactions).where(conditions(refs));
+    return params.lock ? query.for("update") : query;
+  };
+  if (!params.orderRefs) return read();
 
   const rows: Array<typeof transactions.$inferSelect> = [];
   for (let i = 0; i < params.orderRefs.length; i += SCOPE_LOOKUP_CHUNK) {
-    const chunk = params.orderRefs.slice(i, i + SCOPE_LOOKUP_CHUNK);
-    rows.push(...(await db.select().from(transactions).where(conditions(chunk))));
+    rows.push(...(await read(params.orderRefs.slice(i, i + SCOPE_LOOKUP_CHUNK))));
   }
   return rows;
 }
 
-/** `transactionId::subCategory` for every exception still awaiting a person. */
-async function unresolvedExceptionKeys(
+/** `transactionId::subCategory` for every exception in one of `statuses`. */
+async function exceptionKeys(
   db: DbExecutor,
   organizationId: number,
   transactionIds: number[],
+  statuses: readonly (typeof ANY_EXCEPTION_STATUS)[number][],
+  lock = false,
 ): Promise<Set<string>> {
   const keys = new Set<string>();
   for (let i = 0; i < transactionIds.length; i += SCOPE_LOOKUP_CHUNK) {
     const chunk = transactionIds.slice(i, i + SCOPE_LOOKUP_CHUNK);
-    const open = await db
+    const query = db
       .select({ transactionId: exceptions.transactionId, subCategory: exceptions.subCategory })
       .from(exceptions)
       .where(
         and(
           eq(exceptions.organizationId, organizationId),
           inArray(exceptions.transactionId, chunk),
-          inArray(exceptions.status, [...UNRESOLVED_EXCEPTION_STATUSES]),
+          inArray(exceptions.status, [...statuses]),
         ),
       );
-    for (const row of open) keys.add(`${row.transactionId}::${row.subCategory ?? ""}`);
+    const found = lock ? await query.for("update") : await query;
+    for (const row of found) keys.add(`${row.transactionId}::${row.subCategory ?? ""}`);
   }
   return keys;
 }
 
 /**
  * Run the retail reconciliation engine on persisted transactions for the given window.
+ *
+ * `lockReads`: read the rows to match, and the exceptions already raised, as
+ * locking reads. Pass it whenever this runs under the store's ingest lock (see
+ * `reconcileStoreUnderLock`). TiDB answers a plain read from the snapshot taken
+ * when the transaction began, which can be before the lock was granted. Such a
+ * read misses what the pass that held the lock just committed.
  */
 export async function runReconciliationOnPersistedData(
   db: DbExecutor,
@@ -912,6 +1032,7 @@ export async function runReconciliationOnPersistedData(
   to: Date,
   currency: string,
   scope?: ReconciliationScope,
+  { lockReads = false }: { lockReads?: boolean } = {},
 ): Promise<{ matchedCount: number; exceptionCount: number }> {
   const orderRefs = scope?.orderRefs
     ? [...new Set(scope.orderRefs.filter(Boolean))]
@@ -928,10 +1049,10 @@ export async function runReconciliationOnPersistedData(
 
   // Fetch persisted transactions for the window
   const sourceRows = (
-    await selectUnmatchedLeg(db, { organizationId, channelId: ordersChannelId, from, to, orderRefs })
+    await selectUnmatchedLeg(db, { organizationId, channelId: ordersChannelId, from, to, orderRefs, lock: lockReads })
   ).filter(usable);
   const targetRows = (
-    await selectUnmatchedLeg(db, { organizationId, channelId: paymentsChannelId, from, to, orderRefs })
+    await selectUnmatchedLeg(db, { organizationId, channelId: paymentsChannelId, from, to, orderRefs, lock: lockReads })
   ).filter(usable);
 
   if (sourceRows.length === 0 && targetRows.length === 0) {
@@ -975,13 +1096,32 @@ export async function runReconciliationOnPersistedData(
     );
     raised = raised.filter((ex) => !tooRecent.has(ex.transactionId));
   }
-  if (scope && raised.length > 0) {
-    const unresolved = await unresolvedExceptionKeys(
+  // Never raise again what is already raised. Which earlier exceptions count
+  // depends on what this pass is.
+  //
+  // - A pass naming the orders a new piece of evidence concerns (`orderRefs`:
+  //   a settlement file) skips only exceptions still awaiting a person. A case
+  //   a person closed may be raised again, because the evidence is new.
+  // - A pass re-reading a window (every sync) brings nothing new. Syncs do this
+  //   all the time: the poll re-reads its seam and reconciles a catch-up step
+  //   against the day before it; the realtime sync, the daily batch and "Sync
+  //   Now" re-read the whole last 24 hours. Closing an exception leaves its
+  //   transaction `unmatched`, so a re-read would raise a case a person had
+  //   resolved or dismissed on every later pass, undoing their decision. A
+  //   re-read therefore skips every earlier exception for the same
+  //   transaction and category.
+  //
+  // Until 2026-10-27 only the file pass checked at all, and every sync filed
+  // another copy of each exception for a row still unmatched.
+  if (raised.length > 0) {
+    const already = await exceptionKeys(
       db,
       organizationId,
       [...new Set(raised.map((ex) => ex.transactionId))],
+      orderRefs ? UNRESOLVED_EXCEPTION_STATUSES : ANY_EXCEPTION_STATUS,
+      lockReads,
     );
-    raised = raised.filter((ex) => !unresolved.has(`${ex.transactionId}::${ex.category}`));
+    raised = raised.filter((ex) => !already.has(`${ex.transactionId}::${ex.category}`));
   }
 
   await raiseRetailExceptions(db, organizationId, currency, raised);
@@ -990,6 +1130,49 @@ export async function runReconciliationOnPersistedData(
     matchedCount: result.matches.length,
     exceptionCount: raised.length,
   };
+}
+
+/**
+ * Reconcile one store's persisted rows under its ingest lock: one
+ * reconciliation at a time per store, every read a current one.
+ *
+ * A pass checks "already raised?" before raising, and matches the rows it read
+ * as unmatched. Until Greptile's review of #209, the API sync did this with no
+ * lock: its ingest lock was released before it reconciled. So two passes for
+ * one store running together could both read before either wrote, and file the
+ * same exception twice: a realtime sync beside the poll, or a sync beside a
+ * settlement file (which already reconciled under the lock). Now every SHOPLINE
+ * pass takes the same lock, ingest's included, and reads with `lockReads`.
+ *
+ * Returns null, having reconciled nothing, when the store is no longer active.
+ */
+export async function reconcileStoreUnderLock(
+  db: Db,
+  params: {
+    organizationId: number;
+    storeId: number;
+    ordersChannelId: number;
+    paymentsChannelId: number;
+    from: Date;
+    to: Date;
+    currency: string;
+    scope?: ReconciliationScope;
+  },
+): Promise<{ matchedCount: number; exceptionCount: number } | null> {
+  return db.transaction(async (tx) => {
+    if (!(await lockShoplineStoreForIngest(tx, params.organizationId, params.storeId))) return null;
+    return runReconciliationOnPersistedData(
+      tx,
+      params.organizationId,
+      params.ordersChannelId,
+      params.paymentsChannelId,
+      params.from,
+      params.to,
+      params.currency,
+      params.scope,
+      { lockReads: true },
+    );
+  });
 }
 
 function errorReport(
