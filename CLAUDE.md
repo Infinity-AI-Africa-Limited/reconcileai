@@ -1076,8 +1076,11 @@ Re-check this table when a new notice arrives, and add a row for it.
     deleted topic dark, including the billing topics, which have no polling
     backstop. The doc order could not hold it back anyway: the 6-hour schedule
     runs it on its own once the database answers.
-  - **What the rehearsal must settle.** The reconciler records only a count, not
-    each subscription's version, so it is **not known** whether the legacy page
+  - **What the rehearsal must settle.** Since #213 the reconciler reports each
+    subscription `/webhooks.json` lists, with its topic and API version
+    (`subscriptions`, `apiVersions`). A version other than the pinned one was
+    created somewhere else. But a subscription that exists only in the legacy
+    page may not be listed at all. So it is still **not known** whether that page
     shows those same 12 or a second, parallel set.
     - *If they are the same 12,* a replacement changes that topic's event version.
       Order topics do not feel it: `scheduleReconciliation` takes only the
@@ -1086,13 +1089,14 @@ Re-check this table when a new notice arrives, and add a row for it.
       rehearsal must see each billing topic parse after a replacement.
     - *If they are a parallel set,* one event arrives twice under two
       `X-Shopline-Webhook-Id`s, and deduplication is keyed on that id alone. Order
-      topics tolerate that, for the same reason. `appsubscription/paid` with status
-      400 does not: `billingWebhook.ts` adds one to `failedBillingAttempts` per
-      delivery, so one failed charge would count twice toward `past_due`.
+      topics tolerate that, for the same reason. Since #213,
+      `appsubscription/paid` does too. It is applied once per charge
+      (`bizOrderNo`), so a failed charge counts once toward `past_due`, however
+      often it arrives. `appsubscription/create` and `/expiration` are not yet
+      idempotent across subscriptions (§2B.2), so the rehearsal must check what a
+      second delivery of each does.
 
-    Prove whether the legacy configuration delivers before retiring anything, and
-    fix that counter before any real merchant is billed (#213, open, counts a
-    failed charge once however often it is delivered).
+    Prove whether the legacy configuration delivers before retiring anything.
 - `sl_connector_stores.apiVersion` is stored but **never used to build a
   request**. Do not start reading it without migrating every row.
 - **Nothing on storefronts:** no theme app extension, script tag or app embed,
