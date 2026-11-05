@@ -4,49 +4,75 @@
  *
  * What matters is how the script behaves when an operator runs it. So these
  * tests run the REAL script as a subprocess, and import its guards, to show:
+ *   - it loads no driver and opens no connection until the deployment it runs
+ *     in is proven to be the one the operator named;
+ *   - off the loopback interface it reaches the database only over TLS with a
+ *     verified certificate AND host name, and Redis only over a private or TLS
+ *     route;
  *   - it never writes, to the database or to Redis;
  *   - it prints only numbers, booleans and fixed labels, even when a
  *     connection fails with a password in the URL;
  *   - its counts are right for every surface, against the REAL schema;
- *   - its verdicts never say "safe", and say "producers active" when work
- *     arrives between samples.
+ *   - its verdicts never say "safe", say "producers active" when work arrives
+ *     between samples, and say "incomplete" when a queue scan or the budget
+ *     was cut short, unless work was seen.
  *
  * Database cases build disposable databases of their own on the local MySQL
  * fixture. Their tables are copied from the migrated test database with CREATE
  * TABLE LIKE, so a misspelt column fails here, not in production. Redis cases
  * run only on a disposable loopback fixture named by RECONCILEAI_TEST_REDIS_URL,
- * in database indexes no other test uses.
+ * in database indexes no other test uses. TLS cases run everywhere: they use
+ * small fake servers and certificates made for the run with openssl.
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { Duplex } from "node:stream";
+import tls from "node:tls";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import mysql from "mysql2/promise";
 import {
   DB_SURFACES,
+  EXIT,
+  ID_SCAN_LIMIT,
   INTAKE_SOURCES,
   QUEUE_NAMES,
+  REPORT_SCHEMA,
+  SCAN_ROUND_LIMIT,
   allSqlStatements,
+  applicationDatabaseTls,
   assertAggregateOnly,
   assertReadOnlyRedis,
   assertReadOnlySql,
+  checkExpectations,
   classifyCommand,
   classifyStartCommand,
+  errorCode,
+  exitStatusFor,
   inspectProcesses,
+  isLoopbackHost,
+  isPlaceholderIdentifier,
   judge,
   openDatabase,
   parseArgs,
+  planDatabaseRoute,
+  planRedisRoute,
   readAppEnvironment,
   readDrainTimeoutSetting,
+  readQueue,
   readStartupModeSetting,
+  readUnknownQueues,
   readWholeNumber,
   runPreflight,
   signalMaskHas,
   surfaceSql,
+  type Openers,
+  type OpenedDatabase,
+  type RedisReader,
   type Sample,
 } from "./production-workload-preflight.mjs";
 import { classifyDatabaseTarget } from "../server/dbTarget";
@@ -59,23 +85,51 @@ const RUN_TIMEOUT_MS = 30_000;
 /** A case's ceiling outlasts its runs, so a hung run still returns its output. */
 const ceilingFor = (runs: number) => runs * RUN_TIMEOUT_MS + 15_000;
 
+// ─── The deployment the runs claim to be ─────────────────────────────────────
+
+/** A random identifier of the given shape that the placeholder check accepts. */
+function realLooking(make: () => string): string {
+  for (;;) {
+    const value = make();
+    if (!isPlaceholderIdentifier(value)) return value;
+  }
+}
+
+const IDENTITY = {
+  deployment: realLooking(() => randomUUID()),
+  commit: realLooking(() => randomBytes(20).toString("hex")),
+};
+const OTHER_DEPLOYMENT = realLooking(() => randomUUID());
+const OTHER_COMMIT = realLooking(() => randomBytes(20).toString("hex"));
+
+/** The options naming IDENTITY. */
+const identityArgs = (): string[] => ["--expect-deployment", IDENTITY.deployment, "--expect-commit", IDENTITY.commit];
+/** The variables a Railway deployment with IDENTITY carries. */
+const identityVars = (): Record<string, string> => ({
+  RAILWAY_REPLICA_ID: "synthetic-replica",
+  RAILWAY_DEPLOYMENT_ID: IDENTITY.deployment,
+  RAILWAY_GIT_COMMIT_SHA: IDENTITY.commit,
+});
+
 // ─── Running the real script ─────────────────────────────────────────────────
 
 type ScriptRun = { code: number | null; killed: boolean; stdout: string; stderr: string; report: unknown; verdict: string | undefined };
 
 /**
  * Run the script with ONLY the variables given, never the test runner's own
- * DATABASE_URL or REDIS_URL. `onStderr` lets a test act between samples.
+ * DATABASE_URL or REDIS_URL. `onStderr` lets a test act between samples; `cwd`
+ * is the application directory the script loads its drivers from.
  */
 function runScript(
   args: string[],
   vars: Record<string, string>,
   onStderr?: (line: string) => Promise<void> | void,
   nodeOptions: string[] = [],
+  cwd: string = REPO,
 ): Promise<ScriptRun> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [...nodeOptions, SCRIPT, ...args], {
-      cwd: REPO,
+      cwd,
       env: { PATH: process.env.PATH ?? "", HOME: os.tmpdir(), ...vars },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -118,6 +172,18 @@ function field(value: unknown, ...keys: (string | number)[]): unknown {
     current = (current as Record<string | number, unknown>)[key];
   }
   return current;
+}
+
+/** A loopback TCP server that counts the connections made to it. */
+async function countingServer(): Promise<{ port: number; connections: () => number; close: () => Promise<void> }> {
+  let connections = 0;
+  const server = net.createServer((socket) => {
+    connections += 1;
+    socket.destroy();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as net.AddressInfo;
+  return { port, connections: () => connections, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
 // ─── Always on: guards and parsers ───────────────────────────────────────────
@@ -163,12 +229,12 @@ describe("when the Redis guard reads a command", () => {
     ["SCARD", ["bull:webhook-delivery:stalled"]],
     ["HEXISTS", ["bull:webhook-delivery:meta", "paused"]],
     ["GET", ["bull:webhook-delivery:id"]],
-    ["LRANGE", ["bull:webhook-delivery:active", "0", "999"]],
-    ["ZRANGE", ["bull:webhook-delivery:delayed", "0", "999"]],
+    ["LRANGE", ["bull:webhook-delivery:active", "0", "199"]],
+    ["ZRANGE", ["bull:webhook-delivery:delayed", "0", "199"]],
     ["HMGET", ["bull:webhook-delivery:42", "atm", "attemptsMade", "stc"]],
     ["HMGET", ["bull:shopify-order-sync:shop:1:webhook:2", "atm", "attemptsMade", "stc"]],
     ["EXISTS", ["bull:webhook-delivery:42:lock"]],
-    ["SCAN", ["0", "MATCH", "bull:*:meta", "COUNT", "500"]],
+    ["SCAN", ["0", "MATCH", "bull:*:meta", "COUNT", "1000"]],
   ];
   const refused: [string, string[]][] = [
     ["SET", ["bull:webhook-delivery:id", "1"]],
@@ -211,11 +277,13 @@ describe("when the output guard reads a report", () => {
   it("should accept numbers, booleans, nulls, fixed labels and the generation time", () => {
     expect(() =>
       assertAggregateOnly({
-        schema: "reconcileai_workload_preflight_v1",
+        schema: REPORT_SCHEMA,
         generated_at: "2026-11-04T10:00:00.000Z",
         counts: { a: 0, b: 12 },
         flag: true,
         none: null,
+        reading: "partial",
+        route: "railway_private_network",
         gaps: ["http_requests_in_flight_are_not_visible"],
       }),
     ).not.toThrow();
@@ -228,10 +296,36 @@ describe("when the output guard reads a report", () => {
     ["a negative number", { n: -1 }],
     ["a fraction", { n: 1.5 }],
     ["a host name", { host: "redis.railway.internal" }],
+    ["a deployment id", { id: IDENTITY.deployment }],
     ["a nested secret", { a: { b: [{ c: "s3cr3t" }] } }],
     ["a key with spaces", { "a key": 1 }],
   ])("should refuse %s", (_label, value) => {
     expect(() => assertAggregateOnly(value)).toThrow("output_refused");
+  });
+});
+
+describe("when an error is turned into a fixed code", () => {
+  it("should tell certificate, host name and TLS-support failures apart, from codes and never from printed text", () => {
+    expect(errorCode({ code: "HANDSHAKE_SSL_ERROR", message: "Hostname/IP does not match certificate's altnames: Host: a. is not in the cert's altnames" })).toBe("tls_hostname_refused");
+    expect(errorCode({ code: "HANDSHAKE_SSL_ERROR", message: "self-signed certificate in certificate chain" })).toBe("tls_certificate_refused");
+    expect(errorCode({ code: "HANDSHAKE_NO_SSL_SUPPORT" })).toBe("tls_unavailable");
+    expect(errorCode({ code: "ERR_TLS_CERT_ALTNAME_INVALID" })).toBe("tls_hostname_refused");
+    expect(errorCode({ code: "DEPTH_ZERO_SELF_SIGNED_CERT" })).toBe("tls_certificate_refused");
+    expect(errorCode({ code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" })).toBe("tls_certificate_refused");
+    expect(errorCode({ code: "ERR_SSL_WRONG_VERSION_NUMBER" })).toBe("tls_unavailable");
+    expect(errorCode({ code: "PROTOCOL_SEQUENCE_TIMEOUT" })).toBe("query_timeout");
+    // A server error is not a certificate failure, whatever its name says.
+    expect(errorCode({ code: "ER_UNABLE_TO_CREATE_SOMETHING" })).toBe("query_failed");
+  });
+
+  it("should map every refusal to its exit status", () => {
+    expect(exitStatusFor("usage_error")).toBe(EXIT.usage);
+    expect(exitStatusFor("budget_too_short")).toBe(EXIT.usage);
+    expect(exitStatusFor("identity_commit_mismatch")).toBe(EXIT.refused);
+    expect(exitStatusFor("route_redis_not_private")).toBe(EXIT.refused);
+    expect(exitStatusFor("interrupted")).toBe(EXIT.interrupted);
+    expect(exitStatusFor("output_refused")).toBe(EXIT.failed);
+    expect(exitStatusFor("preflight_failed")).toBe(EXIT.failed);
   });
 });
 
@@ -282,6 +376,33 @@ describe("when the settings readers parse a variable", () => {
   });
 });
 
+describe("when the run's options are read", () => {
+  it("should accept the defaults and a budget that holds the sampling", () => {
+    expect(parseArgs([])).toMatchObject({ samples: 3, intervalSeconds: 60, budgetSeconds: 300, envFromApp: false });
+    expect(parseArgs(["--samples", "1", "--budget-seconds", "30"])).toMatchObject({ samples: 1, budgetSeconds: 30 });
+  });
+
+  it.each([
+    [["--samples", "0"]],
+    [["--interval-seconds", "9999"]],
+    [["--budget-seconds", "29"]],
+    [["--budget-seconds", "901"]],
+    [["--unknown", "1"]],
+    [["--samples"]],
+    [["--samples", "1", "--samples", "2"]],
+    [["--env-from-app", "--env-from-app"]],
+    [["--expect-commit", IDENTITY.commit, "--expect-commit", OTHER_COMMIT]],
+  ])("should refuse %j as a usage error", (argv) => {
+    expect(() => parseArgs(argv)).toThrow("usage_error");
+  });
+
+  it("should refuse a budget too short for the sampling it was given", () => {
+    // Two 60-second sleeps and 30 seconds per sample need 210 seconds.
+    expect(() => parseArgs(["--budget-seconds", "209"])).toThrow("budget_too_short");
+    expect(parseArgs(["--budget-seconds", "210"]).budgetSeconds).toBe(210);
+  });
+});
+
 // Above PID_MAX_LIMIT (2^22), so no real process, the test runner included,
 // can share a fake process's id.
 const SHELL_PID = 4_194_400;
@@ -289,9 +410,10 @@ const APP_PID = 4_194_401;
 
 /**
  * A fake /proc holding the chain `pnpm start` produces: pnpm as PID 1, then a
- * shell, then the app. `environ` gives a process an environment file.
+ * shell, then the app (or each of `apps`). `environ` gives a process an
+ * environment file.
  */
-function fakeProcTree(environ: Partial<Record<number, Record<string, string>>> = {}): string {
+function fakeProcTree(environ: Partial<Record<number, Record<string, string>>> = {}, apps: number[] = [APP_PID]): string {
   const procRoot = mkdtempSync(path.join(os.tmpdir(), "fake-proc-"));
   const fake = (pid: number, argv: string[], ppid: number, sigCgt: string) => {
     mkdirSync(path.join(procRoot, String(pid)), { recursive: true });
@@ -302,16 +424,28 @@ function fakeProcTree(environ: Partial<Record<number, Record<string, string>>> =
   };
   fake(1, ["node", "/usr/local/bin/pnpm", "start"], 0, "0000000000004000");
   fake(SHELL_PID, ["/bin/sh", "-c", "NODE_ENV=production node dist/index.js"], 1, "0000000000000000");
-  fake(APP_PID, ["node", "dist/index.js"], SHELL_PID, "0000000180004a02");
+  for (const pid of apps) fake(pid, ["node", "dist/index.js"], SHELL_PID, "0000000180004a02");
   return procRoot;
 }
 
+/** Fake /proc trees made by a describe block, removed after it. */
+function procTrees() {
+  const roots: string[] = [];
+  afterAll(() => {
+    for (const root of roots) rmSync(root, { recursive: true, force: true });
+  });
+  return (environ: Partial<Record<number, Record<string, string>>> = {}, apps: number[] = [APP_PID]) => {
+    const root = fakeProcTree(environ, apps);
+    roots.push(root);
+    return root;
+  };
+}
+
 describe("when the processes are read inside the service container", () => {
-  const procRoot = fakeProcTree();
-  afterAll(() => rmSync(procRoot, { recursive: true, force: true }));
+  const tree = procTrees();
 
   it("should report the launcher chain and which process catches SIGTERM, as fixed classes only", () => {
-    expect(inspectProcesses({ RAILWAY_REPLICA_ID: "replica" }, procRoot)).toEqual({
+    expect(inspectProcesses({ RAILWAY_REPLICA_ID: "replica" }, tree())).toEqual({
       inspected: true,
       pid1_kind: "pnpm",
       pid1_catches_sigterm: true,
@@ -324,7 +458,7 @@ describe("when the processes are read inside the service container", () => {
   });
 
   it("should not read processes outside the service container", () => {
-    expect(inspectProcesses({}, procRoot)).toEqual({ inspected: false, reason: "not_in_service_container" });
+    expect(inspectProcesses({}, tree())).toEqual({ inspected: false, reason: "not_in_service_container" });
   });
 
   it("should read signal 15 from bit 14 of a mask, and classify commands", () => {
@@ -337,22 +471,34 @@ describe("when the processes are read inside the service container", () => {
   });
 });
 
+/** Connection openers that count their calls and connect nothing. */
+function countedOpeners(database?: () => Promise<Partial<OpenedDatabase>>) {
+  const calls = { database: 0, prepareRedis: 0, connectRedis: 0 };
+  const open: Openers = {
+    database: async () => {
+      calls.database += 1;
+      return database ? database() : { error: "not_configured" };
+    },
+    prepareRedis: () => {
+      calls.prepareRedis += 1;
+      return { error: "not_configured" };
+    },
+    connectRedis: async () => {
+      calls.connectRedis += 1;
+      return { error: "not_configured" };
+    },
+  };
+  return { calls, open };
+}
+
 describe("when the settings are taken from the running application", () => {
   const appEnv = {
     DATABASE_URL: "mysql://sentinel_user:Sentinel-Pass-789@127.0.0.1:1/sentinel_db",
-    RAILWAY_REPLICA_ID: "Sentinel-Replica-0042",
     RECONCILEAI_DRAIN_TIMEOUT_MS: "120000",
     JWT_SECRET: "Sentinel-Secret-Not-Read",
+    ...identityVars(),
   };
-  const roots: string[] = [];
-  const tree = (environ: Partial<Record<number, Record<string, string>>>) => {
-    const root = fakeProcTree(environ);
-    roots.push(root);
-    return root;
-  };
-  afterAll(() => {
-    for (const root of roots) rmSync(root, { recursive: true, force: true });
-  });
+  const tree = procTrees();
 
   it("should accept the flag anywhere among the options", () => {
     expect(parseArgs(["--env-from-app", "--samples", "1"])).toMatchObject({ envFromApp: true, samples: 1 });
@@ -361,36 +507,400 @@ describe("when the settings are taken from the running application", () => {
     expect(() => parseArgs(["--env-from-app", "yes"])).toThrow("usage_error");
   });
 
-  it("should read only the variables the script uses, from the app process first", () => {
+  it("should read only the variables the script uses, from the one app process", () => {
     expect(readAppEnvironment(tree({ [APP_PID]: appEnv, 1: { DATABASE_URL: "mysql://pid1" } }))).toEqual({
       source: "app_process",
-      env: { DATABASE_URL: appEnv.DATABASE_URL, RAILWAY_REPLICA_ID: appEnv.RAILWAY_REPLICA_ID, RECONCILEAI_DRAIN_TIMEOUT_MS: "120000" },
+      env: {
+        DATABASE_URL: appEnv.DATABASE_URL,
+        RECONCILEAI_DRAIN_TIMEOUT_MS: "120000",
+        RAILWAY_REPLICA_ID: identityVars().RAILWAY_REPLICA_ID,
+        RAILWAY_DEPLOYMENT_ID: IDENTITY.deployment,
+        RAILWAY_GIT_COMMIT_SHA: IDENTITY.commit,
+      },
     });
-    expect(readAppEnvironment(tree({ 1: { REDIS_URL: "redis://pid1", OTHER: "x" } }))).toEqual({ source: "pid1", env: { REDIS_URL: "redis://pid1" } });
-    expect(readAppEnvironment(tree({}))).toEqual({ source: "app_process_unreadable", env: {} });
+  });
+
+  it("should say why there is no single readable app process, and never fall back to PID 1", () => {
+    // PID 1 (the launcher) holds the variables too; it is not the application.
+    expect(readAppEnvironment(tree({ 1: { REDIS_URL: "redis://pid1" } }))).toEqual({ source: "app_process_unreadable", env: {} });
+    expect(readAppEnvironment(tree({ 1: appEnv }, []))).toEqual({ source: "app_process_not_found", env: {} });
+    expect(readAppEnvironment(tree({ [APP_PID]: appEnv, [APP_PID + 1]: appEnv }, [APP_PID, APP_PID + 1]))).toEqual({ source: "app_process_ambiguous", env: {} });
   });
 
   it("should use the app's values, including the ones it leaves unset, and print none of them", async () => {
     const report = await runPreflight({
-      argv: ["--samples", "1", "--env-from-app"],
+      argv: [...identityArgs(), "--samples", "1", "--env-from-app"],
       // The operator's shell: a stale override, and no database at all.
       env: { RAILWAY_DEPLOYMENT_DRAINING_SECONDS: "30", PATH: process.env.PATH },
       appDir: REPO,
       procRoot: tree({ [APP_PID]: appEnv }),
     });
     expect(field(report, "deployment", "env_source")).toBe("app_process");
+    expect(field(report, "read_only_controls", "database_route")).toBe("local_loopback");
     expect(field(report, "read_only_controls", "database_connection")).toBe("unreachable");
     expect(field(report, "deployment", "application", "drain_timeout_ms")).toEqual({ state: "set", value: 120_000 });
     expect(field(report, "deployment", "provider_overrides", "draining_seconds")).toEqual({ state: "unset", value: null });
     expect(field(report, "processes", "inspected")).toBe(true);
     const printed = JSON.stringify(report);
-    for (const secret of ["Sentinel", "sentinel", "127.0.0.1"]) expect(printed).not.toContain(secret);
+    for (const secret of ["Sentinel", "sentinel", "127.0.0.1", IDENTITY.deployment, IDENTITY.commit]) expect(printed).not.toContain(secret);
+  }, ceilingFor(1));
+
+  it.each([
+    ["no app process", (): string => tree({ 1: appEnv }, [])],
+    ["two app processes", (): string => tree({ [APP_PID]: appEnv, [APP_PID + 1]: appEnv }, [APP_PID, APP_PID + 1])],
+    ["an app process whose environment cannot be read", (): string => tree({ 1: appEnv })],
+  ])("should refuse with %s, though the operator's shell holds a matching identity", async (_label, procRoot) => {
+    const { calls, open } = countedOpeners();
+    await expect(
+      runPreflight({
+        argv: [...identityArgs(), "--samples", "1", "--env-from-app"],
+        env: { ...identityVars(), DATABASE_URL: appEnv.DATABASE_URL },
+        appDir: REPO,
+        procRoot: procRoot(),
+        open,
+      }),
+    ).rejects.toMatchObject({ code: expect.stringMatching(/^identity_app_process_(not_found|ambiguous|unreadable)$/) });
+    expect(calls).toEqual({ database: 0, prepareRedis: 0, connectRedis: 0 });
+  });
+});
+
+// ─── Always on: the identity fence ───────────────────────────────────────────
+
+describe("when the deployment the run targets is not proven", () => {
+  const tree = procTrees();
+  const vars = () => ({ ...identityVars(), DATABASE_URL: "mysql://u:p@127.0.0.1:1/x", REDIS_URL: "redis://127.0.0.1:1" });
+  const without = (key: string) => {
+    const env: Record<string, string> = vars();
+    delete env[key];
+    return env;
+  };
+  const expected = (deployment: string | null, commit: string | null) => [
+    ...(deployment === null ? [] : ["--expect-deployment", deployment]),
+    ...(commit === null ? [] : ["--expect-commit", commit]),
+  ];
+
+  const cases: [string, string[], Record<string, string>, string][] = [
+    ["no expected deployment", expected(null, IDENTITY.commit), vars(), "identity_expected_deployment_missing"],
+    ["no expected commit", expected(IDENTITY.deployment, null), vars(), "identity_expected_commit_missing"],
+    ["a deployment id prefix", expected(IDENTITY.deployment.slice(0, 8), IDENTITY.commit), vars(), "identity_expected_deployment_malformed"],
+    ["a short commit", expected(IDENTITY.deployment, IDENTITY.commit.slice(0, 12)), vars(), "identity_expected_commit_malformed"],
+    ["an uppercase commit", expected(IDENTITY.deployment, IDENTITY.commit.toUpperCase()), vars(), "identity_expected_commit_malformed"],
+    ["template text", expected("<deployment-id>", IDENTITY.commit), vars(), "identity_expected_deployment_malformed"],
+    ["the nil id", expected("00000000-0000-0000-0000-000000000000", IDENTITY.commit), vars(), "identity_expected_deployment_placeholder"],
+    ["a published example id", expected("123e4567-e89b-12d3-a456-426614174000", IDENTITY.commit), vars(), "identity_expected_deployment_placeholder"],
+    ["a counting commit", expected(IDENTITY.deployment, "1234567890abcdef1234567890abcdef12345678"), vars(), "identity_expected_commit_placeholder"],
+    ["a repeated commit", expected(IDENTITY.deployment, "deadbeef".repeat(5)), vars(), "identity_expected_commit_placeholder"],
+    ["no Railway runtime", identityArgs(), without("RAILWAY_REPLICA_ID"), "identity_not_railway_runtime"],
+    ["no deployment id in the environment", identityArgs(), without("RAILWAY_DEPLOYMENT_ID"), "identity_deployment_missing"],
+    ["another deployment", identityArgs(), { ...vars(), RAILWAY_DEPLOYMENT_ID: OTHER_DEPLOYMENT }, "identity_deployment_mismatch"],
+    ["no commit in the environment", identityArgs(), without("RAILWAY_GIT_COMMIT_SHA"), "identity_commit_missing"],
+    ["another commit", identityArgs(), { ...vars(), RAILWAY_GIT_COMMIT_SHA: OTHER_COMMIT }, "identity_commit_mismatch"],
+    // The old check matched a prefix: a commit sharing all but its last digit passed.
+    [
+      "a commit differing only in its last digit",
+      identityArgs(),
+      { ...vars(), RAILWAY_GIT_COMMIT_SHA: `${IDENTITY.commit.slice(0, 39)}${IDENTITY.commit.endsWith("0") ? "1" : "0"}` },
+      "identity_commit_mismatch",
+    ],
+  ];
+
+  it.each(cases)("should refuse %s with a fixed code, opening nothing", async (_label, argv, env, code) => {
+    const { calls, open } = countedOpeners();
+    await expect(runPreflight({ argv: [...argv, "--samples", "1"], env, appDir: REPO, procRoot: tree(), open })).rejects.toMatchObject({ code });
+    expect(calls).toEqual({ database: 0, prepareRedis: 0, connectRedis: 0 });
+  });
+
+  it("should open both connections once the identity matches, and say it was checked first", async () => {
+    const { calls, open } = countedOpeners();
+    const report = await runPreflight({ argv: [...identityArgs(), "--samples", "1"], env: vars(), appDir: REPO, procRoot: tree(), open });
+    expect(calls).toEqual({ database: 1, prepareRedis: 1, connectRedis: 1 });
+    expect(field(report, "read_only_controls", "identity_verified_before_connecting")).toBe(true);
+    expect(field(report, "deployment", "identity")).toEqual({ deployment_matches_expected: true, commit_matches_expected: true });
+    expect(field(report, "deployment", "runtime")).toBe("railway_runtime");
+  });
+
+  it("should judge a deployment id without regard to letter case, and a placeholder by its shape", () => {
+    const opts = parseArgs(identityArgs());
+    expect(() => checkExpectations(opts)).not.toThrow();
+    expect(isPlaceholderIdentifier("ffffffff-ffff-ffff-ffff-ffffffffffff")).toBe(true);
+    expect(isPlaceholderIdentifier("abcabcab-cabc-abca-bcab-cabcabcabcab")).toBe(true);
+    expect(isPlaceholderIdentifier("0123456789abcdef0123456789abcdef01234567")).toBe(true);
+    expect(isPlaceholderIdentifier(IDENTITY.deployment)).toBe(false);
+  });
+
+  it("should exit 4 with a fixed code and connect nowhere, as a command", async () => {
+    const server = await countingServer();
+    try {
+      const target = { DATABASE_URL: `mysql://u:p@127.0.0.1:${server.port}/x`, REDIS_URL: `redis://127.0.0.1:${server.port}` };
+      const runs: [string[], Record<string, string>, RegExp][] = [
+        [expected(null, null), { ...identityVars(), ...target }, /^identity_expected_deployment_missing$/],
+        [expected("replace-with-deployment-id", IDENTITY.commit), { ...identityVars(), ...target }, /^identity_expected_deployment_malformed$/],
+        [identityArgs(), { ...identityVars(), RAILWAY_DEPLOYMENT_ID: OTHER_DEPLOYMENT, ...target }, /^identity_deployment_mismatch$/],
+        [identityArgs(), { ...target }, /^identity_not_railway_runtime$/],
+        // This machine runs no Railway application, so the app process is not
+        // found (or, if some process matched, it is not this deployment).
+        [[...identityArgs(), "--env-from-app"], { ...identityVars(), ...target }, /^identity_/],
+      ];
+      for (const [args, env, code] of runs) {
+        const result = await runScript([...args, "--samples", "1"], env);
+        expect(result.code, args.join(" ")).toBe(EXIT.refused);
+        const printed = JSON.parse(result.stdout) as { schema: string; error: string };
+        expect(printed.schema).toBe(REPORT_SCHEMA);
+        expect(printed.error).toMatch(code);
+        expect(result.stdout.trim().split("\n")).toHaveLength(1);
+      }
+      expect(server.connections()).toBe(0);
+    } finally {
+      await server.close();
+    }
+  }, ceilingFor(5));
+
+  it("should refuse bad arguments before opening any connection", async () => {
+    const server = await countingServer();
+    try {
+      for (const args of [["--samples", "0"], ["--interval-seconds", "9999"], ["--unknown", "1"], ["--samples"], ["--budget-seconds", "60"]]) {
+        const result = await runScript([...identityArgs(), ...args], {
+          ...identityVars(),
+          DATABASE_URL: `mysql://u:p@127.0.0.1:${server.port}/x`,
+          REDIS_URL: `redis://127.0.0.1:${server.port}`,
+        });
+        expect(result.code, args.join(" ")).toBe(EXIT.usage);
+        expect(JSON.parse(result.stdout)).toEqual({ schema: REPORT_SCHEMA, error: args[0] === "--budget-seconds" ? "budget_too_short" : "usage_error" });
+      }
+      expect(server.connections()).toBe(0);
+    } finally {
+      await server.close();
+    }
+  }, ceilingFor(5));
+});
+
+/**
+ * An application directory whose mysql2, bullmq and ioredis are stubs that
+ * record being loaded, so a test can see whether a driver was loaded at all.
+ */
+function stubAppDir(): { dir: string; loaded: () => string[] } {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "stub-app-"));
+  const log = path.join(dir, "loaded.log");
+  const record = (name: string) => `require("node:fs").appendFileSync(${JSON.stringify(log)}, ${JSON.stringify(`${name}\n`)});`;
+  const pkg = (name: string, files: Record<string, string>) => {
+    const root = path.join(dir, "node_modules", name);
+    mkdirSync(root, { recursive: true });
+    writeFileSync(path.join(root, "package.json"), JSON.stringify({ name, version: "0.0.0-stub", main: "index.js" }));
+    for (const [file, text] of Object.entries(files)) writeFileSync(path.join(root, file), text);
+  };
+  writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "stub-app", private: true }));
+  pkg("mysql2", {
+    "index.js": record("mysql2"),
+    "promise.js": `${record("mysql2/promise")}\nexports.createConnection = async () => { throw Object.assign(new Error("stub"), { code: "ECONNREFUSED" }); };`,
+  });
+  pkg("bullmq", { "index.js": `${record("bullmq")}\nmodule.exports = {};` });
+  pkg("ioredis", { "index.js": `${record("ioredis")}\nmodule.exports = class Redis { constructor() { throw new Error("stub"); } };` });
+  return { dir, loaded: () => (existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean) : []) };
+}
+
+describe("when the identity fails, drivers are not even loaded", () => {
+  const apps: string[] = [];
+  afterAll(() => {
+    for (const dir of apps) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("should load mysql2, bullmq and ioredis only after the identity has matched", async () => {
+    const refused = stubAppDir();
+    const allowed = stubAppDir();
+    apps.push(refused.dir, allowed.dir);
+    const target = { DATABASE_URL: "mysql://u:p@127.0.0.1:1/x", REDIS_URL: "redis://127.0.0.1:1" };
+
+    const mismatch = await runScript([...identityArgs(), "--samples", "1"], { ...identityVars(), RAILWAY_GIT_COMMIT_SHA: OTHER_COMMIT, ...target }, undefined, [], refused.dir);
+    expect(mismatch.code).toBe(EXIT.refused);
+    expect(refused.loaded()).toEqual([]);
+
+    // The control: the same stubs ARE loaded once the identity matches, so the
+    // empty list above is not an artefact of the stubs.
+    const matched = await runScript([...identityArgs(), "--samples", "1"], { ...identityVars(), DATABASE_URL: target.DATABASE_URL }, undefined, [], allowed.dir);
+    expect(matched.code, matched.stdout).toBe(EXIT.report);
+    expect(allowed.loaded()).toEqual(["mysql2/promise"]);
+    expect(field(matched.report, "read_only_controls", "database_connection")).toBe("unreachable");
+  }, ceilingFor(2));
+});
+
+// ─── Always on: routes ───────────────────────────────────────────────────────
+
+describe("when the connection routes are judged", () => {
+  const ssl = (setting: unknown) => `?ssl=${encodeURIComponent(JSON.stringify(setting))}`;
+
+  it("should verify certificate and host name off the loopback interface, whatever the URL asks", () => {
+    const cases: [string, string][] = [
+      ["", "not_requested"],
+      [ssl({ rejectUnauthorized: true }), "verified_certificate_only"],
+      [ssl({ minVersion: "TLSv1.2" }), "verified_certificate_only"],
+      [ssl({ rejectUnauthorized: true, verifyIdentity: true }), "verified_certificate_and_hostname"],
+      [ssl({ rejectUnauthorized: false }), "unverified"],
+    ];
+    for (const [query, applicationTls] of cases) {
+      const plan = planDatabaseRoute(`mysql://u:p@db.example.test:4000/app${query}`);
+      expect(plan.route, query).toBe("tls_verified_identity");
+      expect(plan.application_tls, query).toBe(applicationTls);
+      expect(plan.connection?.ssl, query).toMatchObject({ rejectUnauthorized: true, verifyIdentity: true });
+    }
+    // The URL's own TLS settings (a CA, a minimum version) are kept.
+    expect(planDatabaseRoute(`mysql://u:p@db.example.test/app${ssl({ ca: "PEM", minVersion: "TLSv1.2" })}`).connection?.ssl).toEqual({
+      ca: "PEM",
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: true,
+      verifyIdentity: true,
+    });
+  });
+
+  it("should take only loopback addresses as local, never a name", () => {
+    expect(planDatabaseRoute("mysql://u:p@127.0.0.1:3306/x")).toMatchObject({ route: "local_loopback", connection: { ssl: undefined } });
+    expect(planDatabaseRoute("mysql://u:p@[::1]:3306/x").route).toBe("local_loopback");
+    expect(planDatabaseRoute("mysql://u:p@localhost:3306/x").route).toBe("tls_verified_identity");
+    expect(isLoopbackHost("127.255.0.9")).toBe(true);
+    expect(isLoopbackHost("128.0.0.1")).toBe(false);
+    expect(isLoopbackHost("localhost")).toBe(false);
+  });
+
+  it("should use no URL option but the connection itself and its TLS settings", () => {
+    const plan = planDatabaseRoute(`mysql://u%40x:p%3Ay@db.example.test:4000/app?multipleStatements=true&connectTimeout=999999&ssl=${encodeURIComponent("{}")}`);
+    expect(Object.keys(plan.connection ?? {}).sort()).toEqual(["database", "host", "password", "port", "ssl", "user"]);
+    expect(plan.connection).toMatchObject({ host: "db.example.test", port: 4000, database: "app", user: "u@x", password: "p:y" });
+  });
+
+  it("should refuse a database URL the application itself could not use", () => {
+    for (const query of [ssl(true), `?ssl=${encodeURIComponent("Amazon RDS")}`, ssl([])]) {
+      expect(() => planDatabaseRoute(`mysql://u:p@db.example.test/app${query}`), query).toThrow("route_database_tls_setting_unsupported");
+    }
+    expect(() => planDatabaseRoute("not a url")).toThrow("route_database_url_invalid");
+    expect(planDatabaseRoute(undefined).route).toBe("not_configured");
+    expect(applicationDatabaseTls(undefined)).toBe("not_requested");
+  });
+
+  it("should allow Redis only over the private network, TLS, or the loopback interface", () => {
+    expect(planRedisRoute("redis://default:pw@redis.railway.internal:6379")).toMatchObject({ route: "railway_private_network", tls: false });
+    expect(planRedisRoute("redis://default:pw@Redis.Railway.Internal.:6379?family=0").route).toBe("railway_private_network");
+    expect(planRedisRoute("rediss://default:pw@cache.example.test:6380")).toMatchObject({ route: "tls_verified", tls: true });
+    expect(planRedisRoute("redis://127.0.0.1:6380/9").route).toBe("local_loopback");
+    expect(planRedisRoute("  ").route).toBe("not_configured");
+    const refusals: [string, string][] = [
+      ["redis://default:pw@monorail.proxy.rlwy.net:12345", "route_redis_not_private"],
+      ["redis://localhost:6379", "route_redis_not_private"],
+      ["redis://railway.internal:6379", "route_redis_not_private"],
+      ["redis://redis.railway.internal.example.com:6379", "route_redis_not_private"],
+      ["redis://redis.railway.internal:6379?tls=x", "route_redis_url_options_unsupported"],
+      ["redis://redis.railway.internal:6379?family=0&rejectUnauthorized=false", "route_redis_url_options_unsupported"],
+      ["http://redis.railway.internal:6379", "route_redis_url_invalid"],
+      ["not a url", "route_redis_url_invalid"],
+    ];
+    for (const [url, code] of refusals) {
+      let caught: unknown;
+      try {
+        planRedisRoute(url);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught, url).toMatchObject({ code });
+      // A refusal carries its code and nothing of the URL.
+      expect((caught as Error).message, url).toBe(code);
+    }
+  });
+
+  it("should refuse an unsafe route as a command, before connecting anywhere", async () => {
+    const server = await countingServer();
+    try {
+      const result = await runScript([...identityArgs(), "--samples", "1"], {
+        ...identityVars(),
+        DATABASE_URL: `mysql://u:p@127.0.0.1:${server.port}/x`,
+        REDIS_URL: "redis://default:Sentinel-Pass@monorail.proxy.rlwy.net:12345",
+      });
+      expect(result.code).toBe(EXIT.refused);
+      expect(JSON.parse(result.stdout)).toEqual({ schema: REPORT_SCHEMA, error: "route_redis_not_private" });
+      expect(result.stdout + result.stderr).not.toContain("Sentinel");
+      expect(server.connections()).toBe(0);
+    } finally {
+      await server.close();
+    }
   }, ceilingFor(1));
 });
 
+// ─── Always on: the budget ───────────────────────────────────────────────────
+
+/** A database stand-in that answers `answers` statements, then hangs until aborted. */
+function hangingDatabase(answers: number) {
+  const state = { aborted: false, closed: false, statements: 0 };
+  const waiting: ((error: Error) => void)[] = [];
+  const lost = () => Object.assign(new Error("connection lost"), { code: "PROTOCOL_CONNECTION_LOST" });
+  const db: Partial<OpenedDatabase> = {
+    controls: { engine: "mysql", session_time_zone_utc: true, snapshot: "consistent_snapshot" },
+    async beginSnapshot() {},
+    async endSnapshot() {},
+    run(sql: string) {
+      assertReadOnlySql(sql);
+      state.statements += 1;
+      if (state.aborted) return Promise.reject(lost());
+      if (state.statements <= answers) return Promise.resolve([{ n: 1, oldest_minutes: 5, under_15_minutes: 1, over_1_day: 0 }]);
+      return new Promise<Record<string, unknown>[]>((_resolve, reject) => waiting.push(reject));
+    },
+    abort() {
+      state.aborted = true;
+      for (const reject of waiting.splice(0)) reject(lost());
+    },
+    async close() {
+      state.closed = true;
+    },
+  };
+  return { db, state };
+}
+
+describe("when the run's budget runs out", () => {
+  const tree = procTrees();
+
+  it("should close its own connections and report incomplete evidence", async () => {
+    const { db, state } = hangingDatabase(0);
+    const { open } = countedOpeners(async () => db);
+    const started = Date.now();
+    const report = await runPreflight({
+      argv: [...identityArgs(), "--samples", "3", "--interval-seconds", "1"],
+      env: identityVars(),
+      appDir: REPO,
+      procRoot: tree(),
+      open,
+      limits: { budgetMs: 1500 },
+    });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(state).toMatchObject({ aborted: true, closed: true });
+    expect(field(report, "sampling")).toMatchObject({ samples_requested: 3, samples_taken: 1, budget_exhausted: true });
+    expect(field(report, "samples", 0, "database", "surfaces", "upload_batches.in_progress")).toEqual({ reading: "unknown", error: "budget_exceeded" });
+    expect(field(report, "verdicts", "overall")).toBe("no_go_incomplete_evidence");
+  });
+
+  it("should still report work it saw before the budget ran out", async () => {
+    // The first statement counts unfinished reconciliation jobs, and finds one.
+    const { db } = hangingDatabase(1);
+    const { open } = countedOpeners(async () => db);
+    const report = await runPreflight({
+      argv: [...identityArgs(), "--samples", "3", "--interval-seconds", "1"],
+      env: identityVars(),
+      appDir: REPO,
+      procRoot: tree(),
+      open,
+      limits: { budgetMs: 1500 },
+    });
+    expect(field(report, "samples", 0, "database", "surfaces", "reconciliation_jobs.unfinished")).toMatchObject({ reading: "ok", count: 1 });
+    expect(field(report, "verdicts", "overall")).toBe("no_go_unfinished_work");
+  });
+});
+
+// ─── Always on: verdicts ─────────────────────────────────────────────────────
+
 describe("when the verdicts are judged", () => {
-  /** One sample: uploads in progress, runnable deliveries, transactions taken in. */
-  const sample = (upload: number | null, delivery: number | null, intake: number | null, idCounter = 5): Sample => ({
+  /** One sample: uploads in progress, runnable deliveries, transactions taken in, and the unknown-queue scan. */
+  const sample = (
+    upload: number | null,
+    delivery: number | null,
+    intake: number | null,
+    idCounter = 5,
+    unknownQueues: { reading: string; runnable?: number } = { reading: "ok", runnable: 0 },
+  ): Sample => ({
     database: {
       surfaces: Object.fromEntries(
         DB_SURFACES.map((s) => [s.id, upload === null ? { reading: "unknown" } : { reading: "ok", count: s.id === "upload_batches.in_progress" ? upload : 0 }]),
@@ -403,7 +913,7 @@ describe("when the verdicts are judged", () => {
       queues: Object.fromEntries(
         QUEUE_NAMES.map((q) => [q, delivery === null ? { reading: "unknown" } : { reading: "ok", runnable: q === "webhook-delivery" ? delivery : 0, id_counter: idCounter }]),
       ),
-      unknown_queues: { reading: "ok", runnable: 0 },
+      unknown_queues: unknownQueues,
     },
   });
 
@@ -461,19 +971,177 @@ describe("when the verdicts are judged", () => {
     quiet.database.intake.transactions = { reading: "unknown" };
     expect(judge([sample(0, 0, null), quiet]).overall).toBe("no_go_incomplete_evidence");
   });
+
+  describe("when the unknown-queue scan stopped before its end", () => {
+    const partial = (runnable: number) => ({ reading: "partial", runnable });
+
+    it("should report incomplete evidence when nothing was seen", () => {
+      const verdicts = judge([sample(0, 0, null, 5, partial(0)), sample(0, 0, 0, 5, partial(0))]);
+      expect(verdicts.queues_runnable).toBe("unknown_incomplete_evidence");
+      expect(verdicts.overall).toBe("no_go_incomplete_evidence");
+    });
+
+    it("should count work it did see in an unknown queue", () => {
+      expect(judge([sample(0, 0, null, 5, partial(2))])).toMatchObject({ queues_runnable: "fail_unfinished_work", overall: "no_go_unfinished_work" });
+    });
+
+    it("should keep the no-go for known unfinished work", () => {
+      const verdicts = judge([sample(1, 3, null, 5, partial(0)), sample(1, 3, 0, 5, partial(0))]);
+      expect(verdicts).toMatchObject({ reconciliation_unfinished: "fail_unfinished_work", queues_runnable: "fail_unfinished_work", overall: "no_go_unfinished_work" });
+    });
+  });
+
+  it("should report incomplete evidence when fewer samples were taken than asked, unless work was seen", () => {
+    expect(judge([sample(0, 0, null)], { incomplete: true }).overall).toBe("no_go_incomplete_evidence");
+    expect(judge([sample(2, 0, null)], { incomplete: true }).overall).toBe("no_go_unfinished_work");
+    expect(judge([]).overall).toBe("no_go_incomplete_evidence");
+  });
+});
+
+// ─── Always on: the queue readers, against a stand-in Redis ─────────────────
+
+/**
+ * A stand-in Redis: every command passes the real guard, then `answer` replies.
+ * Records what was asked.
+ */
+function fakeRedis(answer: (command: string, args: string[]) => unknown): RedisReader & { commands: string[] } {
+  const commands: string[] = [];
+  return {
+    commands,
+    async call(command: string, ...args: (string | number)[]) {
+      const strings = args.map(String);
+      assertReadOnlyRedis(command, strings);
+      commands.push(command);
+      const reply = answer(command, strings);
+      if (reply instanceof Error) throw reply;
+      return reply;
+    },
+  };
+}
+
+describe("when Redis is searched for queues the code does not know", () => {
+  it("should say ok only when the key scan reached its end", async () => {
+    const redis = fakeRedis((command, args) => {
+      if (command === "SCAN") return args[0] === "0" ? ["7", ["bull:legacy-queue:meta", "bull:webhook-delivery:meta"]] : ["0", []];
+      return command === "LLEN" && args[0] === "bull:legacy-queue:wait" ? 4 : 0;
+    });
+    expect(await readUnknownQueues(redis)).toEqual({ reading: "ok", count: 1, runnable: 4, scan_rounds: 2, scan_complete: true });
+  });
+
+  it("should say partial, with what it saw, when the scan stops at its round limit", async () => {
+    let round = 0;
+    const redis = fakeRedis((command) => {
+      if (command === "SCAN") {
+        round += 1;
+        // A cursor that never returns to 0: more keys than the limit allows.
+        return [String(round + 1), round === 1 ? ["bull:legacy-queue:meta"] : []];
+      }
+      return command === "ZCARD" ? 1 : 0;
+    });
+    const reading = await readUnknownQueues(redis);
+    expect(reading).toEqual({ reading: "partial", count: 1, runnable: 3, scan_rounds: SCAN_ROUND_LIMIT, scan_complete: false });
+    expect(redis.commands.filter((c) => c === "SCAN")).toHaveLength(SCAN_ROUND_LIMIT);
+  });
+
+  it("should say partial when the connection fails part-way, and fail outright before any round", async () => {
+    let round = 0;
+    const midway = fakeRedis((command) => {
+      if (command !== "SCAN") return 0;
+      round += 1;
+      return round === 1 ? ["9", ["bull:legacy-queue:meta"]] : new Error("Connection is closed.");
+    });
+    expect(await readUnknownQueues(midway)).toMatchObject({ reading: "partial", count: 1, scan_complete: false });
+    const never = fakeRedis(() => new Error("Connection is closed."));
+    await expect(readUnknownQueues(never)).rejects.toThrow("Connection is closed.");
+  });
+});
+
+describe("when a known queue's jobs are inspected", () => {
+  it("should keep exact counts and label the inspection partial when capped or cut short", async () => {
+    const capped = fakeRedis((command, args) => {
+      if (command === "LLEN") return args[0].endsWith(":wait") ? ID_SCAN_LIMIT + 5 : 0;
+      if (command === "LRANGE") return args[0].endsWith(":wait") ? Array.from({ length: ID_SCAN_LIMIT }, (_, i) => String(i)) : [];
+      if (command === "HMGET") return [null, null, null];
+      if (command === "GET") return "900";
+      return command === "ZRANGE" ? [] : 0;
+    });
+    const reading = await readQueue(capped, "webhook-delivery");
+    expect(reading).toMatchObject({ reading: "ok", runnable: ID_SCAN_LIMIT + 5, wait: ID_SCAN_LIMIT + 5, job_inspection: "partial", id_counter: 900 });
+    expect(capped.commands.filter((c) => c === "HMGET")).toHaveLength(ID_SCAN_LIMIT);
+
+    const cut = fakeRedis((command, args) => {
+      if (command === "LLEN") return args[0].endsWith(":active") ? 2 : 0;
+      if (command === "LRANGE") return args[0].endsWith(":active") ? ["1", "2"] : [];
+      if (command === "HMGET") return new Error("Connection is closed.");
+      return command === "ZRANGE" ? [] : command === "GET" ? null : 0;
+    });
+    expect(await readQueue(cut, "reconciliation-runs")).toMatchObject({ reading: "ok", runnable: 2, active: 2, job_inspection: "partial" });
+  });
 });
 
 describe("when a report would carry a value outside the fixed vocabulary", () => {
+  const tree = procTrees();
+
   it("should refuse to return it", async () => {
     // A clock past year 9999 stamps the report with a time outside the fixed
     // format: a value the output guard must refuse rather than print.
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("+010000-01-01T00:00:00.000Z"));
     try {
-      await expect(runPreflight({ argv: ["--samples", "1"], env: {}, appDir: REPO })).rejects.toMatchObject({ code: "output_refused" });
+      const { open } = countedOpeners();
+      await expect(runPreflight({ argv: [...identityArgs(), "--samples", "1"], env: identityVars(), appDir: REPO, procRoot: tree(), open })).rejects.toMatchObject({
+        code: "output_refused",
+      });
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ─── Always on: what the deployed code holds ────────────────────────────────
+
+/**
+ * The newest migration the preflight's surfaces were reconciled against. When
+ * a migration lands after it, this fails until someone checks the new tables
+ * and states for process work a replacement could cut off, updates
+ * DB_SURFACES if needed, and moves this forward.
+ */
+const COVERAGE_RECONCILED_THROUGH_MIGRATION = "0119_shopline_billing_charges";
+
+/** Every createQueue call in the deployed code, by file, and the queues it names. */
+const QUEUE_CALL_SITES: Record<string, string[]> = {
+  "server/reconciliationQueue.ts": ["reconciliation-runs"],
+  "server/webhookDelivery.ts": ["webhook-delivery"],
+  "server/connectors/shopify/syncQueue.ts": ["shopify-manual-sync", "shopify-order-sync"],
+  "server/connectors/shopify/privacyQueue.ts": ["shopify-privacy"],
+  "server/connectors/shopline/realtimeSync.ts": ["shopline-realtime-sync"],
+};
+
+describe("when the deployed code is compared with what the preflight counts", () => {
+  it("should know every queue the code creates", () => {
+    const sites: Record<string, number> = {};
+    for (const entry of readdirSync(path.join(REPO, "server"), { recursive: true })) {
+      const file = `server/${String(entry).split(path.sep).join("/")}`;
+      if (!file.endsWith(".ts") || /\.(test|testkit|d)\.ts$/.test(file) || /\.fixture\./.test(file)) continue;
+      const text = readFileSync(path.join(REPO, file), "utf8");
+      const calls = text.match(/(?<!function\s+)\bcreateQueue\s*(?:<[^<>()]*>)?\s*\(/g);
+      if (calls) sites[file] = calls.length;
+    }
+    expect(sites).toEqual(Object.fromEntries(Object.entries(QUEUE_CALL_SITES).map(([file, names]) => [file, names.length])));
+    const named = new Set<string>();
+    for (const [file, names] of Object.entries(QUEUE_CALL_SITES)) {
+      const text = readFileSync(path.join(REPO, file), "utf8");
+      for (const name of names) {
+        expect(text, `${file} names ${name}`).toContain(`"${name}"`);
+        named.add(name);
+      }
+    }
+    expect([...named].sort()).toEqual([...QUEUE_NAMES].sort());
+  });
+
+  it("should have been reconciled against the newest migration", () => {
+    const journal = JSON.parse(readFileSync(path.join(REPO, "drizzle/meta/_journal.json"), "utf8")) as { entries: { tag: string }[] };
+    expect(journal.entries.at(-1)?.tag).toBe(COVERAGE_RECONCILED_THROUGH_MIGRATION);
   });
 });
 
@@ -481,26 +1149,34 @@ describe("when a report would carry a value outside the fixed vocabulary", () =>
 
 describe("when the script runs without a database or Redis", () => {
   it("should report incomplete evidence, and nothing but aggregate labels", async () => {
-    const result = await runScript(["--samples", "1"], {});
-    expect(result.code, result.stdout).toBe(0);
+    const result = await runScript([...identityArgs(), "--samples", "1"], identityVars());
+    expect(result.code, result.stdout).toBe(EXIT.report);
     // One line of JSON, then the verdict and the group verdicts.
     expect(result.stdout.trimEnd().split("\n")).toHaveLength(3);
     expect(result.stdout).toMatch(/\nGROUPS: reconciliation=\w+ queues=\w+ accepted=\w+ producers=\w+\n$/);
     expect(field(result.report, "deployment", "env_source")).toBe("own");
     expect(result.verdict).toBe("no_go_incomplete_evidence");
     expect(() => assertAggregateOnly(result.report)).not.toThrow();
-    expect(field(result.report, "read_only_controls", "queue_objects_constructed")).toBe(false);
+    expect(field(result.report, "read_only_controls")).toMatchObject({
+      queue_objects_constructed: false,
+      identity_verified_before_connecting: true,
+      database_route: "not_configured",
+      redis_route: "not_configured",
+    });
     expect(field(result.report, "deployment", "effective_draining_proven")).toBe(false);
     expect(field(result.report, "deployment", "recipe", "start_command_kind")).toBe("pnpm_start");
-    expect(field(result.report, "processes")).toEqual({ inspected: false, reason: "not_in_service_container" });
+    expect(field(result.report, "sampling")).toMatchObject({ samples_requested: 1, samples_taken: 1, budget_seconds: 300, budget_exhausted: false });
+    expect(result.stdout).not.toContain(IDENTITY.deployment);
+    expect(result.stdout).not.toContain(IDENTITY.commit);
   }, ceilingFor(1));
 
   it("should print neither credentials nor hosts from a failing connection", async () => {
-    const result = await runScript(["--samples", "1"], {
+    const result = await runScript([...identityArgs(), "--samples", "1"], {
+      ...identityVars(),
       DATABASE_URL: "mysql://sentinel_user:Sentinel-Pass-123@127.0.0.1:1/sentinel_db",
       REDIS_URL: "redis://:Sentinel-Pass-456@127.0.0.1:1",
     });
-    expect(result.code, result.stdout).toBe(0);
+    expect(result.code, result.stdout).toBe(EXIT.report);
     expect(field(result.report, "read_only_controls", "database_connection")).toBe("unreachable");
     expect(field(result.report, "read_only_controls", "redis_connection")).toBe("unreachable");
     for (const secret of ["Sentinel", "sentinel", "127.0.0.1", "Pass-"]) {
@@ -514,34 +1190,324 @@ describe("when the script runs without a database or Redis", () => {
   ])("should print only a fixed code when %s escapes from a callback", async (_label, fault) => {
     // Planted while the script sleeps between samples.
     const plant = `data:text/javascript,setTimeout(() => { ${fault}; }, 1500)`;
-    const result = await runScript(["--samples", "2", "--interval-seconds", "4"], {}, undefined, ["--import", plant]);
-    expect(result.code).toBe(3);
-    expect(JSON.parse(result.stdout)).toEqual({ schema: "reconcileai_workload_preflight_v1", error: "preflight_failed" });
+    const result = await runScript([...identityArgs(), "--samples", "2", "--interval-seconds", "4"], identityVars(), undefined, ["--import", plant]);
+    expect(result.code).toBe(EXIT.failed);
+    expect(JSON.parse(result.stdout)).toEqual({ schema: REPORT_SCHEMA, error: "preflight_failed" });
     expect(result.stdout + result.stderr).not.toContain("Sentinel");
   }, ceilingFor(1));
 
-  it("should refuse bad arguments before opening any connection", async () => {
-    let connections = 0;
-    const server = net.createServer((socket) => {
-      connections += 1;
-      socket.destroy();
+  it.each(["SIGTERM", "SIGINT", "SIGHUP"] as const)("should print only a fixed code when stopped by %s", async (signal) => {
+    let child: number | undefined;
+    const run = new Promise<ScriptRun>((resolve, reject) => {
+      const proc = spawn(process.execPath, [SCRIPT, ...identityArgs(), "--samples", "2", "--interval-seconds", "20"], {
+        cwd: REPO,
+        env: { PATH: process.env.PATH ?? "", HOME: os.tmpdir(), ...identityVars() },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      child = proc.pid;
+      let stdout = "";
+      proc.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString("utf8");
+      });
+      proc.stderr.on("data", (chunk: Buffer) => {
+        if (chunk.toString("utf8").includes("sample 1/2 complete")) proc.kill(signal);
+      });
+      proc.on("error", reject);
+      proc.on("close", (code) => resolve({ code, killed: false, stdout, stderr: "", report: undefined, verdict: undefined }));
     });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const { port } = server.address() as net.AddressInfo;
-    try {
-      for (const args of [["--samples", "0"], ["--expect-commit", "not-hex"], ["--interval-seconds", "9999"], ["--unknown", "1"], ["--samples"]]) {
-        const result = await runScript(args, {
-          DATABASE_URL: `mysql://u:p@127.0.0.1:${port}/x`,
-          REDIS_URL: `redis://127.0.0.1:${port}`,
-        });
-        expect(result.code, args.join(" ")).toBe(2);
-        expect(JSON.parse(result.stdout)).toEqual({ schema: "reconcileai_workload_preflight_v1", error: "usage_error" });
-      }
-      expect(connections).toBe(0);
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+    const result = await run;
+    expect(child).toBeDefined();
+    expect(result.code).toBe(EXIT.interrupted);
+    expect(JSON.parse(result.stdout)).toEqual({ schema: REPORT_SCHEMA, error: "interrupted" });
+  }, ceilingFor(1));
+});
+
+// ─── Always on: TLS, against fake servers with certificates made for the run ─
+
+type Identity = { key: string; cert: string };
+type Pki = { dir: string; caFile: string; caPem: string; localhost: Identity; otherName: Identity; selfSigned: Identity };
+
+/** A CA, a certificate it issued for localhost, one for another name, and a self-signed one. */
+function makePki(): Pki {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "preflight-pki-"));
+  const openssl = (...args: string[]) => execFileSync("openssl", args, { cwd: dir, stdio: "ignore" });
+  const ec = ["-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:prime256v1", "-nodes"];
+  openssl("req", "-x509", ...ec, "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=Preflight Test CA");
+  const issue = (name: string, altName: string) => {
+    openssl("req", ...ec, "-keyout", `${name}.key`, "-out", `${name}.csr`, "-subj", `/CN=${altName}`);
+    writeFileSync(path.join(dir, `${name}.ext`), `subjectAltName=DNS:${altName}\n`);
+    openssl("x509", "-req", "-in", `${name}.csr`, "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", `${name}.pem`, "-days", "2", "-extfile", `${name}.ext`);
+  };
+  issue("localhost", "localhost");
+  issue("other", "other.invalid");
+  openssl("req", "-x509", ...ec, "-keyout", "self.key", "-out", "self.pem", "-days", "2", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost");
+  const read = (file: string) => readFileSync(path.join(dir, file), "utf8");
+  return {
+    dir,
+    caFile: path.join(dir, "ca.pem"),
+    caPem: read("ca.pem"),
+    localhost: { key: read("localhost.key"), cert: read("localhost.pem") },
+    otherName: { key: read("other.key"), cert: read("other.pem") },
+    selfSigned: { key: read("self.key"), cert: read("self.pem") },
+  };
+}
+
+type FakeServer = { port: number; close: () => Promise<void> };
+
+async function listen(server: net.Server, sockets: Set<net.Socket>): Promise<FakeServer> {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as net.AddressInfo;
+  return {
+    port,
+    close: () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) socket.destroy();
+        server.close(() => resolve());
+      }),
+  };
+}
+
+function mysqlPacket(sequence: number, payload: Buffer): Buffer {
+  const header = Buffer.alloc(4);
+  header.writeUIntLE(payload.length, 0, 3);
+  header[3] = sequence;
+  return Buffer.concat([header, payload]);
+}
+
+/**
+ * Just enough of a MySQL server to test TLS: a protocol-10 greeting that offers
+ * TLS (or, with `identity` null, does not), the upgrade on the client's SSL
+ * request, acceptance of any credentials, and an error for every statement.
+ */
+async function fakeMysqlServer(identity: Identity | null): Promise<FakeServer> {
+  const u16 = (n: number) => {
+    const b = Buffer.alloc(2);
+    b.writeUInt16LE(n);
+    return b;
+  };
+  // LONG_PASSWORD, CONNECT_WITH_DB, PROTOCOL_41, TRANSACTIONS, SECURE_CONNECTION, PLUGIN_AUTH (+ SSL)
+  const capabilities = 0x1 | 0x8 | 0x200 | 0x2000 | 0x8000 | 0x80000 | (identity ? 0x800 : 0);
+  const greeting = Buffer.concat([
+    Buffer.from([10]),
+    Buffer.from("8.0.99-fake\0"),
+    Buffer.from([7, 0, 0, 0]),
+    Buffer.alloc(8, 0x61),
+    Buffer.from([0]),
+    u16(capabilities & 0xffff),
+    Buffer.from([0x21]),
+    u16(0x0002),
+    u16(capabilities >>> 16),
+    Buffer.from([21]),
+    Buffer.alloc(10),
+    Buffer.alloc(12, 0x62),
+    Buffer.from([0]),
+    Buffer.from("mysql_native_password\0"),
+  ]);
+  const accepted = Buffer.from([0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]);
+  const refusedStatement = Buffer.concat([Buffer.from([0xff]), u16(1064), Buffer.from("#42000no statements here")]);
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+    socket.write(mysqlPacket(0, greeting));
+    if (!identity) return;
+    // The client's SSL request is 36 bytes; the TLS hello may arrive with it.
+    let plain = Buffer.alloc(0);
+    const bridge = new Duplex({
+      read() {},
+      write(chunk: Buffer, _encoding, callback) {
+        socket.write(chunk, callback);
+      },
+    });
+    const onPlain = (chunk: Buffer) => {
+      plain = Buffer.concat([plain, chunk]);
+      if (plain.length < 36) return;
+      socket.off("data", onPlain);
+      socket.on("data", (more: Buffer) => bridge.push(more));
+      socket.on("end", () => bridge.push(null));
+      if (plain.length > 36) bridge.push(plain.subarray(36));
+      const secure = new tls.TLSSocket(bridge, { isServer: true, key: identity.key, cert: identity.cert });
+      secure.on("error", () => socket.destroy());
+      let inbound = Buffer.alloc(0);
+      secure.on("data", (data: Buffer) => {
+        inbound = Buffer.concat([inbound, data]);
+        while (inbound.length >= 4) {
+          const length = inbound.readUIntLE(0, 3);
+          if (inbound.length < 4 + length) break;
+          const sequence = inbound[3];
+          const command = inbound[4];
+          inbound = inbound.subarray(4 + length);
+          if (sequence === 2) secure.write(mysqlPacket(3, accepted));
+          else if (command === 0x01) secure.end();
+          else secure.write(mysqlPacket(sequence + 1, refusedStatement));
+        }
+      });
+    };
+    socket.on("data", onPlain);
+  });
+  return listen(server, sockets);
+}
+
+/** A TLS server that answers the preflight's read-only Redis commands with empty results. */
+async function fakeRedisTlsServer(identity: Identity): Promise<FakeServer & { commands: string[] }> {
+  const commands: string[] = [];
+  const sockets = new Set<net.Socket>();
+  const reply = (command: string, args: string[]) => {
+    switch (command) {
+      case "PING":
+        return "+PONG\r\n";
+      case "AUTH":
+      case "SELECT":
+      case "QUIT":
+        return "+OK\r\n";
+      case "GET":
+        return "$-1\r\n";
+      case "LRANGE":
+      case "ZRANGE":
+        return "*0\r\n";
+      case "HMGET":
+        return `*${args.length - 1}\r\n${"$-1\r\n".repeat(args.length - 1)}`;
+      case "SCAN":
+        return "*2\r\n$1\r\n0\r\n*0\r\n";
+      default:
+        return ":0\r\n";
     }
-  }, ceilingFor(5));
+  };
+  const server = tls.createServer({ key: identity.key, cert: identity.cert }, (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+    let buffer = Buffer.alloc(0);
+    socket.on("data", (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      for (;;) {
+        // One RESP array of bulk strings: *N, then $len and the bytes, N times.
+        let at = 0;
+        const line = () => {
+          const end = buffer.indexOf("\r\n", at);
+          if (end < 0) return null;
+          const text = buffer.toString("utf8", at, end);
+          at = end + 2;
+          return text;
+        };
+        const head = line();
+        if (head === null || !head.startsWith("*")) return;
+        const args: string[] = [];
+        for (let k = 0; k < Number(head.slice(1)); k += 1) {
+          const size = line();
+          if (size === null) return;
+          const length = Number(size.slice(1));
+          if (buffer.length < at + length + 2) return;
+          args.push(buffer.toString("utf8", at, at + length));
+          at += length + 2;
+        }
+        buffer = buffer.subarray(at);
+        const command = String(args[0]).toUpperCase();
+        commands.push(command);
+        socket.write(reply(command, args.slice(1)));
+      }
+    });
+  });
+  server.on("tlsClientError", () => {});
+  return { ...(await listen(server, sockets)), commands };
+}
+
+describe("when the database or Redis is reached over TLS", () => {
+  let pki: Pki;
+  beforeAll(() => {
+    pki = makePki();
+  });
+  afterAll(() => {
+    if (pki) rmSync(pki.dir, { recursive: true, force: true });
+  });
+  const withCa = (port: number, setting: Record<string, unknown> = {}) =>
+    `mysql://u:p@localhost:${port}/x?ssl=${encodeURIComponent(JSON.stringify({ ca: pki.caPem, ...setting }))}`;
+
+  it("should connect to a database whose certificate is trusted and names the host, over a verified socket", async () => {
+    const server = await fakeMysqlServer(pki.localhost);
+    try {
+      const db = await openDatabase(planDatabaseRoute(withCa(server.port)), REPO);
+      expect(db.error).toBeUndefined();
+      await db.close();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it.each([
+    ["an untrusted issuer", (p: Pki) => p.selfSigned, {}, "tls_certificate_refused"],
+    ["a trusted certificate for another name", (p: Pki) => p.otherName, {}, "tls_hostname_refused"],
+    // The URL switches the certificate check off; the preflight checks anyway.
+    ["an untrusted issuer, with the URL's checks off", (p: Pki) => p.selfSigned, { rejectUnauthorized: false }, "tls_certificate_refused"],
+  ] as const)("should refuse a database with %s", async (_label, pick, setting, code) => {
+    const server = await fakeMysqlServer(pick(pki));
+    try {
+      expect(await openDatabase(planDatabaseRoute(withCa(server.port, setting)), REPO)).toEqual({ error: code });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("should refuse a database that offers no TLS", async () => {
+    const server = await fakeMysqlServer(null);
+    try {
+      expect(await openDatabase(planDatabaseRoute(withCa(server.port)), REPO)).toEqual({ error: "tls_unavailable" });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("should confirm verified TLS on both routes in its report, as labels only", async () => {
+    const database = await fakeMysqlServer(pki.localhost);
+    const redis = await fakeRedisTlsServer(pki.localhost);
+    try {
+      const result = await runScript([...identityArgs(), "--samples", "1"], {
+        ...identityVars(),
+        // No TLS setting in the URL: the preflight asks for it, and verifies.
+        DATABASE_URL: `mysql://sentinel:Sentinel-Pass@localhost:${database.port}/x`,
+        REDIS_URL: `rediss://:Sentinel-Pass@localhost:${redis.port}`,
+        NODE_EXTRA_CA_CERTS: pki.caFile,
+      });
+      expect(result.code, result.stdout).toBe(EXIT.report);
+      expect(field(result.report, "read_only_controls")).toMatchObject({
+        database_route: "tls_verified_identity",
+        database_connection: "ok",
+        redis_route: "tls_verified",
+        redis_connection: "ok",
+      });
+      expect(field(result.report, "deployment", "application", "database_tls")).toBe("not_requested");
+      expect(field(result.report, "samples", 0, "redis", "queues", "webhook-delivery")).toMatchObject({ reading: "ok", runnable: 0 });
+      expect(field(result.report, "samples", 0, "redis", "unknown_queues")).toMatchObject({ reading: "ok", scan_complete: true });
+      // The fake database refuses every statement, so the evidence is incomplete.
+      expect(result.verdict).toBe("no_go_incomplete_evidence");
+      // The session: AUTH for the URL's password, the guarded reads, QUIT. No CLIENT SETINFO.
+      expect(redis.commands.length).toBeGreaterThan(QUEUE_NAMES.length);
+      expect(new Set(redis.commands)).toEqual(new Set(["AUTH", "PING", "LLEN", "ZCARD", "SCARD", "HEXISTS", "GET", "LRANGE", "ZRANGE", "SCAN", "QUIT"]));
+      for (const text of ["localhost", "Sentinel", "sentinel"]) expect(result.stdout + result.stderr).not.toContain(text);
+    } finally {
+      await database.close();
+      await redis.close();
+    }
+  }, ceilingFor(1));
+
+  it.each([
+    ["for another name", (p: Pki) => p.otherName, "tls_hostname_refused"],
+    ["from an untrusted issuer", (p: Pki) => p.selfSigned, "tls_certificate_refused"],
+  ] as const)("should refuse Redis presenting a certificate %s", async (_label, pick, code) => {
+    const redis = await fakeRedisTlsServer(pick(pki));
+    try {
+      const result = await runScript([...identityArgs(), "--samples", "1"], {
+        ...identityVars(),
+        REDIS_URL: `rediss://localhost:${redis.port}`,
+        NODE_EXTRA_CA_CERTS: pki.caFile,
+      });
+      expect(field(result.report, "read_only_controls", "redis_connection")).toBe(code);
+      expect(redis.commands).toEqual([]);
+    } finally {
+      await redis.close();
+    }
+  }, ceilingFor(1));
 });
 
 // ─── Database: disposable databases copied from the real schema ─────────────
@@ -761,6 +1727,9 @@ const CONTROLS: Record<Engine["name"], Record<string, unknown>> = {
   TiDB: { engine: "tidb", snapshot: "consistent_snapshot", database_write_prevention: "statement_guard_only" },
 };
 
+/** The run's variables for a fixture database, with the identity that passes the fence. */
+const onDatabase = (url: string, extra: Record<string, string> = {}) => ({ ...identityVars(), DATABASE_URL: url, ...extra });
+
 for (const engine of ENGINES) {
   describe.runIf(engine.enabled)(`when the script reads a ${engine.name} database copied from the real schema`, () => {
     let admin: mysql.Connection;
@@ -808,8 +1777,8 @@ for (const engine of ENGINES) {
       expect(Object.keys(EXPECTED).sort()).toEqual(DB_SURFACES.map((s) => s.id).sort());
       const target = disposable(seeded);
       const before = await tableDigests(admin, target.name);
-      const result = await runScript(["--samples", "1"], { DATABASE_URL: target.url });
-      expect(result.code, result.stdout).toBe(0);
+      const result = await runScript([...identityArgs(), "--samples", "1"], onDatabase(target.url));
+      expect(result.code, result.stdout).toBe(EXIT.report);
       for (const surface of DB_SURFACES) {
         expect(field(result.report, "samples", 0, "database", "surfaces", surface.id), surface.id).toMatchObject({ reading: "ok", count: EXPECTED[surface.id] });
       }
@@ -824,8 +1793,9 @@ for (const engine of ENGINES) {
     }, ceilingFor(1));
 
     it("should read one snapshot, and claim no write control but its statement guard", async () => {
-      const result = await runScript(["--samples", "1"], { DATABASE_URL: disposable(empty).url });
+      const result = await runScript([...identityArgs(), "--samples", "1"], onDatabase(disposable(empty).url));
       expect(field(result.report, "read_only_controls")).toMatchObject({
+        database_route: "local_loopback",
         database_connection: "ok",
         session_time_zone_utc: true,
         ...CONTROLS[engine.name],
@@ -840,7 +1810,7 @@ for (const engine of ENGINES) {
       const target = disposable(empty);
       const uploads = DB_SURFACES.find((s) => s.id === "upload_batches.in_progress");
       if (!uploads) throw new Error("surface_missing");
-      const db = await openDatabase(target.url, REPO);
+      const db = await openDatabase(planDatabaseRoute(target.url), REPO);
       try {
         await db.beginSnapshot();
         await insertRows(admin, target.name, "upload_batches", [{ status: "pending" }]);
@@ -858,7 +1828,7 @@ for (const engine of ENGINES) {
     });
 
     it("should refuse a write through its own connection, inside its snapshot", async () => {
-      const db = await openDatabase(disposable(empty).url, REPO);
+      const db = await openDatabase(planDatabaseRoute(disposable(empty).url), REPO);
       try {
         await db.beginSnapshot();
         expect(db.controls?.snapshot).toBe("consistent_snapshot");
@@ -872,10 +1842,19 @@ for (const engine of ENGINES) {
       expect(Number(rows.n)).toBe(0);
     });
 
+    it.runIf(engine.name === "MySQL")("should refuse the fixture by name: TLS is required, and its certificate is not trusted", async () => {
+      // The same server, named instead of addressed: off the loopback address
+      // the preflight insists on a verified certificate, which MySQL's own
+      // generated one is not.
+      const byName = new URL(disposable(empty).url);
+      byName.hostname = "localhost";
+      expect(await openDatabase(planDatabaseRoute(byName.toString()), REPO)).toEqual({ error: "tls_certificate_refused" });
+    });
+
     it.runIf(engine.name === "MySQL")("should finish with fixed codes when its connection is killed between samples", async () => {
       const target = disposable(empty);
       let killed: Promise<unknown> | undefined;
-      const result = await runScript(["--samples", "2", "--interval-seconds", "3"], { DATABASE_URL: target.url }, (line) => {
+      const result = await runScript([...identityArgs(), "--samples", "2", "--interval-seconds", "3"], onDatabase(target.url), (line) => {
         if (line.includes("sample 1/2 complete") && !killed) {
           killed = admin
             .query<mysql.RowDataPacket[]>("SELECT ID AS id FROM information_schema.PROCESSLIST WHERE DB = ? AND ID <> CONNECTION_ID()", [target.name])
@@ -884,7 +1863,7 @@ for (const engine of ENGINES) {
       });
       expect(killed).toBeDefined();
       await killed;
-      expect(result.code, result.stdout).toBe(0);
+      expect(result.code, result.stdout).toBe(EXIT.report);
       expect(field(result.report, "samples", 1, "database", "surfaces", "upload_batches.in_progress")).toEqual({ reading: "unknown", error: "unreachable" });
       expect(result.verdict).toBe("no_go_incomplete_evidence");
       expect(() => assertAggregateOnly(result.report)).not.toThrow();
@@ -893,7 +1872,7 @@ for (const engine of ENGINES) {
     it("should report producers as active when work arrives between samples", async () => {
       const target = disposable(empty);
       let inserted: Promise<void> | undefined;
-      const result = await runScript(["--samples", "2", "--interval-seconds", "2"], { DATABASE_URL: target.url }, (line) => {
+      const result = await runScript([...identityArgs(), "--samples", "2", "--interval-seconds", "2"], onDatabase(target.url), (line) => {
         if (line.includes("sample 1/2 complete") && !inserted) {
           inserted = insertRows(admin, target.name, "sl_connector_webhook_events", [{ status: "processed", receivedAt: now() }]);
         }
@@ -1034,11 +2013,12 @@ describe.skipIf(!fixtureUrl)("when the script reads queues on a disposable Redis
     for (const queue of [recon, delivery, privacy, realtime, legacy]) await queue.close();
 
     const before = await fingerprint();
-    const result = await runScript(["--samples", "1"], { REDIS_URL: url });
+    const result = await runScript([...identityArgs(), "--samples", "1"], { ...identityVars(), REDIS_URL: url });
     expect(await fingerprint()).toEqual(before);
 
     const queue = (name: string) => field(result.report, "samples", 0, "redis", "queues", name);
-    expect(queue("reconciliation-runs")).toMatchObject({ reading: "ok", wait: 2, runnable: 2 });
+    expect(field(result.report, "read_only_controls", "redis_route")).toBe("local_loopback");
+    expect(queue("reconciliation-runs")).toMatchObject({ reading: "ok", wait: 2, runnable: 2, job_inspection: "complete" });
     expect(queue("webhook-delivery")).toMatchObject({ delayed: 2, runnable: 2, retrying_waiting_or_delayed: 1 });
     expect(queue("shopify-privacy")).toMatchObject({ prioritized: 1, runnable: 1 });
     expect(queue("shopline-realtime-sync")).toMatchObject({ active: 1, runnable: 1, active_without_live_lock: 1 });
@@ -1070,7 +2050,7 @@ describe.skipIf(!fixtureUrl || !localDatabase)("when the script reads an idle da
   });
 
   it("should still say only 'zero observed, not proof'", async () => {
-    const result = await runScript(["--samples", "2", "--interval-seconds", "1"], { DATABASE_URL: idleDb().url, REDIS_URL: redisIndex(10) });
+    const result = await runScript([...identityArgs(), "--samples", "2", "--interval-seconds", "1"], onDatabase(idleDb().url, { REDIS_URL: redisIndex(10) }));
     expect(field(result.report, "verdicts")).toMatchObject({
       reconciliation_unfinished: "pass_zero_observed",
       queues_runnable: "pass_zero_observed",
@@ -1083,7 +2063,7 @@ describe.skipIf(!fixtureUrl || !localDatabase)("when the script reads an idle da
   it("should say 'producers active' when work arrives between samples", async () => {
     const target = idleDb();
     let inserted: Promise<void> | undefined;
-    const result = await runScript(["--samples", "2", "--interval-seconds", "2"], { DATABASE_URL: target.url, REDIS_URL: redisIndex(10) }, (line) => {
+    const result = await runScript([...identityArgs(), "--samples", "2", "--interval-seconds", "2"], onDatabase(target.url, { REDIS_URL: redisIndex(10) }), (line) => {
       if (line.includes("sample 1/2 complete") && !inserted) {
         inserted = insertRows(admin, target.name, "transactions", [{ createdAt: now() }]);
       }
