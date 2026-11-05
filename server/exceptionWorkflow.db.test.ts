@@ -13,7 +13,6 @@
  *     exception never deadlock.
  */
 import { and, eq, inArray } from "drizzle-orm";
-import mysql from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   auditChainLocks,
@@ -25,6 +24,7 @@ import {
   users,
 } from "../drizzle/schema";
 import { getDb } from "./db";
+import { createAppPool } from "./dbSession";
 import { classifyDatabaseTarget } from "./dbTarget";
 import {
   approveExceptionWorkflowDecision,
@@ -119,9 +119,10 @@ describe.runIf(localDatabase)("when governed workflows run on a real database", 
     const exceptionId = await newException();
     // Connection A plays a Start mid-flight: it holds the exception's lock and
     // has inserted its workflow, but has not committed.
-    const starter = await mysql.createConnection({ uri: url });
+    // Its own session, from an app pool so it runs in UTC like every other.
+    const starterPool = createAppPool(url!).promise();
+    const starter = await starterPool.getConnection();
     try {
-      await starter.query("SET time_zone = '+00:00'");
       await starter.beginTransaction();
       await starter.query("SELECT id FROM exceptions WHERE id = ? FOR UPDATE", [exceptionId]);
       await starter.query(
@@ -139,7 +140,8 @@ describe.runIf(localDatabase)("when governed workflows run on a real database", 
       await starter.commit();
       expect(await legacy).toMatchObject({ code: "PRECONDITION_FAILED", message: expect.stringMatching(/governed workflow/) });
     } finally {
-      await starter.end();
+      starter.release();
+      await starterPool.end();
     }
     const [row] = await db.select({ status: exceptions.status }).from(exceptions).where(eq(exceptions.id, exceptionId));
     expect(row.status).toBe("open");

@@ -9,9 +9,10 @@
  */
 import { inArray } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import mysql from "mysql2/promise";
+import type { Pool } from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { slConnectorGdprRequests } from "../../../drizzle/connector_schema";
+import { createAppPool } from "../../dbSession";
 import { classifyDatabaseTarget } from "../../dbTarget";
 import { findOpenShoplineGdprRequests } from "./gdprDeadlines";
 
@@ -21,12 +22,13 @@ const DAY = 24 * 60 * 60_000;
 const NOW = new Date("2026-11-04T12:00:00.000Z");
 
 describe.runIf(localDatabase)("when open SHOPLINE GDPR requests are counted in MySQL", () => {
-  let pool: mysql.Pool;
+  let pool: Pool;
   let db: MySql2Database;
   const ids: number[] = [];
 
   beforeAll(async () => {
-    pool = mysql.createPool({ uri: url, timezone: "Z", connectionLimit: 1 });
+    // Built as production builds its pools: every session in UTC (CLAUDE.md §12).
+    pool = createAppPool(url!).promise();
     db = drizzle(pool);
   });
 
