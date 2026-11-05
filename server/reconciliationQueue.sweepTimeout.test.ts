@@ -331,6 +331,29 @@ describe("when an instance restarts with reconciliation runs retained in Redis",
     expect(state.createQueue).not.toHaveBeenCalled();
   });
 
+  it("should not cache a failed build, so a run created after a boot-time Redis failure still reaches the queue", async () => {
+    vi.stubEnv("REDIS_URL", "redis://synthetic.invalid:6379");
+    state.createQueue.mockRejectedValueOnce(new Error("synthetic redis not ready"));
+    state.createQueue.mockResolvedValueOnce(mockQueue("bullmq"));
+    const { enqueueReconciliationRun, startReconciliationWorker } = await import("./reconciliationQueue");
+    const run: ReconciliationRunPayload = {
+      jobId: 7,
+      sourceChannelId: 1,
+      targetChannelId: 2,
+      dateFromIso: "2026-11-01T00:00:00.000Z",
+      dateToIso: "2026-11-02T00:00:00.000Z",
+      config: { amountTolerance: 0, dateWindowDays: 1 },
+      userId: 3,
+    };
+
+    // Boot touches the queue first, now that this worker starts there.
+    await expect(startReconciliationWorker()).rejects.toThrow("synthetic redis not ready");
+    await enqueueReconciliationRun(run);
+
+    expect(state.createQueue).toHaveBeenCalledTimes(2);
+    expect(state.enqueue).toHaveBeenCalledWith("job-7", run);
+  });
+
   it("should be started by the server's boot sequence", () => {
     const boot = readFileSync(new URL("./_core/index.ts", import.meta.url), "utf8");
     const hook = boot.indexOf('.then((q) => q.startReconciliationWorker())');
