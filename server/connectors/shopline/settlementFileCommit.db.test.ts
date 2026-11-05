@@ -8,10 +8,11 @@
  */
 import { and, eq } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import mysql from "mysql2/promise";
+import type { Pool } from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { slConnectorStores } from "../../../drizzle/connector_schema";
 import { exceptions, transactions } from "../../../drizzle/schema";
+import { createAppPool } from "../../dbSession";
 import { classifyDatabaseTarget } from "../../dbTarget";
 import { commitShoplineSettlementFile } from "./settlementFileCommit";
 import { mapSettlementRows } from "./settlementFileImport";
@@ -20,7 +21,7 @@ const url = process.env.DATABASE_URL;
 const localDatabase = Boolean(url) && classifyDatabaseTarget(url).local;
 
 describe.runIf(localDatabase)("when a COD remittance arrives weeks after its order", () => {
-  let pool: mysql.Pool;
+  let pool: Pool;
   let db: MySql2Database;
   // Ids no real tenant uses, cleaned up after.
   const organizationId = 900_000_000 + Math.floor(Math.random() * 1_000_000);
@@ -29,7 +30,8 @@ describe.runIf(localDatabase)("when a COD remittance arrives weeks after its ord
   let storeId = 0;
 
   beforeAll(async () => {
-    pool = mysql.createPool({ uri: url, timezone: "Z", connectionLimit: 1 });
+    // Built as production builds its pools: every session in UTC (CLAUDE.md §12).
+    pool = createAppPool(url!).promise();
     db = drizzle(pool);
     const [store] = await db.insert(slConnectorStores).values({
       organizationId,

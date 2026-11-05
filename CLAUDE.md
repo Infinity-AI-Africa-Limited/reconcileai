@@ -1855,8 +1855,17 @@ pnpm db:migrate
 >
 > `createAppPool` (`server/dbSession.ts`) issues `SET time_zone = '+00:00'` as the
 > first statement on each new connection. **Every pool on `DATABASE_URL` must come
-> from it.** `server/dbSessionGate.test.ts` fails CI on a pool opened any other way;
-> its one exception is `woodcoreDb.ts`, Woodcore's own database.
+> from it, tests included.** `server/dbSessionGate.test.ts` fails CI on a pool opened
+> any other way, in server code or its tests. Until 2026-11-05 it skipped tests,
+> and six database tests had drifted onto raw sessions.
+>
+> - **Exceptions are listed in the gate with their reason.** `woodcoreDb.ts` is
+>   Woodcore's own database. `dbSession.db.test.ts` proves the pin, so it needs an
+>   unpinned session.
+> - **Statements that share session state need one connection.** A migration's
+>   `SET @var` and `PREPARE` are an example. Take one connection from the app pool
+>   with `getConnection()`. Never rely on `connectionLimit: 1`, which keeps the
+>   reliance hidden.
 
 > ⚠️ **Never run `pnpm db:push` against production.** It is
 > `drizzle-kit generate && drizzle-kit migrate` — the `generate` half writes a NEW

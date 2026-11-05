@@ -10,12 +10,13 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import mysql from "mysql2/promise";
+import type { Pool } from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { channels, exceptions, transactions, uploadBatches, users } from "../../../drizzle/schema";
 import { shopifyConnectorStores, shopifySyncCursors } from "../../../drizzle/shopify_schema";
+import { createAppPool } from "../../dbSession";
 import { classifyDatabaseTarget } from "../../dbTarget";
 import { shopifySettlementEvidenceChannelCode } from "./channelCodes";
 import type { NormalizedShopifyOrder, NormalizedShopifyRefund } from "./orders";
@@ -50,7 +51,7 @@ const order = (updatedAt: string, refunds: NormalizedShopifyRefund[], gid = GID)
 });
 
 describe.runIf(localDatabase)("when an order and its refunds are synced into MySQL", () => {
-  let pool: mysql.Pool;
+  let pool: Pool;
   let db: MySql2Database;
   // Ids no real tenant uses, cleaned up after.
   const organizationId = 900_000_000 + Math.floor(Math.random() * 1_000_000);
@@ -76,7 +77,8 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
       .orderBy(asc(transactions.shopifyRefundId));
 
   beforeAll(async () => {
-    pool = mysql.createPool({ uri: url, timezone: "Z", connectionLimit: 1 });
+    // Built as production builds its pools: every session in UTC (CLAUDE.md §12).
+    pool = createAppPool(url!).promise();
     db = drizzle(pool);
     const [user] = await db.insert(users).values({
       openId: `refund-sync-test-${organizationId}`,
@@ -363,15 +365,21 @@ describe.runIf(localDatabase)("when an order and its refunds are synced into MyS
         .filter(Boolean);
       const update = statements.at(-1)!;
       expect(update).toMatch(/^UPDATE `shopify_sync_cursors` SET .* WHERE `resource` = 'orders';$/);
-      for (const statement of statements.slice(0, -1)) await db.execute(sql.raw(statement));
-      await db.execute(
-        sql.raw(
+      // On ONE connection, as the runner applies it: the statements share session
+      // variables and a prepared statement, and a pool may hand each statement
+      // to a different connection.
+      const migration = await pool.getConnection();
+      try {
+        for (const statement of statements.slice(0, -1)) await migration.query(statement);
+        await migration.query(
           update.replace(
             /;$/,
             ` AND \`storeId\` = ${Number(storeId)} AND \`organizationId\` = ${Number(organizationId)};`,
           ),
-        ),
-      );
+        );
+      } finally {
+        migration.release();
+      }
 
       const owed = await cursorOf();
       expect(owed?.replay).toBeInstanceOf(Date);
