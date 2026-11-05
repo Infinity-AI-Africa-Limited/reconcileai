@@ -655,7 +655,12 @@ The rules now:
     §2C), so two of them cannot both pass the "already raised?" check.
   - Until 2026-10-27 only file-import runs checked at all. Every unscoped sync
     that re-read a window filed another copy of each exception. Production may
-    hold such duplicates: measure before assuming it does not.
+    hold such duplicates: measure before assuming it does not, with
+    `scripts/close-duplicate-retail-exceptions.ts` (#222). It only reads unless
+    given `--commit`, which dismisses untouched copies (it never deletes) and is
+    a production change needing the owner's approval. Run that no sooner than a
+    day after this deploys: until then syncs still file copies, and it refuses
+    while any copy it would dismiss is under 24 hours old.
 
 > ⏭ **Owed once, after this merges: re-read the October 2026 outage.** SHOPLINE
 > syncs failed from 2026-10-26 08:07 UTC until 2026-10-29, and the code running
