@@ -2322,6 +2322,9 @@ raise them proactively.
 **Added 2026-08-04:** a fourth item of a different kind — Tier A email inbound is
 code-complete but **not receiving mail**, deferred on cost. See §19.4.
 
+**Added 2026-11-04:** a fifth, and a hard blocker for the first real SHOPLINE
+merchant — SHOPLINE `shop/redact` erases nothing. See §19.5.
+
 ### Trigger signals — if ANY of these appear, work through §19 first and report
 
 - The owner says "go live", "launch", "first customer", "first client", "onboard
@@ -2465,6 +2468,26 @@ subdomain as a **separate** domain entry, which needs **Resend Pro ($20/mo)**.
 > `unproven`**, and the Email Forwarding screen carries a banner saying exactly
 > that until step 5 above succeeds. Read the banner as the live status of this
 > item. The only thing that flips it is a row in `email_ingestion_logs`.
+
+### 19.5 SHOPLINE shop erasure — NOT BUILT (blocks the first real SHOPLINE merchant)
+
+SHOPLINE's `shop/redact` (sent about 48h after an uninstall) uninstalls the
+store and cancels its subscription, but **erases none of the shop's data**:
+its users, transactions, files, and its stored webhook payloads, which hold
+its customers' names and addresses. Shopify's equivalent is built
+(`connectors/shopify/shopRedaction.ts`); SHOPLINE's is not.
+
+**Since 2026-11-04 the gap is at least honest and visible:**
+- The request is recorded as `received` (open), not `completed`.
+- The owner is emailed on receipt, and again by every daily SHOPLINE batch
+  while any request is open (`connectors/shopline/gdprDeadlines.ts`).
+- Before that, such requests were recorded `completed` with a note claiming a
+  scheduled purge that did not exist.
+
+Design, open questions (a reinstall inside the 48h window; the dev tenant the
+reviewer link points at) and the read-only query for the falsely-completed
+rows: `docs/security/SHOPLINE_SHOP_ERASURE.md`. A request that arrives before
+the erasure ships must still be met within 30 days of receipt.
 
 ### Why these three and not a longer list
 

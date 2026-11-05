@@ -17,6 +17,7 @@ import { rewindCatchUp, runSyncCycle, SHOPLINE_BACKFILL_DAYS, type SyncReport } 
 import { listWebhooks, registerWebhook, type ShoplineApiOptions } from "./apiClient";
 import { getValidToken } from "./tokenStore";
 import { replayStalledWebhookEvents, type WebhookReplaySummary } from "./webhookHandler";
+import { reportOpenShoplineGdprRequests } from "./gdprDeadlines";
 import {
   SHOPLINE_BILLING_WEBHOOK_TOPICS,
   SHOPLINE_WEBHOOK_TOPICS,
@@ -413,6 +414,12 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
  */
 export async function handleShoplineDailyBatch(req: Request, res: Response): Promise<void> {
   const startedAt = Date.now();
+  // Open GDPR requests are re-reported every day until they are met. First, and
+  // whatever the stores' state: a shop/redact arrives after its store is
+  // uninstalled, so a batch with no active store is exactly when one is open.
+  // Background work: logged and emailed, never put in this response, which the
+  // scheduler prints to a public workflow log.
+  reportOpenShoplineGdprRequests();
   try {
     const stores = await getActiveStores();
     if (stores.length === 0) {
