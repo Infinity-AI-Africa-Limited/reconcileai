@@ -8,6 +8,7 @@
  *
  * All handlers follow the existing syncAuthorized(req) pattern.
  */
+import { randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
 import { eq, and } from "drizzle-orm";
 import { getDb } from "../../db";
@@ -25,6 +26,28 @@ import { loggableError } from "../../dbErrors";
 import { stackFrames, errorSummary } from "../../errorText";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Answer a scheduled run that failed outright.
+ *
+ * The scheduler prints this body into the Actions log, and the repository is
+ * public, so that log is too. Until 2026-10-28 the body also carried the
+ * error's stack frames: bundle paths, line numbers and dependency versions,
+ * published several times an hour during the database incident. The frames
+ * stay in the server log now, under the `errorId` the response carries, so a
+ * failed run is still traced in one search. stackFramesStayInLogs.test.ts keeps
+ * any response from carrying them again.
+ */
+function failScheduledRun(label: string, err: unknown, req: Request, res: Response): void {
+  const errorId = randomUUID();
+  console.error(`[${label}] fatal error (errorId ${errorId}):`, { ...loggableError(err), frames: stackFrames(err) });
+  res.status(500).json({
+    error: errorSummary(err),
+    errorId,
+    context: { url: req.url },
+    timestamp: new Date().toISOString(),
+  });
+}
 
 interface StoreRow {
   id: number;
@@ -187,13 +210,7 @@ export async function handleShoplineSyncCycle(req: Request, res: Response): Prom
       })),
     });
   } catch (err) {
-    console.error("[shoplineSyncCycle] fatal error:", { ...loggableError(err), frames: stackFrames(err) });
-    res.status(500).json({
-      error: errorSummary(err),
-      frames: stackFrames(err),
-      context: { url: req.url },
-      timestamp: new Date().toISOString(),
-    });
+    failScheduledRun("shoplineSyncCycle", err, req, res);
   }
 }
 
@@ -274,13 +291,7 @@ export async function handleShoplineDailyBatch(req: Request, res: Response): Pro
       })),
     });
   } catch (err) {
-    console.error("[shoplineDailyBatch] fatal error:", { ...loggableError(err), frames: stackFrames(err) });
-    res.status(500).json({
-      error: errorSummary(err),
-      frames: stackFrames(err),
-      context: { url: req.url },
-      timestamp: new Date().toISOString(),
-    });
+    failScheduledRun("shoplineDailyBatch", err, req, res);
   }
 }
 
@@ -396,12 +407,6 @@ export async function handleShoplineWebhookReconciler(
       results,
     });
   } catch (err) {
-    console.error("[shoplineWebhookReconciler] fatal error:", { ...loggableError(err), frames: stackFrames(err) });
-    res.status(500).json({
-      error: errorSummary(err),
-      frames: stackFrames(err),
-      context: { url: req.url },
-      timestamp: new Date().toISOString(),
-    });
+    failScheduledRun("shoplineWebhookReconciler", err, req, res);
   }
 }
