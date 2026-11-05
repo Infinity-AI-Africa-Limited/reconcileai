@@ -840,6 +840,16 @@ async function startServer(app: express.Express, server: Server) {
     .then((r) => r.startShoplineRealtimeWorker())
     .catch((e) => console.error("[boot] SHOPLINE realtime worker unavailable:", loggableError(e))));
 
+  // Outbound webhook deliveries and Shopify manual syncs retained in Redis
+  // through a restart resume now, not when the next one is dispatched or
+  // requested. Durable queues only; fire-and-forget, like the worker above.
+  runBackgroundWork(() => import("../webhookDelivery")
+    .then((m) => m.startWebhookDeliveryWorker())
+    .catch((e) => console.error("[boot] webhook delivery worker unavailable:", loggableError(e))));
+  runBackgroundWork(() => import("../connectors/shopify/syncQueue")
+    .then((m) => m.startShopifyManualSyncWorker())
+    .catch((e) => console.error("[boot] Shopify manual sync worker unavailable:", loggableError(e))));
+
   // Seed global default resolution templates (idempotent; fire-and-forget so a
   // DB hiccup never blocks startup or the healthcheck).
   runBackgroundWork(() => seedDefaultResolutionTemplates()
