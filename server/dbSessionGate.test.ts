@@ -42,18 +42,23 @@ function isGuardedModule(specifier: string): boolean {
 
 type Call = { file: string; line: number; callee: string; handedAppPool: boolean };
 
-/** Strip what changes an expression's type but not its value: `(x)`, `x as T`, `x!`, `x satisfies T`. */
+type Retyped = ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.SatisfiesExpression | ts.TypeAssertion;
+
+/** `(x)`, `x as T`, `x!`, `x satisfies T`, `<T>x`: the same value, or the same assignment target, retyped. */
+function isRetyped(node: ts.Node): node is Retyped {
+  return (
+    ts.isParenthesizedExpression(node) ||
+    ts.isAsExpression(node) ||
+    ts.isNonNullExpression(node) ||
+    ts.isSatisfiesExpression(node) ||
+    ts.isTypeAssertionExpression(node)
+  );
+}
+
+/** Strip every retyping, down to the expression underneath. */
 function unwrap(expression: ts.Expression): ts.Expression {
   let inner = expression;
-  while (
-    ts.isParenthesizedExpression(inner) ||
-    ts.isAsExpression(inner) ||
-    ts.isNonNullExpression(inner) ||
-    ts.isSatisfiesExpression(inner) ||
-    ts.isTypeAssertionExpression(inner)
-  ) {
-    inner = inner.expression;
-  }
+  while (isRetyped(inner)) inner = inner.expression;
   return inner;
 }
 
@@ -83,9 +88,10 @@ const ASSIGNS_RIGHT = new Set([
 /**
  * Every value each name is bound to anywhere in the file, by name. `null` is a
  * value this file does not show: a parameter, an import, a destructured or loop
- * variable, a computed assignment. A name counts as an app pool only if every
- * one of its values is an app-pool call, so a binding this misses could only
- * make it refuse, never accept.
+ * variable, a computed assignment, a change in place. A target is read through
+ * any retyping, so `(pool as Pool) = other` and `pool! = other` write pool. A
+ * name counts as an app pool only if every one of its values is an app-pool
+ * call, and a name with no value seen is refused.
  */
 function bindingsOf(source: ts.SourceFile): Map<string, Array<ts.Expression | null>> {
   const bindings = new Map<string, Array<ts.Expression | null>>();
@@ -98,7 +104,7 @@ function bindingsOf(source: ts.SourceFile): Map<string, Array<ts.Expression | nu
     else if (ts.isObjectLiteralExpression(target)) target.properties.forEach(bindUnseen);
     else if (ts.isShorthandPropertyAssignment(target)) bind(target.name.text, null);
     else if (ts.isPropertyAssignment(target)) bindUnseen(target.initializer);
-    else if (ts.isSpreadElement(target) || ts.isSpreadAssignment(target) || ts.isParenthesizedExpression(target)) bindUnseen(target.expression);
+    else if (ts.isSpreadElement(target) || ts.isSpreadAssignment(target) || isRetyped(target)) bindUnseen(target.expression);
     // A default inside a destructuring target: `[pool = fallback] = …`.
     else if (ts.isBinaryExpression(target)) bindUnseen(target.left);
   };
@@ -115,14 +121,25 @@ function bindingsOf(source: ts.SourceFile): Map<string, Array<ts.Expression | nu
       ts.isNamespaceImport(node) ||
       ts.isImportEqualsDeclaration(node) ||
       ts.isFunctionDeclaration(node) ||
-      ts.isClassDeclaration(node)
+      ts.isFunctionExpression(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node) ||
+      ts.isEnumDeclaration(node) ||
+      ts.isModuleDeclaration(node)
     ) {
       if (node.name) bindUnseen(node.name);
     } else if ((ts.isForOfStatement(node) || ts.isForInStatement(node)) && !ts.isVariableDeclarationList(node.initializer)) {
       bindUnseen(node.initializer);
     } else if (ts.isBinaryExpression(node) && isAssignment(node.operatorToken.kind)) {
-      if (ts.isIdentifier(node.left)) bind(node.left.text, ASSIGNS_RIGHT.has(node.operatorToken.kind) ? node.right : null);
-      else bindUnseen(node.left);
+      // A retyped target is the same variable: `(pool as Pool) = other` writes pool (Greptile, #223).
+      const target = unwrap(node.left);
+      if (ts.isIdentifier(target)) bind(target.text, ASSIGNS_RIGHT.has(node.operatorToken.kind) ? node.right : null);
+      else bindUnseen(target);
+    } else if (
+      (ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+      (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      bindUnseen(node.operand);
     }
     ts.forEachChild(node, visit);
   };
@@ -287,6 +304,7 @@ describe("when drizzle is handed a variable rather than the call", () => {
     ["a constant", "const pool = createAppPool(url);\ndrizzle(pool);"],
     ["a test's pool, assigned before its suite runs", "let pool: Pool;\nbeforeAll(() => {\n  pool = createAppPool(url!).promise();\n  db = drizzle(pool);\n});"],
     ["the promise API of the call", "drizzle(createAppPool(url).promise());"],
+    ["a variable assigned the call through a retyping", "let pool: Pool;\n(pool as unknown) = createAppPool(url);\ndrizzle(pool);"],
   ])("should accept %s that only ever holds an app pool", (_label, code) => {
     expect(drizzleWithoutAppPool(scan("fixture.ts", code))).toEqual([]);
   });
@@ -298,6 +316,13 @@ describe("when drizzle is handed a variable rather than the call", () => {
     ["is destructured", "const { pool } = holder;\ndrizzle(pool);"],
     ["is a loop variable", "const pool = createAppPool(url);\nfor (const pool of pools) drizzle(pool);"],
     ["is assigned through a destructuring", "let pool = createAppPool(url);\n[pool] = others;\ndrizzle(pool);"],
+    // Greptile, #223: a retyped target is still the same variable.
+    ["is overwritten through `as`", "let pool = createAppPool(url);\n(pool as Pool) = other;\ndrizzle(pool);"],
+    ["is overwritten through `!`", "let pool = createAppPool(url);\npool! = other;\ndrizzle(pool);"],
+    ["is overwritten through `<T>`", "let pool = createAppPool(url);\n(<Pool>pool) = other;\ndrizzle(pool);"],
+    ["is overwritten inside a retyped destructuring", "let pool = createAppPool(url);\n[(pool as Pool)] = others;\ndrizzle(pool);"],
+    ["is changed in place", "let pool = createAppPool(url);\npool++;\ndrizzle(pool);"],
+    ["is also a function expression's own name", "const pool = createAppPool(url);\nconst wrap = function pool() {\n  return drizzle(pool);\n};"],
     ["is never assigned here", "let pool: Pool;\ndrizzle(pool);"],
   ])("should refuse a name that %s", (_label, code) => {
     expect(drizzleWithoutAppPool(scan("fixture.ts", code))).toHaveLength(1);
