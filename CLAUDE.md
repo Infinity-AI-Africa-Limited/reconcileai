@@ -476,17 +476,20 @@ started its grace period.
   - The Shopify workspace erasure (`server/connectors/shopify/shopRedaction.ts`)
     deletes the ledger with the rest of a tenant.
   - **SHOPLINE's own `shop/redact` deletes nothing yet, this ledger included.**
-    `processGdprRequest` (`gdpr.ts`) marks the store uninstalled, cancels the
-    subscription, and records the request as `completed`. Its note says "data
-    scheduled for purge within retention window", but no code performs that
-    purge.
+    `processGdprRequest` (`gdpr.ts`) marks the store uninstalled and cancels the
+    subscription.
+    - Since #221 (2026-11-04) it records the request as `received`, which is
+      open, and the owner is emailed until the request is met (§19.5).
+    - Before #221 it recorded `completed`, with a note claiming a purge that no
+      code performs.
   - The same charge references already outlive it in
     `sl_connector_subscriptions.lastFailureReason` and in the stored
     `appsubscription/paid` payloads.
-  - The fix is a SHOPLINE shop-data erasure across every table that holds the
-    store's or the tenant's rows, plus a truthful audit row. It needs an owner
-    decision on whether our billing records are kept. Raised by Greptile on
-    PR #213.
+  - The fix is the SHOPLINE shop-data erasure designed in
+    `docs/security/SHOPLINE_SHOP_ERASURE.md`, across every table that holds the
+    store's or the tenant's rows. Whether our own billing records (this ledger
+    and `lastFailureReason`) are kept is an open owner decision there. Raised by
+    Greptile on PR #213.
 
 ### 2B.3 Verified API Specification (from public docs)
 
