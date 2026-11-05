@@ -228,41 +228,54 @@ describe("SHOPLINE triggerManualSync — Input Validation", () => {
  * fell outside every subsequent poll, permanently. The window is now driven by
  * the store's own watermark.
  */
-describe("SHOPLINE catchUpWindow", () => {
+describe("when the poll computes its next catch-up step", () => {
   const now = new Date("2026-08-01T12:00:00Z");
 
-  it("resumes from the last successful sync, with an overlap for the seam", async () => {
-    const { catchUpWindow } = await import("./connectors/shopline/scheduledSync");
-    const lastSync = new Date("2026-08-01T11:40:00Z");
-    const { from, to } = catchUpWindow(lastSync, now);
+  it("should resume from the watermark, with an overlap for the seam", async () => {
+    const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
+    const watermark = new Date("2026-08-01T11:40:00Z");
+    const { from, to } = catchUpStep(watermark, now);
     // 11:40 minus the 5-minute overlap.
     expect(from.toISOString()).toBe("2026-08-01T11:35:00.000Z");
-    expect(to).toBe(now);
+    expect(to).toEqual(now);
   });
 
-  it("recovers a record older than the old fixed 15-minute window", async () => {
-    const { catchUpWindow } = await import("./connectors/shopline/scheduledSync");
+  it("should recover a record older than the old fixed 15-minute window", async () => {
+    const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
     // Store last synced 3 hours ago; the missed order landed 2 hours ago.
-    const lastSync = new Date("2026-08-01T09:00:00Z");
+    const watermark = new Date("2026-08-01T09:00:00Z");
     const missedOrderAt = new Date("2026-08-01T10:00:00Z");
-    const { from, to } = catchUpWindow(lastSync, now);
+    const { from, to } = catchUpStep(watermark, now);
     expect(from.getTime()).toBeLessThan(missedOrderAt.getTime());
     expect(to.getTime()).toBeGreaterThan(missedOrderAt.getTime());
     // The old behaviour would have started at 11:45 and missed it entirely.
     expect(from.getTime()).toBeLessThan(now.getTime() - 15 * 60 * 1000);
   });
 
-  it("scans the full catch-up window when the store has never synced", async () => {
-    const { catchUpWindow } = await import("./connectors/shopline/scheduledSync");
-    const { from, to } = catchUpWindow(null, now);
+  it("should read the last day when the store has never synced", async () => {
+    const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
+    const { from, to } = catchUpStep(null, now);
     expect(from.toISOString()).toBe("2026-07-31T12:00:00.000Z"); // 24h back
-    expect(to).toBe(now);
+    expect(to).toEqual(now);
   });
 
-  it("caps the lookback so a long-dark store cannot trigger an unbounded scan", async () => {
-    const { catchUpWindow } = await import("./connectors/shopline/scheduledSync");
-    const lastSync = new Date("2026-06-01T00:00:00Z"); // two months stale
-    const { from } = catchUpWindow(lastSync, now);
-    expect(from.toISOString()).toBe("2026-07-31T12:00:00.000Z"); // clamped to 24h
+  it("should bound one step to a day, starting from the watermark rather than from now", async () => {
+    // A long-dark store must not trigger one unbounded scan, but must not lose
+    // its history either: until 2026-10-27 this clamped `from` to now - 24h,
+    // and everything older was never read. The poll walks such a store forward
+    // step by step (catchUpWalk.test.ts).
+    const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
+    const watermark = new Date("2026-06-01T00:00:00Z"); // two months stale
+    const { from, to } = catchUpStep(watermark, now);
+    expect(from.toISOString()).toBe("2026-05-31T23:55:00.000Z");
+    expect(to.toISOString()).toBe("2026-06-01T23:55:00.000Z");
+  });
+
+  it("should read a watermark ahead of this clock as current", async () => {
+    // Another instance's clock skew must not produce a window that ends before it starts.
+    const { catchUpStep } = await import("./connectors/shopline/scheduledSync");
+    const { from, to } = catchUpStep(new Date("2026-08-01T12:03:00Z"), now);
+    expect(from.toISOString()).toBe("2026-08-01T11:55:00.000Z");
+    expect(to).toEqual(now);
   });
 });

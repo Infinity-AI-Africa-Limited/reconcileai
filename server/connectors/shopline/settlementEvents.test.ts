@@ -185,15 +185,34 @@ describe("reconciling persisted data for a scope", () => {
     expect(fake.ops).toEqual([]);
   });
 
-  it("should keep an unscoped run (the SHOPLINE sync) exactly as it was", async () => {
+  it("should reconcile the whole window on an unscoped run (the SHOPLINE sync)", async () => {
     const fake = scriptedDb({ select: { transactions: [[order], [settlement]] } });
 
     const result = await runReconciliationOnPersistedData(fake.db as never, 42, 70, 80, from, to, "USD");
 
     expect(result.exceptionCount).toBe(3);
-    expect(fake.ops.filter((op) => op.table === "exceptions" && op.kind === "select")).toEqual([]);
     const legs = fake.ops.filter((op) => op.kind === "select" && op.table === "transactions");
     expect(legs[0]?.where?.params).not.toContain("ORD-1");
+  });
+
+  it("should raise nothing already raised on an unscoped run, a closed case included", async () => {
+    // Until 2026-10-27 only scoped runs checked. The sync re-reads windows it
+    // has read before (the poll's seam overlap; a realtime sync, the daily
+    // batch and "Sync Now" re-read the whole last day), so every one of those
+    // passes filed another copy of each exception. A re-read brings no new
+    // evidence, so a case a person resolved or dismissed counts too.
+    const fake = scriptedDb({
+      select: {
+        transactions: [[order], [settlement]],
+        exceptions: [[{ transactionId: 11, subCategory: "retail_settlement_shortfall" }]],
+      },
+    });
+
+    const result = await runReconciliationOnPersistedData(fake.db as never, 42, 70, 80, from, to, "USD");
+
+    expect(result.exceptionCount).toBe(2);
+    const lookup = fake.ops.find((op) => op.kind === "select" && op.table === "exceptions");
+    expect(lookup?.where?.params).toEqual([42, 11, 21, "open", "in_review", "escalated", "resolved", "dismissed"]);
   });
 });
 
