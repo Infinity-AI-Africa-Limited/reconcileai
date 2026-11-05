@@ -31,6 +31,7 @@ import {
 import { ENV } from "../../_core/env";
 import { verifyWebhookHmac } from "./signature";
 import { handleShoplineUninstall } from "./onboarding";
+import { reportOpenShoplineGdprRequests } from "./gdprDeadlines";
 import { loggableError } from "../../dbErrors";
 
 type Db = NonNullable<Awaited<ReturnType<typeof getDb>>>;
@@ -73,6 +74,8 @@ interface GdprPayload {
 
 export type GdprResult =
   | { status: "completed"; kind: GdprKind; recordsAffected: number }
+  /** Acknowledged and recorded, but the obligation is still open (see shop_redact). */
+  | { status: "received"; kind: GdprKind }
   | { status: "unresolved_store"; kind: GdprKind }
   | { status: "invalid_signature" };
 
@@ -151,7 +154,7 @@ async function recordRequest(
     topic: string;
     shopDomain: string | null;
     subjectHash: string | null;
-    status: "completed" | "unresolved_store" | "failed";
+    status: "received" | "completed" | "unresolved_store" | "failed";
     recordsAffected: number;
     note: string;
   },
@@ -190,25 +193,41 @@ export async function processGdprRequest(input: GdprRequestInput): Promise<GdprR
   const slStoreId = store?.id ?? null;
   const topicStr = input.topic || kind;
 
-  // Shop deletion — uninstall + retention countdown (same as merchants/redact).
+  // Shop deletion. The store is uninstalled and its subscription cancelled, but
+  // its data is NOT erased: SHOPLINE has no shop erasure yet (Shopify's lives in
+  // connectors/shopify/shopRedaction.ts). Until 2026-11-04 this was recorded as
+  // "completed", with a note that a purge was scheduled when none existed. It
+  // is recorded as `received` now: the open obligation it is. SHOPLINE expects
+  // the shop's data erased within 30 days, so the owner is emailed now and by
+  // every daily batch while it stays open (gdprDeadlines.ts). See
+  // docs/security/SHOPLINE_SHOP_ERASURE.md.
   if (kind === "shop_redact") {
     const subjectHash = shopDomain ? sha256(shopDomain) : null;
     if (shopDomain) await handleShoplineUninstall(shopDomain.replace(/\.myshopline\.com$/i, ""));
+    if (store) {
+      console.error("[shopline-gdpr] shop/redact received; the shop's data is NOT erased", {
+        code: "shopline_shop_redact_erasure_pending",
+        organizationId: orgId,
+        slStoreId,
+      });
+    }
     await recordRequest(db, {
       organizationId: orgId,
       slStoreId,
       topic: topicStr,
       shopDomain,
       subjectHash,
-      status: store ? "completed" : "unresolved_store",
+      status: store ? "received" : "unresolved_store",
       recordsAffected: 0,
       note: store
-        ? "Store marked uninstalled; data scheduled for purge within retention window."
+        ? "Store marked uninstalled and its subscription cancelled. Its data has NOT been erased: SHOPLINE shop erasure is not built yet (docs/security/SHOPLINE_SHOP_ERASURE.md). This stays open until it is, and must be met within 30 days of receipt."
         : "Shop not found (already offboarded).",
     });
-    return store
-      ? { status: "completed", kind, recordsAffected: 0 }
-      : { status: "unresolved_store", kind };
+    if (!store) return { status: "unresolved_store", kind };
+    // After the record, so the new request is counted. Not awaited: SHOPLINE
+    // only needs the ack, and an email must not hold it.
+    reportOpenShoplineGdprRequests();
+    return { status: "received", kind };
   }
 
   // Customer requests — resolve customer id (if any), hash it for the audit row.

@@ -4739,46 +4739,62 @@ Always be specific, reference actual exception IDs and amounts where available, 
         const drizzle = await getDb();
         if (!drizzle) throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: 'Database unavailable' });
 
-        // A linked exception must be THIS tenant's. It was read by id alone:
-        // another tenant's transaction counterparty was derived into this memory,
-        // and the foreign exception id stored beside it.
-        let linkedCounterparty: string | null = null;
-        if (input.exceptionId) {
-          const { exceptions: exTbl, transactions: txTbl } = await import("../drizzle/schema");
-          const [linked] = await drizzle
-            .select({ counterparty: txTbl.counterparty })
-            .from(exTbl)
-            .innerJoin(txTbl, eq(exTbl.transactionId, txTbl.id))
-            .where(and(eq(exTbl.id, input.exceptionId), eq(exTbl.organizationId, orgId)))
-            .limit(1);
-          if (!linked) throw new TRPCError({ code: 'NOT_FOUND', message: 'Exception not found' });
-          linkedCounterparty = linked.counterparty ?? null;
-        }
+        // One transaction, under the linked exception's row lock. Duplicate-
+        // exception maintenance (server/duplicateRetailExceptions.ts) never
+        // dismisses a copy with work linked to it, and checks that under this
+        // same lock: so a memory either commits before the check and is seen,
+        // or waits until the copy is settled (Greptile, #222). Only the
+        // exception row is locked, never its transaction: the sync locks
+        // transaction rows before exceptions, so taking both could deadlock.
+        const resolvedCounterpartyType = await drizzle.transaction(async (tx) => {
+          // A linked exception must be THIS tenant's. It was read by id alone:
+          // another tenant's transaction counterparty was derived into this memory,
+          // and the foreign exception id stored beside it.
+          let linkedCounterparty: string | null = null;
+          if (input.exceptionId) {
+            const { exceptions: exTbl, transactions: txTbl } = await import("../drizzle/schema");
+            await tx
+              .select({ id: exTbl.id })
+              .from(exTbl)
+              .where(and(eq(exTbl.id, input.exceptionId), eq(exTbl.organizationId, orgId)))
+              .limit(1)
+              .for("update");
+            const [linked] = await tx
+              .select({ counterparty: txTbl.counterparty })
+              .from(exTbl)
+              .innerJoin(txTbl, eq(exTbl.transactionId, txTbl.id))
+              .where(and(eq(exTbl.id, input.exceptionId), eq(exTbl.organizationId, orgId)))
+              .limit(1);
+            if (!linked) throw new TRPCError({ code: 'NOT_FOUND', message: 'Exception not found' });
+            linkedCounterparty = linked.counterparty ?? null;
+          }
 
-        // Derive the counterparty type from the linked exception's transaction when
-        // the caller does not supply it, so we never fall back to a hardcoded value.
-        let resolvedCounterpartyType = input.counterpartyType ?? null;
-        if (!resolvedCounterpartyType && linkedCounterparty) {
-          try {
-            const ei = await import("./exceptionIntelligence");
-            resolvedCounterpartyType = ei.counterpartyTypeOf(linkedCounterparty);
-          } catch { /* non-fatal: fall through to 'unknown' */ }
-        }
-        if (!resolvedCounterpartyType) resolvedCounterpartyType = 'unknown';
+          // Derive the counterparty type from the linked exception's transaction when
+          // the caller does not supply it, so we never fall back to a hardcoded value.
+          let counterpartyType = input.counterpartyType ?? null;
+          if (!counterpartyType && linkedCounterparty) {
+            try {
+              const ei = await import("./exceptionIntelligence");
+              counterpartyType = ei.counterpartyTypeOf(linkedCounterparty);
+            } catch { /* non-fatal: fall through to 'unknown' */ }
+          }
+          if (!counterpartyType) counterpartyType = 'unknown';
 
-        await drizzle.insert(agentMemory).values({
-          organizationId: orgId,
-          exceptionId: input.exceptionId,
-          exceptionCategory: input.exceptionCategory,
-          transactionRef: input.transactionRef,
-          amountRange: input.amountRange,
-          counterpartyType: resolvedCounterpartyType,
-          deductionType: input.deductionType,
-          resolution: input.resolution,
-          outcome: input.outcome,
-          reasoning: input.reasoning,
-          embeddingText: input.embeddingText,
-          resolvedBy: userId,
+          await tx.insert(agentMemory).values({
+            organizationId: orgId,
+            exceptionId: input.exceptionId,
+            exceptionCategory: input.exceptionCategory,
+            transactionRef: input.transactionRef,
+            amountRange: input.amountRange,
+            counterpartyType,
+            deductionType: input.deductionType,
+            resolution: input.resolution,
+            outcome: input.outcome,
+            reasoning: input.reasoning,
+            embeddingText: input.embeddingText,
+            resolvedBy: userId,
+          });
+          return counterpartyType;
         });
 
         // Exception Intelligence: record the anonymized pattern signature (coarse
