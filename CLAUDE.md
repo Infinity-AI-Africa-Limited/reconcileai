@@ -1033,8 +1033,12 @@ Containment is structural:
 
 The Partner Portal's notification page
 (https://developer.myshopline.com/notify/list) carries SHOPLINE's platform
-changes. Each one below was checked against the connector. None required a code
-change. Re-check this table when a new notice arrives, and add a row for it.
+changes. Each one below was checked against the connector and, on 2026-10-27,
+against the live Partner Portal configuration. The notices did not require an
+immediate source-code change, but the portal review found **legacy existing
+webhook subscriptions**. Do not confuse current code that creates versioned
+subscriptions with proof that already-created portal subscriptions have migrated.
+Re-check this table when a new notice arrives, and add a row for it.
 
 **What the connector depends on**, the surface a notice has to touch to matter:
 
@@ -1043,7 +1047,56 @@ change. Re-check this table when a new notice arrives, and add a row for it.
   Payments `/payments/store/{transactions,payouts,balance_transactions,balance}.json`.
 - **OAuth token create/refresh**, which are unversioned. Only `accessToken`,
   `expireTime` and `scope` are read.
-- **Webhook subscriptions**, created with `api_version: SHOPLINE_API_VERSION`.
+- **Webhook subscriptions**, which the current connector creates with
+  `api_version: SHOPLINE_API_VERSION`.
+  - **Live-portal exception:** the existing subscription inventory is presented by
+    SHOPLINE's pre-`v20240601` legacy page, which explicitly says configuration
+    should move to OpenAPI for compatibility. It lists application lifecycle,
+    billing, order, payment and refund topics but provides no selected event-
+    version field. Treat it as a controlled migration requirement, not an
+    emergency delete/recreate task.
+  - **Freeze condition:** the Portal's seven-day delivery dashboard reported a
+    12.281% failed-delivery rate during the October 2026 database outage. That
+    outage's exit check passed on 2026-11-04 (#216); re-read the dashboard over a
+    clean post-recovery window. Do not **migrate** subscriptions until a clean
+    controlled development-store rehearsal has proved idempotent delivery and
+    processing. Migrating means editing or retiring the legacy page's
+    configuration, deleting or altering an existing subscription (its event
+    version included), or subscribing a topic outside the required list.
+  - **Exempt: restoring what SHOPLINE deleted.** `shoplineWebhookReconciler`
+    (every 6 hours on schedule, or dispatched by hand) registers only the
+    required topics (`SHOPLINE_WEBHOOK_TOPICS` + `SHOPLINE_BILLING_WEBHOOK_TOPICS`,
+    12 in all) missing from a store's `/webhooks.json` list, at the pinned version.
+    It never deletes or alters one. Its last green run before the outage
+    (2026-10-26 02:16 UTC) found both installed stores, `reconcileai` and
+    `slapptest`, holding all 12 with nothing missing. So a re-registration only
+    replaces a subscription SHOPLINE deleted, and adds no overlap. The replacement
+    is created at the pinned version, which is the migration's own target and may
+    differ from the deleted one's (see below). Holding it back would leave each
+    deleted topic dark, including the billing topics, which have no polling
+    backstop. The doc order could not hold it back anyway: the 6-hour schedule
+    runs it on its own once the database answers.
+  - **What the rehearsal must settle.** Since #213 the reconciler reports each
+    subscription `/webhooks.json` lists, with its topic and API version
+    (`subscriptions`, `apiVersions`). A version other than the pinned one was
+    created somewhere else. But a subscription that exists only in the legacy
+    page may not be listed at all. So it is still **not known** whether that page
+    shows those same 12 or a second, parallel set.
+    - *If they are the same 12,* a replacement changes that topic's event version.
+      Order topics do not feel it: `scheduleReconciliation` takes only the
+      organisation, store and topic, and the sync it schedules pulls through the
+      API at the pinned version. The billing handler parses the payload, so the
+      rehearsal must see each billing topic parse after a replacement.
+    - *If they are a parallel set,* one event arrives twice under two
+      `X-Shopline-Webhook-Id`s, and deduplication is keyed on that id alone. Order
+      topics tolerate that, for the same reason. Since #213,
+      `appsubscription/paid` does too. It is applied once per charge
+      (`bizOrderNo`), so a failed charge counts once toward `past_due`, however
+      often it arrives. `appsubscription/create` and `/expiration` are not yet
+      idempotent across subscriptions (§2B.2), so the rehearsal must check what a
+      second delivery of each does.
+
+    Prove whether the legacy configuration delivers before retiring anything.
 - `sl_connector_stores.apiVersion` is stored but **never used to build a
   request**. Do not start reading it without migrating every row.
 - **Nothing on storefronts:** no theme app extension, script tag or app embed,
@@ -1058,6 +1111,7 @@ change. Re-check this table when a new notice arrives, and add a row for it.
 | Storefront accessibility, by 2026-10-30 | **No** | ReconcileAI renders nothing on storefronts |
 | App extensions deletable only via CLI or support ticket | **No** | The app has no extensions |
 | Theme CLI ≥ 1.3.2 | **No** | No theme development |
+| Legacy application webhook configuration page | **Controlled follow-up** | Existing subscriptions are shown in SHOPLINE's pre-`v20240601` legacy interface. Both installed stores already list all 12 required topics through OpenAPI `/webhooks.json` (last checked 2026-10-26), so the open question is whether the legacy configuration is a second, parallel set. Inventory and minimise topics, prove delivery and deduplication in the development store, then retire legacy configuration only after an approved overlap and reconciliation window. No migration before that rehearsal; the reconciler's restoration of deleted topics is exempt (above). |
 
 ---
 
