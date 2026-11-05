@@ -9,9 +9,10 @@
  */
 import { inArray } from "drizzle-orm";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
-import mysql from "mysql2/promise";
+import type { Pool } from "mysql2/promise";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { shopifyPrivacyRequests } from "../../../drizzle/shopify_schema";
+import { createAppPool } from "../../dbSession";
 import { classifyDatabaseTarget } from "../../dbTarget";
 import { findShopifyPrivacyRequestsNeedingAttention, type ShopifyPrivacyAttentionGroup } from "./privacyDeadlines";
 
@@ -25,13 +26,14 @@ function tally(groups: ShopifyPrivacyAttentionGroup[]) {
 }
 
 describe.runIf(localDatabase)("when privacy requests are counted in MySQL", () => {
-  let pool: mysql.Pool;
+  let pool: Pool;
   let db: MySql2Database;
   const ids: number[] = [];
   const hash = (n: number) => `${"d".repeat(56)}${String(Math.floor(Math.random() * 1e8) + n).padStart(8, "0")}`;
 
   beforeAll(async () => {
-    pool = mysql.createPool({ uri: url, timezone: "Z", connectionLimit: 1 });
+    // Built as production builds its pools: every session in UTC (CLAUDE.md §12).
+    pool = createAppPool(url!).promise();
     db = drizzle(pool);
   });
 

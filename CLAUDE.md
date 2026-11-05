@@ -296,6 +296,20 @@ database) before their "already recorded?" check, and read under it. Two writers
 can no longer both pass the check and record one payment twice. No Redis is
 needed for this: the lock serialises every process and instance.
 
+**Reconciliation takes the same lock (since 2026-10-28).** Until then the API
+sync reconciled after its ingest lock was released, with plain reads. Two passes
+for one store could each read "not raised yet" and both file the same exception
+(Greptile, #209). Examples: a realtime sync beside the poll, or a sync beside a
+settlement file.
+
+Now every SHOPLINE pass goes through `reconcileStoreUnderLock`: one at a time
+per store, with locking reads.
+- **The lock is what `reconcileRace.db.test.ts` proves.** Without it, round 0
+  files two copies of one exception.
+- **The locking reads are for TiDB**, whose plain reads use the transaction's
+  start snapshot. MySQL, which CI runs, passes with or without them, so that test
+  cannot prove them.
+
 > ⚠️ **Until 2026-09-28 the dedupe claim was false.** The guard compared the
 > file's raw reference with the sanitised stored one (`#1001` is stored as
 > `1001`), so every re-upload of such a file was inserted again; and it keyed on
@@ -441,6 +455,56 @@ Two important details:
 - **SHOPLINE sends its own grace period** (`gracePeriod` + `gracePeriodUnit`);
   we honour it and fall back to our portal-configured 7 days when absent.
 
+**`appsubscription/paid` is idempotent per charge (`bizOrderNo`), not per
+delivery (since 2026-10-29).** Webhook dedupe keys on `X-Shopline-Webhook-Id`,
+and one charge arrives under several ids when two subscriptions cover the topic.
+Until then the 400 path added one to `failedBillingAttempts` per delivery, with
+no lock, so one failed charge delivered three times put a store `past_due` and
+started its grace period.
+
+- **The ledger:** `sl_connector_billing_charges`, unique on
+  `(slStoreId, bizOrderNo)`, records which outcomes of each charge have taken
+  effect.
+- **The lock:** every paid delivery is applied in ONE transaction that first
+  locks the store's subscription row. So two deliveries of one charge cannot
+  both count it, and two different charges cannot overwrite each other's count.
+- **The rules** (`handleSubscriptionPaid`, `billingWebhook.ts`):
+  - a failure counts once per charge, and never once that charge has succeeded
+    or been cancelled, so a re-delivered failure cannot re-open the count;
+  - a re-delivered success or cancellation changes nothing, so it cannot erase
+    a newer failure or cancel a store that has paid since;
+  - **a failure with no usable `bizOrderNo` is never counted.** It is recorded
+    in `lastFailureReason` and logged, because nothing tells it apart from a
+    re-delivery.
+- **Assumed, not proven:** that `bizOrderNo` names one charge attempt. If
+  SHOPLINE reuses it across retries of one renewal, those retries count once.
+  That under-counts, the safe direction, since SHOPLINE's own expiration
+  (`expireType` 3) still ends access. The development-store rehearsal should
+  confirm it.
+- **Not covered:** a failure delivered for the FIRST time after a later success,
+  for example retries arriving out of order after an outage, still counts. Only
+  a re-delivery is caught. `create` and `expiration` deliveries are not yet
+  idempotent across subscriptions either. Their payloads carry no charge id, so
+  each needs its own key.
+- **Erasure — an open compliance gap, wider than this ledger:**
+  - The Shopify workspace erasure (`server/connectors/shopify/shopRedaction.ts`)
+    deletes the ledger with the rest of a tenant.
+  - **SHOPLINE's own `shop/redact` deletes nothing yet, this ledger included.**
+    `processGdprRequest` (`gdpr.ts`) marks the store uninstalled and cancels the
+    subscription.
+    - Since #221 (2026-11-04) it records the request as `received`, which is
+      open, and the owner is emailed until the request is met (§19.5).
+    - Before #221 it recorded `completed`, with a note claiming a purge that no
+      code performs.
+  - The same charge references already outlive it in
+    `sl_connector_subscriptions.lastFailureReason` and in the stored
+    `appsubscription/paid` payloads.
+  - The fix is the SHOPLINE shop-data erasure designed in
+    `docs/security/SHOPLINE_SHOP_ERASURE.md`, across every table that holds the
+    store's or the tenant's rows. Whether our own billing records (this ledger
+    and `lastFailureReason`) are kept is an open owner decision there. Raised by
+    Greptile on PR #213.
+
 ### 2B.3 Verified API Specification (from public docs)
 
 The implementation is built against the SHOPLINE public developer documentation
@@ -511,13 +575,13 @@ The SHOPLINE connector follows the same pattern as `server/connectors/woodcore/`
 | `apiClient.ts` | Signed/Bearer REST client: version pinning, link-header pagination, 429 backoff (≤3 rps), `traceId` logging |
 | `ingest.ts` | Normalises SHOPLINE orders/payments/payouts → canonical `transactions` rows with `rawData` metadata contract |
 | `webhookHandler.ts` | Express receiver: raw-body HMAC verify → resolve store → dedupe on `X-Shopline-Webhook-Id` → persist → process inline → ack 200 |
-| `billingWebhook.ts` | Billing lifecycle: 5 topics → `sl_connector_subscriptions` state machine |
+| `billingWebhook.ts` | Billing lifecycle: the 3 `appsubscription/*` topics → `sl_connector_subscriptions` state machine; `paid` applied once per charge via `sl_connector_billing_charges` (§2B.2) |
 | `syncOrchestrator.ts` | Full sync cycle: fetch orders+payments+payouts → normalise → persist → run retail reconciliation engine → create exceptions |
 | `settlementSync.ts` | Settlement-specific sync: normalises settlement records and runs retail reconciliation |
 | `onboarding.ts` | Self-serve provisioning: creates org (segment `retail_commerce`), admin user, channels, connector rows, seeds templates |
 | `routes.ts` | Express routes: `/api/shopline/install`, `/api/shopline/callback`, `/api/webhooks/shopline`, GDPR endpoints |
 
-### 2B.5 Database Schema (4 new tables)
+### 2B.5 Database Schema (4 Phase 1 tables, plus the charge ledger)
 
 All tables are in `drizzle/connector_schema.ts`, prefixed `sl_connector_*`:
 
@@ -527,6 +591,7 @@ All tables are in `drizzle/connector_schema.ts`, prefixed `sl_connector_*`:
 | `sl_connector_tokens` | Encrypted OAuth tokens per store (AES-256-GCM, 10h TTL) | `tenant_required` |
 | `sl_connector_webhook_events` | Idempotent webhook event log (deduped on `webhookId`, DLQ linkage) | `tenant_required` |
 | `sl_connector_subscriptions` | Billing lifecycle state (planId, status, trial dates, billing attempts) | `tenant_required` |
+| `sl_connector_billing_charges` | One row per app-subscription charge (`bizOrderNo`): which outcomes took effect, and how often a delivery of it was processed (migration 0119, see §2B.2) | `tenant_required` |
 
 **Subscription statuses:** `trialing` → `active` → `past_due` → `expired` / `cancelled`
 
@@ -586,21 +651,76 @@ deliveries (SHOPLINE explicitly does not guarantee webhook delivery):
 
 | Handler | Interval | Purpose |
 |---|---|---|
-| 15-minute polling | Every 15 min | Catch-up for missed webhooks, since last watermark |
-| Daily batch sync | Once daily | Full reconciliation run across all active stores |
+| 15-minute polling | Every 15 min | Catch-up from each store's watermark to now, walking a long gap forward a day per step |
+| Daily batch sync | Once daily | Re-read of the last 24h for every active store. **Not** an outage catch-up |
 | Webhook subscription reconciler | Every 6 hours | Verify webhook subscriptions still active (SHOPLINE deletes after 19 failures) |
 
-> ⚠️ **The safety net reaches back 24 hours, no further** (found during the
-> October 2026 database outage; re-verified against the code 2026-11-04). The
-> catch-up window is capped at `MAX_CATCHUP_MS` (24h, `scheduledSync.ts`), and
-> the daily batch and "Sync Now" are fixed 24h windows too. The comment beside
-> `MAX_CATCHUP_MS` saying "the daily batch covers anything older" is false.
-> Payments and payouts have no webhook, and SHOPLINE retries an order webhook
-> for 48h only (§2B.3). So after any outage longer than 24 hours, SHOPLINE
-> records older than that are not guaranteed to arrive, and no current handler
-> backfills them: raise a backfill, do not assume the safety net covered it.
-> Shopify is not affected: its backstop syncs each store to now from its
-> watermark, in 7-day steps.
+**The catch-up watermark is `sl_connector_stores.syncedThroughAt`, not
+`lastSyncAt` (since 2026-10-27, migration 0118).** `lastSyncAt` is "the last sync
+that succeeded" and stays the display value.
+
+Until this change every success also wrote `lastSyncAt` as the wall clock, and
+the poll used it as "fetched through here". On top of that, the poll and the
+daily batch never read further back than 24 hours. So after an outage longer
+than a day, anything older than a day was never fetched:
+- every 24h sync (realtime, daily batch, "Sync Now") jumped the watermark past
+  the gap;
+- and the poll could not reach back for it anyway.
+
+The rules now:
+- **The watermark advances only across a window that starts at or before it,
+  and never backwards.** It is advanced by `recordSyncOutcome`, the only code
+  that moves it forward. Those 24h syncs still sync and reconcile; they just
+  cannot hide a gap.
+- **The poll walks a gap in steps of at most a day, each overlapping the last
+  by 5 minutes.**
+  - Every store's first step always runs.
+  - Further steps run while the poll is under a 60-second budget, which keeps
+    it inside the proxy's 100-second limit.
+  - A walk cut short resumes on the next poll.
+  - **A step fetches only its own window, but reconciles against the day before
+    it** (`stepReconcileOptions`). Every step except the last holds back its
+    final day's orders, so the next step judges them with their payments in
+    view.
+    - Without this, an order fetched near a step's end and its payment fetched by
+      the next step never shared a reconciliation. Both were raised as unmatched
+      (Greptile, #209).
+    - A poll step reconciles even when it fetched nothing new. Otherwise a
+      held-back order is never matched or raised.
+    - Proven on real MySQL in `catchUpSeam.db.test.ts`.
+- **To re-read data that older code skipped**, run `SHOPLINE scheduled sync`
+  manually: target `syncCycle`, with `catch_up_from` set to a UTC instant within
+  the last 90 days. `rewindCatchUp` moves every active store's watermark back to
+  that instant; it never moves one forward, and leaves never-synced stores
+  alone.
+- **Re-reading is safe.** Ingest skips records it already holds. Inline
+  reconciliation never raises an exception that is already raised for the same
+  transaction and category.
+  - **A sync's re-read also respects one a person resolved or dismissed.**
+    Closing an exception leaves its transaction `unmatched`, and a re-read brings
+    no new evidence. Raising it again would undo the decision on every later
+    pass.
+  - **A settlement file that names the order may raise it again.** The file is
+    new evidence; this is unchanged.
+  - **Concurrent passes are serialised per store** (`reconcileStoreUnderLock`,
+    §2C), so two of them cannot both pass the "already raised?" check.
+  - Until 2026-10-27 only file-import runs checked at all. Every unscoped sync
+    that re-read a window filed another copy of each exception. Production may
+    hold such duplicates: measure before assuming it does not, with
+    `scripts/close-duplicate-retail-exceptions.ts` (#222). It only reads unless
+    given `--commit`, which dismisses untouched copies (it never deletes) and is
+    a production change needing the owner's approval. Run that no sooner than a
+    day after this deploys: until then syncs still file copies, and it refuses
+    while any copy it would dismiss is under 24 hours old.
+
+> ⏭ **Owed once, after this merges: re-read the October 2026 outage.** SHOPLINE
+> syncs failed from 2026-10-26 08:07 UTC until 2026-10-29, and the code running
+> at recovery moved every store's watermark past the gap, which migration 0118
+> copies into `syncedThroughAt`. Run `SHOPLINE scheduled sync` with target
+> `syncCycle` and `catch_up_from` = `2026-10-26T02:35:00Z` (just before the last
+> green run, 02:40 UTC), then check each store's `steps` and `caughtUp`.
+> `catch_up_from` refuses anything over 90 days old, so this must happen
+> **before 2027-01-24**. Delete this note once it has run.
 
 ### 2B.8 Frontend Pages
 
@@ -1905,8 +2025,17 @@ pnpm db:migrate
 >
 > `createAppPool` (`server/dbSession.ts`) issues `SET time_zone = '+00:00'` as the
 > first statement on each new connection. **Every pool on `DATABASE_URL` must come
-> from it.** `server/dbSessionGate.test.ts` fails CI on a pool opened any other way;
-> its one exception is `woodcoreDb.ts`, Woodcore's own database.
+> from it, tests included.** `server/dbSessionGate.test.ts` fails CI on a pool opened
+> any other way, in server code or its tests. Until 2026-11-05 it skipped tests,
+> and six database tests had drifted onto raw sessions.
+>
+> - **Exceptions are listed in the gate with their reason.** `woodcoreDb.ts` is
+>   Woodcore's own database. `dbSession.db.test.ts` proves the pin, so it needs an
+>   unpinned session.
+> - **Statements that share session state need one connection.** A migration's
+>   `SET @var` and `PREPARE` are an example. Take one connection from the app pool
+>   with `getConnection()`. Never rely on `connectionLimit: 1`, which keeps the
+>   reliance hidden.
 
 > ⚠️ **Never run `pnpm db:push` against production.** It is
 > `drizzle-kit generate && drizzle-kit migrate` — the `generate` half writes a NEW

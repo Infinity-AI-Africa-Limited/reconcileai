@@ -129,15 +129,18 @@ tenant-configured and unguarded.
 
 ## 4. SHOPLINE connector tables (Phase 1, July 2026)
 
-Three new tables added in the SHOPLINE Phase 1 connector. All three are
-classified `tenant_required` — `organizationId NOT NULL` with an index,
-following the post-hardening standard for all connector tables.
+The SHOPLINE connector's tables. All but one are classified `tenant_required`
+(`organizationId NOT NULL`), the post-hardening standard for connector tables;
+`sl_connector_gdpr_requests` is nullable for the reason given in its row.
 
 | Table | Class | Notes |
 |---|---|---|
 | `sl_connector_stores` | `tenant_required` | One row per SHOPLINE merchant store, scoped to the org that installed the connector. |
 | `sl_connector_tokens` | `tenant_required` | Encrypted OAuth access/refresh tokens; FK to `sl_connector_stores` which is itself org-scoped. |
 | `sl_connector_webhook_events` | `tenant_required` | Idempotent webhook event log; scoped to the org that owns the store. |
+| `sl_connector_subscriptions` | `tenant_required` | App Store billing state per store, written by the `appsubscription/*` webhooks. (Added to this table 2026-10-29; classified in the ratchet since Phase 1.) |
+| `sl_connector_billing_charges` | `tenant_required` | One row per app-subscription charge (`bizOrderNo`), so a re-delivered charge changes the subscription once. Read and written only under the store's subscription row lock, by store and organisation. Erased with the tenant by shop redaction. |
+| `sl_connector_gdpr_requests` | `tenant_nullable` | SHOPLINE mandatory-compliance requests. A request can arrive for a shop no longer resolvable to a tenant, so `organizationId` is nullable; retained for audit. (Added to this table 2026-10-29; classified in the ratchet since Phase 1.) |
 
 ## 5. The ratchet rule (for every future PR)
 

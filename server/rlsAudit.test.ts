@@ -213,6 +213,9 @@ const CLASSIFICATION: Record<string, TenancyClass> = {
   // SHOPLINE retail connector — each row is scoped to an org (orgId NOT NULL)
   sl_connector_stores: "tenant_required",
   sl_connector_subscriptions: "tenant_required",
+  // One row per app-subscription charge, so a re-delivered charge changes the
+  // subscription once. Written only under the store's subscription row lock.
+  sl_connector_billing_charges: "tenant_required",
   sl_connector_tokens: "tenant_required",
   sl_connector_webhook_events: "tenant_required",
   // GDPR requests may arrive for a shop we can no longer resolve to a tenant
