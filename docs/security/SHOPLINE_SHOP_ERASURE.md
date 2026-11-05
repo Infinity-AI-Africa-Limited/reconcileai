@@ -51,10 +51,11 @@ it (`onboardShoplineMerchant`). So erasing a shop means erasing a tenant:
 - **The organisation and its users**, including the merchant's admin, whose
   email address is personal data.
 - **Connector rows**: `sl_connector_stores`, `sl_connector_tokens` (encrypted
-  OAuth tokens), `sl_connector_subscriptions`, `sl_connector_gdpr_requests`,
-  and `sl_connector_webhook_events`. Its `payloadJson` holds raw order payloads
-  with the merchant's customers' names, emails and addresses, so it is **the
-  most sensitive table here**.
+  OAuth tokens), `sl_connector_subscriptions`, the charge ledger
+  `sl_connector_billing_charges` (#213), `sl_connector_gdpr_requests`, and
+  `sl_connector_webhook_events`. That last table's `payloadJson` holds raw order
+  payloads with the merchant's customers' names, emails and addresses, so it
+  is **the most sensitive table here**.
 - **Reconciliation data**: channels, transactions (including imported
   settlement files), matches, exceptions, jobs, reports, upload batches,
   audit logs, `agentMemory`, resolution templates and reviewer links.
@@ -162,6 +163,14 @@ Reuse Shopify's guarded erasure; do not fork it.
    only five top-level fields plus `customer`. Check the full payload shape for
    other personal fields, such as the addresses inside `payment_details` and
    fulfilments, while doing this work.
+4. **Our own billing records.** The charge ledger and
+   `sl_connector_subscriptions.lastFailureReason` record what SHOPLINE charged
+   the merchant for our app, keyed by the store.
+   - Shopify's erasure deletes them with the tenant, and so would this design.
+   - If ReconcileAI must keep evidence of those charges, for example to answer
+     a billing dispute with SHOPLINE, the receipt is the place for it: charge
+     ids and outcomes, nothing that names the shop.
+   - **Owner decision**, raised by Greptile on #213.
 
 ## If a real `shop/redact` arrives before this ships
 
