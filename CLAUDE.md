@@ -106,6 +106,25 @@ WOODCORE_DB_PASSWORD=<set in environment>
 - `client/src/pages/WoodcorePOC.tsx` — Frontend POC dashboard
 - `server/routers.ts` — `woodcore.*` tRPC procedures (search for `woodcore: router({`)
 - The **connector** (separate from the POC engine) lives in `server/connectors/` and `server/routers/woodcoreConnector.ts` — see the model below.
+- `server/woodcoreSync.ts` — the live → `wc_*` mirror refresh, run daily by `.github/workflows/woodcore-sync.yml`
+
+**The mirror sync's job is green only when the sync worked (since 2026-10-28).**
+`POST /api/woodcore/sync` answers 202 and runs the sync in the background, so the job
+(`.github/scripts/woodcore-sync.sh`) polls `GET /api/woodcore/sync` until that run ends.
+- **It fails when:**
+  - the run reports an `error`, or any table has `status: "error"`;
+  - the run vanishes from the server (a restart loses the in-memory state);
+  - the status endpoint stops answering; or
+  - the run outlasts 50 minutes.
+- **A `skipped` table is only a warning.** It means Woodcore refused that one table, or
+  the table does not exist, and the mirror keeps its old rows.
+  - Any other probe failure, such as an unreachable host or a refused login, is an
+    `error` (`probeFailureStatus`).
+  - Until this change every probe failure was a skip, so a Woodcore that could not be
+    reached looked like a quiet day.
+- **The logs are public, and the job prints only names, statuses, counts and
+  `database error (CODE)` reasons.** A connection message can name a host.
+- `woodcoreSync.test.ts` beside the script runs the real script against a fake server.
 
 ### Connector-as-Onboarding-Channel Model (applies to ALL CBS connectors)
 
