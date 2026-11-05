@@ -1,7 +1,7 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "e026ad27-d213-460a-9fa9-6ea402ba3018",
+  "id": "44321253-ab1b-46b0-8af0-d6aa3c16c246",
   "prevId": "1bc23e34-2d73-4d7a-a497-e68b866e2831",
   "tables": {
     "agent_action_drafts": {
@@ -13177,113 +13177,6 @@
       "uniqueConstraints": {},
       "checkConstraint": {}
     },
-    "sl_connector_billing_charges": {
-      "name": "sl_connector_billing_charges",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "organizationId": {
-          "name": "organizationId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "slStoreId": {
-          "name": "slStoreId",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "bizOrderNo": {
-          "name": "bizOrderNo",
-          "type": "varchar(128)",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "failureCountedAt": {
-          "name": "failureCountedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "succeededAt": {
-          "name": "succeededAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "cancelledAt": {
-          "name": "cancelledAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "deliveries": {
-          "name": "deliveries",
-          "type": "int",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "createdAt": {
-          "name": "createdAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "(now())"
-        },
-        "updatedAt": {
-          "name": "updatedAt",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "onUpdate": true,
-          "default": "(now())"
-        }
-      },
-      "indexes": {
-        "idx_sl_billing_charge_store_order": {
-          "name": "idx_sl_billing_charge_store_order",
-          "columns": [
-            "slStoreId",
-            "bizOrderNo"
-          ],
-          "isUnique": true
-        },
-        "idx_sl_billing_charge_org": {
-          "name": "idx_sl_billing_charge_org",
-          "columns": [
-            "organizationId"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "sl_connector_billing_charges_id": {
-          "name": "sl_connector_billing_charges_id",
-          "columns": [
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraint": {}
-    },
     "sl_connector_gdpr_requests": {
       "name": "sl_connector_gdpr_requests",
       "columns": {
@@ -13502,6 +13395,13 @@
         },
         "lastSyncAt": {
           "name": "lastSyncAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "syncedThroughAt": {
+          "name": "syncedThroughAt",
           "type": "timestamp",
           "primaryKey": false,
           "notNull": false,

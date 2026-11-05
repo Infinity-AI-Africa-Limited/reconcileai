@@ -237,6 +237,20 @@ export const slConnectorStores = mysqlTable(
     uninstalledAt: timestamp("uninstalledAt"),
     /** Last SUCCESSFUL sync cycle. Stays NULL if every attempt has failed. */
     lastSyncAt: timestamp("lastSyncAt"),
+    /**
+     * The catch-up watermark: every order, payment and payout up to this instant
+     * has been fetched. NULL = never synced.
+     *
+     * Not lastSyncAt. A sync over the last 24 hours succeeding after a three-day
+     * outage is a successful sync, but it leaves two days unread; recording it as
+     * the watermark is what made those days unreachable.
+     *
+     * Two writers, both in server/connectors/shopline/syncOrchestrator.ts:
+     *   - `recordSyncOutcome` advances it, and only across a window that starts
+     *     at or before it;
+     *   - `rewindCatchUp` moves it back, and only on an operator's instruction.
+     */
+    syncedThroughAt: timestamp("syncedThroughAt"),
     /** Last sync ATTEMPT, success or failure — distinguishes "never ran" from "ran and failed". */
     lastSyncAttemptAt: timestamp("lastSyncAttemptAt"),
     /** Reason the last attempt failed; cleared on success. */

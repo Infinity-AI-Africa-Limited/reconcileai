@@ -296,6 +296,20 @@ database) before their "already recorded?" check, and read under it. Two writers
 can no longer both pass the check and record one payment twice. No Redis is
 needed for this: the lock serialises every process and instance.
 
+**Reconciliation takes the same lock (since 2026-10-28).** Until then the API
+sync reconciled after its ingest lock was released, with plain reads. Two passes
+for one store could each read "not raised yet" and both file the same exception
+(Greptile, #209). Examples: a realtime sync beside the poll, or a sync beside a
+settlement file.
+
+Now every SHOPLINE pass goes through `reconcileStoreUnderLock`: one at a time
+per store, with locking reads.
+- **The lock is what `reconcileRace.db.test.ts` proves.** Without it, round 0
+  files two copies of one exception.
+- **The locking reads are for TiDB**, whose plain reads use the transaction's
+  start snapshot. MySQL, which CI runs, passes with or without them, so that test
+  cannot prove them.
+
 > ⚠️ **Until 2026-09-28 the dedupe claim was false.** The guard compared the
 > file's raw reference with the sanitised stored one (`#1001` is stored as
 > `1001`), so every re-upload of such a file was inserted again; and it keyed on
@@ -637,21 +651,76 @@ deliveries (SHOPLINE explicitly does not guarantee webhook delivery):
 
 | Handler | Interval | Purpose |
 |---|---|---|
-| 15-minute polling | Every 15 min | Catch-up for missed webhooks, since last watermark |
-| Daily batch sync | Once daily | Full reconciliation run across all active stores |
+| 15-minute polling | Every 15 min | Catch-up from each store's watermark to now, walking a long gap forward a day per step |
+| Daily batch sync | Once daily | Re-read of the last 24h for every active store. **Not** an outage catch-up |
 | Webhook subscription reconciler | Every 6 hours | Verify webhook subscriptions still active (SHOPLINE deletes after 19 failures) |
 
-> ⚠️ **The safety net reaches back 24 hours, no further** (found during the
-> October 2026 database outage; re-verified against the code 2026-11-04). The
-> catch-up window is capped at `MAX_CATCHUP_MS` (24h, `scheduledSync.ts`), and
-> the daily batch and "Sync Now" are fixed 24h windows too. The comment beside
-> `MAX_CATCHUP_MS` saying "the daily batch covers anything older" is false.
-> Payments and payouts have no webhook, and SHOPLINE retries an order webhook
-> for 48h only (§2B.3). So after any outage longer than 24 hours, SHOPLINE
-> records older than that are not guaranteed to arrive, and no current handler
-> backfills them: raise a backfill, do not assume the safety net covered it.
-> Shopify is not affected: its backstop syncs each store to now from its
-> watermark, in 7-day steps.
+**The catch-up watermark is `sl_connector_stores.syncedThroughAt`, not
+`lastSyncAt` (since 2026-10-27, migration 0118).** `lastSyncAt` is "the last sync
+that succeeded" and stays the display value.
+
+Until this change every success also wrote `lastSyncAt` as the wall clock, and
+the poll used it as "fetched through here". On top of that, the poll and the
+daily batch never read further back than 24 hours. So after an outage longer
+than a day, anything older than a day was never fetched:
+- every 24h sync (realtime, daily batch, "Sync Now") jumped the watermark past
+  the gap;
+- and the poll could not reach back for it anyway.
+
+The rules now:
+- **The watermark advances only across a window that starts at or before it,
+  and never backwards.** It is advanced by `recordSyncOutcome`, the only code
+  that moves it forward. Those 24h syncs still sync and reconcile; they just
+  cannot hide a gap.
+- **The poll walks a gap in steps of at most a day, each overlapping the last
+  by 5 minutes.**
+  - Every store's first step always runs.
+  - Further steps run while the poll is under a 60-second budget, which keeps
+    it inside the proxy's 100-second limit.
+  - A walk cut short resumes on the next poll.
+  - **A step fetches only its own window, but reconciles against the day before
+    it** (`stepReconcileOptions`). Every step except the last holds back its
+    final day's orders, so the next step judges them with their payments in
+    view.
+    - Without this, an order fetched near a step's end and its payment fetched by
+      the next step never shared a reconciliation. Both were raised as unmatched
+      (Greptile, #209).
+    - A poll step reconciles even when it fetched nothing new. Otherwise a
+      held-back order is never matched or raised.
+    - Proven on real MySQL in `catchUpSeam.db.test.ts`.
+- **To re-read data that older code skipped**, run `SHOPLINE scheduled sync`
+  manually: target `syncCycle`, with `catch_up_from` set to a UTC instant within
+  the last 90 days. `rewindCatchUp` moves every active store's watermark back to
+  that instant; it never moves one forward, and leaves never-synced stores
+  alone.
+- **Re-reading is safe.** Ingest skips records it already holds. Inline
+  reconciliation never raises an exception that is already raised for the same
+  transaction and category.
+  - **A sync's re-read also respects one a person resolved or dismissed.**
+    Closing an exception leaves its transaction `unmatched`, and a re-read brings
+    no new evidence. Raising it again would undo the decision on every later
+    pass.
+  - **A settlement file that names the order may raise it again.** The file is
+    new evidence; this is unchanged.
+  - **Concurrent passes are serialised per store** (`reconcileStoreUnderLock`,
+    §2C), so two of them cannot both pass the "already raised?" check.
+  - Until 2026-10-27 only file-import runs checked at all. Every unscoped sync
+    that re-read a window filed another copy of each exception. Production may
+    hold such duplicates: measure before assuming it does not, with
+    `scripts/close-duplicate-retail-exceptions.ts` (#222). It only reads unless
+    given `--commit`, which dismisses untouched copies (it never deletes) and is
+    a production change needing the owner's approval. Run that no sooner than a
+    day after this deploys: until then syncs still file copies, and it refuses
+    while any copy it would dismiss is under 24 hours old.
+
+> ⏭ **Owed once, after this merges: re-read the October 2026 outage.** SHOPLINE
+> syncs failed from 2026-10-26 08:07 UTC until 2026-10-29, and the code running
+> at recovery moved every store's watermark past the gap, which migration 0118
+> copies into `syncedThroughAt`. Run `SHOPLINE scheduled sync` with target
+> `syncCycle` and `catch_up_from` = `2026-10-26T02:35:00Z` (just before the last
+> green run, 02:40 UTC), then check each store's `steps` and `caughtUp`.
+> `catch_up_from` refuses anything over 90 days old, so this must happen
+> **before 2027-01-24**. Delete this note once it has run.
 
 ### 2B.8 Frontend Pages
 
