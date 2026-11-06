@@ -171,11 +171,27 @@ describe("when responses are corrupted or contain unknown metadata", () => {
     expect(result.verdict).toBe("no_go_incomplete_evidence");
     expect(result.samples.every(s => s.redis.discovery === "incomplete")).toBe(true);
   });
-  it("should stop discovery at ten rounds and retain unknown evidence already found", async () => {
+  it("should stop discovery at its round limit and retain unknown evidence already found", async () => {
     const f = fixture(); f.scan.mockResolvedValue(["1", ["bull:hidden:meta"]]);
     const result = await observeDurableStores(f.deps);
-    expect(f.scan).toHaveBeenCalledTimes(30);
+    expect(f.scan).toHaveBeenCalledTimes(LIMITS.scanRounds * LIMITS.samples);
     expect(result.samples[0].redis).toMatchObject({ discovery: "incomplete", unknownQueues: 1 });
+  });
+  it("should finish discovery over the keyspace the app's own job retention allows", async () => {
+    // About 36,000 job keys (1,000 completed + 5,000 failed per queue, six
+    // queues) took 37 SCAN calls of COUNT 1000 on a real Redis 7.
+    const f = fixture();
+    let call = 0;
+    f.scan.mockImplementation(async () => {
+      call += 1;
+      const round = ((call - 1) % 37) + 1;
+      return round === 37 ? ["0", QUEUE_IDS.map(id => `bull:${id}:meta`)] : [String(round * 4096), []];
+    });
+    const result = await observeDurableStores(f.deps);
+    expect(f.scan).toHaveBeenCalledTimes(37 * LIMITS.samples);
+    expect(result.samples.every(s => s.redis.discovery === "complete" && s.redis.unknownQueues === 0)).toBe(true);
+    expect(result.verdict).toBe("zero_observed_not_proof");
+    expect(f.redisRead.mock.calls.length + f.scan.mock.calls.length).toBeLessThanOrEqual(LIMITS.redisCommands);
   });
   it("should block intake activity without treating it as unfinished work", async () => {
     const f = fixture();
@@ -314,7 +330,7 @@ describe("when the pinned finite catalogue is checked against the fresh source t
     expect(compileDatabaseQuery("session.rollback")).toBe("ROLLBACK");
     for (const q of QUEUE_IDS) for (const state of QUEUE_STATES) expect(compileRedisRead(`${q}.${state}`)).toEqual({
       command: ["wait", "paused", "active"].includes(state) ? "LLEN" : "ZCARD", args: [`bull:${q}:${state}`] });
-    expect(compileRedisScan("0")).toEqual({ command: "SCAN", args: ["0", "MATCH", "bull:*:meta", "COUNT", "100"] });
+    expect(compileRedisScan("0")).toEqual({ command: "SCAN", args: ["0", "MATCH", "bull:*:meta", "COUNT", "1000"] });
     expect(() => compileDatabaseQuery("SELECT COUNT(*) FROM users" as DatabaseQueryId)).toThrow("query_refused");
     expect(() => compileRedisRead("other.active" as RedisReadId)).toThrow("redis_read_refused");
     expect(() => compileRedisScan("0 MATCH *")).toThrow("redis_scan_refused");

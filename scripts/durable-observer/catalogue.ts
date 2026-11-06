@@ -82,10 +82,18 @@ export function compileRedisRead(id: RedisReadId): RedisCommand {
   if (!command) throw new Error("redis_read_refused");
   return command;
 }
+// Discovery must be able to finish on the keyspace the app itself retains:
+// every BullMQ queue keeps up to 1,000 completed and 5,000 failed jobs
+// (server/jobQueue.ts), about 36,000 job keys across the six queues. SCAN walks
+// the WHOLE keyspace whatever MATCH says, so 10 rounds of COUNT 100 (about 1,000
+// keys) could never finish there: measured 359 calls at 36,000 keys. COUNT 1000
+// finishes 36,000 keys in 37 calls and 96,000 in 96, so 100 rounds is the bound.
+// Replies hold only MATCHing meta keys, so a larger COUNT does not enlarge them.
+// redisCommands: per sample 48 state reads + 100 SCAN rounds, three samples.
 export const LIMITS = Object.freeze({
   samples: 3, intervalMs: 60_000, runMs: 300_000, queryMs: 1_500,
-  redisMs: 1_000, cleanupMs: 500, databaseCommands: 120, redisCommands: 180,
-  scanCount: 100, scanRounds: 10, scanKeysPerRead: 256,
+  redisMs: 1_000, cleanupMs: 500, databaseCommands: 120, redisCommands: 450,
+  scanCount: 1000, scanRounds: 100, scanKeysPerRead: 256,
   scanBytesPerRead: 32_768, keyLength: 256, unknownQueues: 128,
 });
 export function compileRedisScan(cursor: string): RedisCommand {
