@@ -20,7 +20,7 @@ The SQL catalogue is pinned to the reviewed source/schema. No user-selected tabl
 
 TiDB read-only transaction labels do not enforce read-only access. With an application identity, the honest protection label is `statement_guard_only`; fixed code is not a database permission boundary. Prefer an existing SELECT-restricted identity where available, subject to provider and owner approval. This operation does not create, rotate, widen or export an identity.
 
-Snapshot failure has no silent successful fallback. Failed rollback, timeout or uncertain cleanup invalidates the sample and requires disposal of the observer's own connection. Killing an observer connection does not prove other writers stopped. Redis discovery is capped and non-atomic. No reconnect, retry, queue construction, lock acquisition, enqueue or data cleanup is permitted in the future live job.
+Snapshot failure has no silent successful fallback. Failed rollback, timeout or uncertain cleanup invalidates the sample and requires disposal of the observer's own connection. Killing an observer connection does not prove other writers stopped. Redis discovery is capped and non-atomic. The cap is at most 100 `SCAN` calls of `COUNT 1000` per sample, which covers about 100,000 keys. That is enough for the keyspace the application itself retains: every queue keeps up to 1,000 completed and 5,000 failed jobs, about 36,000 job keys, which a real Redis 7 walked in 37 calls. The earlier cap of 10 calls of `COUNT 100` covered about 1,000 keys, so it could not finish on any Redis that had run more than about 150 jobs per queue. No reconnect, retry, queue construction, lock acquisition, enqueue or data cleanup is permitted in the future live job.
 
 ## Before any live adapter or launch
 
