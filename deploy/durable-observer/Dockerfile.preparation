@@ -1,0 +1,12 @@
+# PREPARATION ONLY. Never attach runtime references or deploy this as the app.
+# A reviewer must supply a verified digest-pinned Node image; no default tag.
+# Build context MUST be dist/durable-observer only, never the repository root.
+ARG VERIFIED_NODE_IMAGE
+FROM ${VERIFIED_NODE_IMAGE}
+WORKDIR /observer
+COPY --chown=node:node launch.mjs child.mjs screen.mjs manifest.json ./
+USER node
+ENV NODE_ENV=test
+ENTRYPOINT ["node", "--no-addons", "/observer/launch.mjs"]
+# Default refuses execution and exits; approved synthetic scenarios require an explicit argument.
+# No EXPOSE, server, cron, package install, application build or migration command.
