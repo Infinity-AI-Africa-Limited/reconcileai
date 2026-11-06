@@ -20,6 +20,8 @@
   "files": [
     ".github/scripts/startTestMysql.test.ts",
     "scripts/bootstrapAdminGuard.test.ts",
+    "scripts/controlled-preflight/controller.test.ts",
+    "scripts/controlled-preflight/report.test.ts",
     "scripts/closeDuplicateRetailExceptions.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
     "client/src/lib/exceptionWorkflowPresentation.test.ts",
