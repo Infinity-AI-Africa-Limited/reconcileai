@@ -244,4 +244,38 @@ describe.skipIf(!fixture)("when the finite harness supplies NEW committed-migrat
     expect(report.verdict).toBe("no_go_incomplete_evidence");
     expect(report.hold).toBe(true);
   }, 10_000);
+
+  it("should finish discovery on a real Redis holding as many job keys as the app's retention allows", async () => {
+    if (!fixture) throw new Error("loopback_fixture_refused");
+    // 1,000 completed + 5,000 failed jobs per queue (server/jobQueue.ts), six queues.
+    const jobs = 36_000;
+    const prefix = "bull:reconciliation-runs:synthetic-retained-";
+    const inspector = createFixtureRedisClient(fixture);
+    let setupStarted = false;
+    try {
+      await inspector.connect();
+      if ((await keys(inspector)).length !== 0) throw new Error("fixture_not_new_and_empty");
+      // Setup writes only: each known queue's meta key, and synthetic job-shaped hashes.
+      setupStarted = true;
+      for (const queue of QUEUE_IDS) await inspector.call("HSET", `bull:${queue}:meta`, "synthetic", "1");
+      await inspector.call("EVAL", "for i = 1, tonumber(ARGV[1]) do redis.call('HSET', ARGV[2] .. i, 'synthetic', '1') end return 1", "0", String(jobs), prefix);
+      expect(await inspector.call("DBSIZE")).toBe(jobs + QUEUE_IDS.length);
+      const report = await observe();
+      expect(report.hold).toBe(true);
+      expect(report.errors).not.toContain("redis_discovery_incomplete");
+      for (const sample of report.samples) expect(sample.redis).toMatchObject({ discovery: "complete", unknownQueues: 0 });
+      expect(report.verdict).toBe("zero_observed_not_proof");
+    } catch (error) {
+      if (error instanceof Error && error.name === "AssertionError") throw error;
+      if (error instanceof Error && (error.message.startsWith("fixture_") || error.message.startsWith("loopback_"))) throw error;
+      throw new Error("synthetic_catalogue_assertion_failed");
+    } finally {
+      // Only the seeded exact identities.
+      if (setupStarted) {
+        await inspector.call("EVAL", "for i = 1, tonumber(ARGV[1]) do redis.call('DEL', ARGV[2] .. i) end return 1", "0", String(jobs), prefix).catch(() => {});
+        for (const queue of QUEUE_IDS) await inspector.call("DEL", `bull:${queue}:meta`).catch(() => {});
+      }
+      inspector.disconnect(false);
+    }
+  }, 30_000);
 });
