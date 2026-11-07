@@ -56,6 +56,10 @@ export interface GithubDeploymentProjection {
   readonly id: string;
   readonly repo: string;
   readonly context: string;
+  /** Trusted projector must take the GitHub deployment's payload.environmentId;
+   * never derive this flat field from display context, manifest or caller claims.
+   */
+  readonly environmentId: string;
   readonly sha: string;
   readonly creator: string;
   readonly createdAt: string;
@@ -410,6 +414,8 @@ function snapshot(
 }
 /** Trusted projections must include complete capped histories and actual latest
  * GitHub status. No sorting/first-record shortcut or selection of a past success.
+ * Every relevant GitHub record must project payload.environmentId to the flat
+ * environmentId field; matching display context or caller claims cannot replace it.
  * Observation freshness is distinct from record age: an older active app is valid.
  */
 export function reduceDeploymentCorrelation(
@@ -446,6 +452,7 @@ export function reduceDeploymentCorrelation(
           "id",
           "repo",
           "context",
+          "environmentId",
           "sha",
           "creator",
           "createdAt",
@@ -455,9 +462,11 @@ export function reduceDeploymentCorrelation(
           matches(d.id, /^[1-9][0-9]{0,19}$/, 20) && !ids.has(d.id)
         );
         ids.add(d.id);
+        uuid(d.environmentId);
         requireEvidence(
           d.repo === m.sourceRepo &&
             d.context === m.githubContext &&
+            d.environmentId === m.environmentId &&
             matches(d.sha, SHA, 40) &&
             typeof d.creator === "string" &&
             d.creator.length > 0 &&
