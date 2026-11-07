@@ -27,7 +27,6 @@
     "scripts/durable-observer/binding.test.ts",
     "scripts/durable-observer/loopback.test.ts",
     "scripts/durable-observer/runtimeAdapters.test.ts",
-    "scripts/durable-observer/runtimeAdapters.loopback.test.ts",
     "scripts/durable-observer/platformIdentity.test.ts",
     "scripts/durable-observer/runtimePackaging.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
