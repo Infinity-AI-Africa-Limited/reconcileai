@@ -1,5 +1,5 @@
 import {
-  DB_SURFACES, INTAKE_SOURCES, QUEUE_IDS, QUEUE_STATES, LIMITS,
+  DB_SURFACES, INTAKE_SOURCES, QUEUE_IDS, QUEUE_STATES, RUNNABLE_STATES, LIMITS,
   type DatabaseQueryId, type RedisReadId, type QueueState,
 } from "./catalogue";
 import { NOT_COLLECTED, type ObserverErrorCode, type ObserverReport, type ObserverSample } from "./contracts";
@@ -32,6 +32,9 @@ export interface ObserverClock {
   wait(milliseconds: number, signal: AbortSignal): Promise<void>;
 }
 export interface ObserverDependencies { database: DatabaseReader; redis: RedisReader; clock: ObserverClock }
+
+/** Surfaces whose positive count is unfinished work. Parked ones wait on a person. */
+const BLOCKING_SURFACES: ReadonlySet<string> = new Set(DB_SURFACES.filter(s => s.kind !== "parked").map(s => s.id));
 
 function integer(value: unknown): number | null {
   if (typeof value === "string" && /^(0|[1-9][0-9]{0,15})$/.test(value)) value = Number(value);
@@ -219,10 +222,16 @@ export async function observeDurableStores(deps: ObserverDependencies): Promise<
       drop(connection);
     }
   }
-  // Deliberately stricter than the original: parked, failed and repeat entries
-  // also block this preparation report. No sums of overlapping populations.
-  const unfinished = samples.some(sample => sample.database.surfaces.some(s => s.count !== null && s.count > 0) ||
-    sample.redis.queues.some(q => QUEUE_STATES.some(s => (q.states[s] ?? 0) > 0)));
+  // Unfinished work is what is queued, running or due: the work surfaces (and
+  // their stale-heartbeat subset) and the runnable queue states. Parked items,
+  // failed jobs and repeat schedules are not running, so a replacement cannot
+  // cut them off, and BullMQ keeps up to 5,000 failed jobs per queue: counting
+  // them would pin this verdict for good. They stay in every sample's counts,
+  // for any operation that moves, freezes or wipes a store, where they matter.
+  // No sums of overlapping populations.
+  const unfinished = samples.some(sample =>
+    sample.database.surfaces.some(s => BLOCKING_SURFACES.has(s.id) && s.count !== null && s.count > 0) ||
+    sample.redis.queues.some(q => RUNNABLE_STATES.some(s => (q.states[s] ?? 0) > 0)));
   const incomplete = errors.size > 0 || samples.length !== LIMITS.samples || samples.some((sample, index) =>
     sample.database.snapshot !== "consistent_snapshot" || sample.database.cleanup !== "ok" ||
     sample.database.surfaces.some(s => s.count === null) || (index > 0 && sample.database.intake.some(s => s.count === null)) ||

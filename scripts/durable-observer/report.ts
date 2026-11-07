@@ -1,6 +1,6 @@
 import { types } from "node:util";
 import { ERROR_CODES, NOT_COLLECTED, type ObserverReport, type ObserverVerdict } from "./contracts";
-import { DB_SURFACES as SURFACES, INTAKE_SOURCES as INTAKE, QUEUE_IDS as QUEUES, QUEUE_STATES, LIMITS } from "./catalogue";
+import { DB_SURFACES as SURFACES, INTAKE_SOURCES as INTAKE, QUEUE_IDS as QUEUES, QUEUE_STATES, RUNNABLE_STATES, LIMITS } from "./catalogue";
 
 export const MAX_REPORT_BYTES = 131_072;
 export const MAX_REPORT_SAMPLES = LIMITS.samples;
@@ -8,6 +8,10 @@ export const REFUSED_REPORT = '{"schema":"reconcileai_durable_observer_v1","exec
 type Captured = null | boolean | number | string | Captured[] | { [key: string]: Captured };
 type RecordValue = { [key: string]: Captured };
 const refuse = (): never => { throw new Error("report_refused"); };
+// The same rule as the core: parked surfaces and failed/repeat queue entries
+// are reported, but are not unfinished work.
+const PARKED: ReadonlySet<string> = new Set(SURFACES.filter(surface => surface.kind === "parked").map(surface => surface.id));
+const RUNNABLE: ReadonlySet<string> = new Set(RUNNABLE_STATES);
 
 /** Never stringify caller objects or evaluate their getters/toJSON. Reject proxies
  * before reflection. Capture only own enumerable data descriptors with bounds. */
@@ -112,7 +116,7 @@ function rebuild(input: Captured): ObserverReport {
     if (snapshot !== "consistent_snapshot" || cleanup !== "ok") incomplete = true;
     const surfaces = coverage(database.surfaces, SURFACES.map(surface => surface.id), (entry, id) => {
       const row = record(entry, ["id", "count", "oldestAgeSeconds"]);
-      const observedCount = observe(row.count);
+      const observedCount = observe(row.count, !PARKED.has(id));
       const oldestAgeSeconds = count(row.oldestAgeSeconds);
       if (observedCount === 0 && oldestAgeSeconds !== null) return refuse();
       if (observedCount === null && oldestAgeSeconds !== null) return refuse();
@@ -135,7 +139,7 @@ function rebuild(input: Captured): ObserverReport {
     const queues = coverage(redis.queues, QUEUES, (entry, id) => {
       const row = record(entry, ["id", "states"]);
       const rawStates = record(row.states, QUEUE_STATES);
-      const states = Object.fromEntries(QUEUE_STATES.map(state => [state, observe(rawStates[state])])) as ObserverReport["samples"][number]["redis"]["queues"][number]["states"];
+      const states = Object.fromEntries(QUEUE_STATES.map(state => [state, observe(rawStates[state], RUNNABLE.has(state))])) as ObserverReport["samples"][number]["redis"]["queues"][number]["states"];
       return { id: choice(id, QUEUES), states };
     });
     const elapsedMs = count(sample.elapsedMs);

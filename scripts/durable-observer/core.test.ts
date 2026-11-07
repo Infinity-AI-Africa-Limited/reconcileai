@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import ts from "typescript";
 import {
-  DB_SURFACES, INTAKE_SOURCES, QUEUE_IDS, QUEUE_STATES, LIMITS,
+  DB_SURFACES, INTAKE_SOURCES, QUEUE_IDS, QUEUE_STATES, RUNNABLE_STATES, LIMITS,
   compileDatabaseQuery, compileRedisRead, compileRedisScan,
   type DatabaseQueryId, type RedisReadId,
 } from "./catalogue";
@@ -53,17 +53,40 @@ describe("when all fixed durable populations are observed as zero", () => {
 });
 
 describe("when any catalogued durable population is positive", () => {
-  it.each(DB_SURFACES.map(s => s.id))("should retain %s as a blocker, including parked subsets", async id => {
+  const onlySurface = (id: string) => {
     const f = fixture();
     f.databaseRead.mockImplementation(async query => query === id ? { count: "3", oldestAgeSeconds: "7" } :
       query.startsWith("session.") ? undefined : { count: 0, oldestAgeSeconds: null });
-    const result = await observeDurableStores(f.deps);
+    return f;
+  };
+  it.each(DB_SURFACES.filter(s => s.kind !== "parked").map(s => s.id))("should hold %s as unfinished work", async id => {
+    const result = await observeDurableStores(onlySurface(id).deps);
     expect(result.verdict).toBe("no_go_unfinished_work");
     expect(result.samples[0].database.surfaces.find(s => s.id === id)).toEqual({ id, count: 3, oldestAgeSeconds: 7 });
   });
-  it.each(QUEUE_STATES)("should retain Redis %s entries without assuming terminal work is safe", async state => {
+  // Parked items wait on a person; nothing in them is running. They are reported, and HOLD stays.
+  it.each(DB_SURFACES.filter(s => s.kind === "parked").map(s => s.id))("should report parked %s without calling it unfinished work", async id => {
+    const result = await observeDurableStores(onlySurface(id).deps);
+    expect(result).toMatchObject({ verdict: "zero_observed_not_proof", hold: true });
+    expect(result.samples.every(sample => sample.database.surfaces.find(s => s.id === id)?.count === 3)).toBe(true);
+  });
+  it.each(RUNNABLE_STATES)("should hold Redis %s entries as unfinished work", async state => {
     const f = fixture();
     f.redisRead.mockImplementation(async id => id === `reconciliation-runs.${state}` ? 1 : 0);
+    expect((await observeDurableStores(f.deps)).verdict).toBe("no_go_unfinished_work");
+  });
+  // A failed job or a repeat schedule is not running, so a replacement cannot cut it off,
+  // and BullMQ keeps up to 5,000 failed jobs per queue. Reported, not counted as work.
+  it.each(QUEUE_STATES.filter(s => !RUNNABLE_STATES.includes(s)))("should report Redis %s entries without calling them unfinished work", async state => {
+    const f = fixture();
+    f.redisRead.mockImplementation(async id => id === `reconciliation-runs.${state}` ? 5000 : 0);
+    const result = await observeDurableStores(f.deps);
+    expect(result).toMatchObject({ verdict: "zero_observed_not_proof", hold: true });
+    expect(result.samples.every(sample => sample.redis.queues.find(q => q.id === "reconciliation-runs")?.states[state] === 5000)).toBe(true);
+  });
+  it("should still hold runnable work beside retained failures", async () => {
+    const f = fixture();
+    f.redisRead.mockImplementation(async id => id === "webhook-delivery.failed" ? 40 : id === "webhook-delivery.delayed" ? 1 : 0);
     expect((await observeDurableStores(f.deps)).verdict).toBe("no_go_unfinished_work");
   });
   it("should preserve unfinished no-go when later reads or rollback fail", async () => {

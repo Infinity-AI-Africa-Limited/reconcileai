@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DB_SURFACES, INTAKE_SOURCES, QUEUE_IDS, QUEUE_STATES, LIMITS, type QueueState } from "./catalogue";
+import { DB_SURFACES, INTAKE_SOURCES, QUEUE_IDS, QUEUE_STATES, RUNNABLE_STATES, LIMITS, type QueueState } from "./catalogue";
 import { ERROR_CODES, NOT_COLLECTED, type ObserverReport } from "./contracts";
 import { MAX_REPORT_BYTES, REFUSED_REPORT, serializeReport } from "./report";
 
@@ -86,21 +86,30 @@ describe("when unfinished work and incomplete evidence overlap", () => {
         const parked = DB_SURFACES.findIndex(surface => surface.kind === "parked");
         report.samples[0].database.surfaces[parked].count = 1;
       }
-      expect(decoded(report).verdict).toBe(kind === "age" ? "no_go_unfinished_work" : "no_go_incomplete_evidence");
+      expect(decoded(report).verdict).toBe("no_go_incomplete_evidence");
     },
   );
-  it("should count positive parked surfaces as unfinished work", () => {
+  it("should report positive parked surfaces without calling them unfinished work", () => {
     const report = fixture();
     const parked = DB_SURFACES.findIndex(surface => surface.kind === "parked");
     report.samples[0].database.surfaces[parked].count = 1;
     report.samples[0].database.surfaces[parked].oldestAgeSeconds = 10;
     report.verdict = "no_go_unfinished_work";
-    expect(decoded(report).verdict).toBe("no_go_unfinished_work");
+    const result = decoded(report);
+    expect(result.verdict).toBe("zero_observed_not_proof");
+    expect(result.samples[0].database.surfaces[parked]).toMatchObject({ count: 1, oldestAgeSeconds: 10 });
   });
-  it.each(QUEUE_STATES)("should count positive %s queue state as unfinished work", state => {
+  it.each(RUNNABLE_STATES)("should count positive %s queue state as unfinished work", state => {
     const report = fixture();
     report.samples[0].redis.queues[0].states[state] = 1;
     expect(decoded(report).verdict).toBe("no_go_unfinished_work");
+  });
+  it.each(QUEUE_STATES.filter(state => !RUNNABLE_STATES.includes(state)))("should report positive %s queue state without calling it unfinished work", state => {
+    const report = fixture();
+    report.samples[0].redis.queues[0].states[state] = 5000;
+    const result = decoded(report);
+    expect(result.verdict).toBe("zero_observed_not_proof");
+    expect(result.samples[0].redis.queues[0].states[state]).toBe(5000);
   });
   it("should retain a zero-sample failure as incomplete evidence", () => {
     const report = fixture();
