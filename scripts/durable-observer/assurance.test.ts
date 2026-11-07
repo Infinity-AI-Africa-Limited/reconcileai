@@ -36,6 +36,7 @@ function manifest(
     sourceRepo: REPO,
     expectedSha: SHA,
     githubContext: "production",
+    // Synthetic upper-bound fixture only, not a measured operational setting.
     maxSkewMs: 600_000,
     approvedAtMs: NOW - 300_000,
     expiresAtMs: NOW + 600_000,
@@ -96,6 +97,7 @@ function githubRecord(
     id: "1234567890",
     repo: REPO,
     context: "production",
+    environmentId: ENVIRONMENT,
     sha: SHA,
     creator: "railway-app[bot]",
     createdAt: "2026-11-05T15:25:46Z",
@@ -428,6 +430,40 @@ describe("when complete bounded deployment projections correlate the app with Ra
       "deployment_correlation_observed"
     );
   });
+  it.each([0, 1_000])(
+    "should honor supplied skew %i without adding any automatic tolerance",
+    maxSkewMs => {
+      const p = correlation();
+      const withGap = (gapMs: number) => ({
+        ...p,
+        github: {
+          ...p.github,
+          deployments: [
+            githubRecord({
+              createdAt: new Date(
+                Date.parse(running().createdAt) + gapMs
+              ).toISOString(),
+            }),
+          ],
+        },
+      });
+      // These are synthetic caller-supplied bounds, not measured provider gaps.
+      for (const sign of [-1, 1]) {
+        held(
+          reduceDeploymentCorrelation(
+            manifest({ maxSkewMs }),
+            withGap(sign * maxSkewMs),
+            NOW
+          ),
+          "deployment_correlation_observed"
+        );
+        refusedCorrelation(
+          withGap(sign * (maxSkewMs + 1)),
+          manifest({ maxSkewMs })
+        );
+      }
+    }
+  );
   it("should leave existing platform proof gates untouched and never read a wall clock", () => {
     const clock = vi.spyOn(Date, "now").mockImplementation(() => {
       throw new Error(CANARY);
@@ -445,6 +481,104 @@ describe("when complete bounded deployment projections correlate the app with Ra
     } finally {
       clock.mockRestore();
     }
+  });
+});
+
+describe("when GitHub display context matches but payload-derived environment binding is absent or wrong", () => {
+  it("should refuse a missing flat environment ID despite all display contexts matching", () => {
+    const p = correlation();
+    const record: Record<string, unknown> = { ...githubRecord() };
+    delete record.environmentId;
+    expect(p.github.context).toBe(manifest().githubContext);
+    expect(record.context).toBe(manifest().githubContext);
+    expect(githubRecord().latestStatus.context).toBe(manifest().githubContext);
+    refusedCorrelation({
+      ...p,
+      github: { ...p.github, deployments: [record] },
+    });
+  });
+  it.each([
+    OTHER,
+    undefined,
+    null,
+    "",
+    "production",
+    "not-uuid",
+    "00000000-0000-0000-0000-000000000000",
+    ENVIRONMENT + "\n",
+    " " + ENVIRONMENT,
+    ENVIRONMENT + " ",
+    123,
+    true,
+    {},
+    [],
+    CANARY,
+  ])(
+    "should refuse each wrong or invalid environment ID without using matching display context",
+    environmentId => {
+      const p = correlation();
+      refusedCorrelation({
+        ...p,
+        github: {
+          ...p.github,
+          deployments: [{ ...githubRecord(), environmentId }],
+        },
+      });
+    }
+  );
+  it("should require the binding on older relevant records too, not only the selected success", () => {
+    const p = correlation();
+    const older: Record<string, unknown> = {
+      ...githubRecord({
+        id: "1234567889",
+        createdAt: "2026-11-04T15:25:46Z",
+      }),
+    };
+    delete older.environmentId;
+    for (const record of [older, { ...older, environmentId: OTHER }])
+      for (const deployments of [
+        [record, githubRecord()],
+        [githubRecord(), record],
+      ])
+        refusedCorrelation({
+          ...p,
+          github: { ...p.github, deployments },
+        });
+  });
+  it("should reject raw payload shapes and enclosing caller claims instead of inferring the flat binding", () => {
+    const p = correlation();
+    const record: Record<string, unknown> = { ...githubRecord() };
+    delete record.environmentId;
+    refusedCorrelation({
+      ...p,
+      github: {
+        ...p.github,
+        deployments: [{ ...record, payload: { environmentId: ENVIRONMENT } }],
+      },
+    });
+    refusedCorrelation({
+      ...p,
+      github: {
+        ...p.github,
+        environmentId: ENVIRONMENT,
+        deployments: [record],
+      },
+    });
+  });
+  it("should reject environment ID accessors and hostile values without executing their hooks", () => {
+    const read = vi.fn(() => {
+      throw new Error(CANARY);
+    });
+    const p = correlation();
+    for (const record of [
+      getter(githubRecord(), "environmentId", read),
+      { ...githubRecord(), environmentId: { toString: read, valueOf: read } },
+    ])
+      refusedCorrelation({
+        ...p,
+        github: { ...p.github, deployments: [record] },
+      });
+    expect(read).not.toHaveBeenCalled();
   });
 });
 
