@@ -29,6 +29,7 @@
     "scripts/durable-observer/runtimeAdapters.test.ts",
     "scripts/durable-observer/platformIdentity.test.ts",
     "scripts/durable-observer/runtimePackaging.test.ts",
+    "scripts/durable-observer/assurance.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
     "client/src/lib/exceptionWorkflowPresentation.test.ts",
     "client/src/lib/exceptionWorkflowPanel.test.ts",
