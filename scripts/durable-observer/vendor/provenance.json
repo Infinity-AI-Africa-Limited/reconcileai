@@ -1,0 +1,21 @@
+{
+  "repository": "https://github.com/Infinity-AI-Africa-Limited/reconcileai",
+  "sourceRefAtRetrieval": "origin/claude/production-workload-preflight",
+  "commit": "b3b323f759dbe205653847af3ad424ce0e93c95f",
+  "sourcePath": "scripts/production-workload-preflight.mjs",
+  "gitBlob": "591e372d7d97c169dce064bdb0712f72069145fb",
+  "vendoredPath": "scripts/durable-observer/vendor/production-workload-preflight.mjs",
+  "sha256": "9cf0ee931d3643a4b2367e985d2d779d8569a7eea72dffb5c887fb5ee4a31aab",
+  "bytesPreserved": true,
+  "retrieval": "local git show at full commit; no network request",
+  "reusedExports": [
+    "planDatabaseRoute",
+    "planRedisRoute",
+    "openDatabase",
+    "prepareRedis",
+    "connectRedis",
+    "createDeadline"
+  ],
+  "execution": "internal_callable_preparation_only",
+  "liveLauncherEnabled": false
+}
