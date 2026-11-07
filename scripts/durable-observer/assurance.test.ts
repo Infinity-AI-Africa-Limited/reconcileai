@@ -599,6 +599,43 @@ describe("when ownership, active identity, completeness or latest deployment is 
       });
     }
   );
+  it("should refuse an active deployment created after GitHub recorded the newer commit's success", () => {
+    // A dashboard rollback, CLI deploy or redeploy is a new Railway deployment
+    // with no GitHub record of its own, so the newer commit's record stays the
+    // newest and successful. Inside the skew window the rollback (here 6m14s
+    // after that record) would otherwise be attributed to the newer commit.
+    const p = correlation(),
+      replaced = running({
+        id: OTHER,
+        status: "REMOVED",
+        createdAt: "2026-11-05T15:25:45Z",
+      });
+    const activeAt = (createdAt: string) => {
+      const active = running({ createdAt });
+      return {
+        ...p,
+        before: app({
+          activeDeployments: [active],
+          deployments: [active, replaced],
+        }),
+        after: app({
+          observedAt: p.after.observedAt,
+          activeDeployments: [active],
+          deployments: [replaced, active],
+        }),
+      };
+    };
+    refusedCorrelation(activeAt("2026-11-05T15:32:00Z"));
+    refusedCorrelation(activeAt("2026-11-05T15:30:01Z"));
+    held(
+      reduceDeploymentCorrelation(
+        manifest(),
+        activeAt(githubRecord().latestStatus.createdAt),
+        NOW
+      ),
+      "deployment_correlation_observed"
+    );
+  });
   it("should refuse duplicate or equal-timestamp GitHub records even when both succeed", () => {
     const p = correlation();
     for (const records of [

@@ -16,6 +16,8 @@ A match proves only that the observed configuration contains those reference exp
 
 The source version proposal compares trusted, bounded projections of GitHub's Railway-created deployment record and Railway's active app deployment. It requires the expected owning identities/repository, exactly one active deployment, a matching successful source SHA, a bounded creation-time correlation, complete coverage with no later deployment, and fresh stable before/after observations.
 
+The active deployment must also have been created no later than GitHub's success status for the selected record. A dashboard rollback, CLI deploy or redeploy creates a Railway deployment with no GitHub record of its own, so the newer commit's record stays the newest and successful; without this rule, one made within the skew window after a successful deploy would be attributed to the newer commit (found in Claude's review of #228; regression test in `assurance.test.ts`). Set `maxSkewMs` from the gap measured on the first authenticated read. Railway is expected to create its deployment and GitHub's record together, seconds apart; that is unmeasured, and the 10-minute ceiling is a bound, not a recommended setting.
+
 The evidence grade is **deployment correlated, not running binary attested**. A provider-written GitHub record and time match are useful operational evidence, but there is no documented typed deployed-commit field being read here. A public health commit echo would still be a self-report. Approving that evidence grade for a specific read-only run is a separate founder decision; this module does not silently remove `deployed_commit_unverified` from the existing platform checker.
 
 ## Transport and secret custody

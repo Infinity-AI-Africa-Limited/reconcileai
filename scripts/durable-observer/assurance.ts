@@ -488,14 +488,19 @@ export function reduceDeploymentCorrelation(
     const latestTime = Math.max(...records.map(d => d.created)),
       latest = records.filter(d => d.created === latestTime);
     requireEvidence(latest.length === 1);
-    const selected = latest[0];
+    const selected = latest[0],
+      activeCreated = utc(before.active.createdAt);
     requireEvidence(
       selected.d.creator === "railway-app[bot]" &&
         selected.d.sha === m.expectedSha &&
         selected.status.state === "success" &&
         selected.status.creator === "railway-app[bot]" &&
-        Math.abs(selected.created - utc(before.active.createdAt)) <=
-          integer(m.maxSkewMs)
+        // The deployment GitHub's success describes existed before that success
+        // was recorded. One created afterwards (a dashboard rollback, a CLI
+        // deploy, a redeploy) has no GitHub record of its own; inside the skew
+        // window it would otherwise inherit the newer commit.
+        activeCreated <= utc(selected.status.createdAt) &&
+        Math.abs(selected.created - activeCreated) <= integer(m.maxSkewMs)
     );
     return result("deployment_correlation_observed");
   } catch {
