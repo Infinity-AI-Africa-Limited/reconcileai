@@ -52,6 +52,8 @@ export interface ReadingResult {
 }
 export interface SessionReading<R> {
   attemptId: number;
+  /** Local admission time: response delivery must never extend freshness. */
+  startedAt: number;
   receivedAt: number;
   report: R;
 }
@@ -115,7 +117,7 @@ export function completeAttempt<R extends ReadingResult>(
   return {
     ...session,
     attempt: { kind: "succeeded", id, at: now },
-    readings: [...session.readings, { attemptId: id, receivedAt: now, report: outcome.report }].slice(-KEPT_READINGS),
+    readings: [...session.readings, { attemptId: id, startedAt: session.attempt.startedAt, receivedAt: now, report: outcome.report }].slice(-KEPT_READINGS),
   };
 }
 
@@ -127,12 +129,22 @@ export type Evidence<R> =
   | { kind: "current"; last: SessionReading<R> };
 
 /** Whether the newest reading on screen describes now, and if not, why not. */
-export function evidenceOf<R>(session: CheckSession<R>, now: number): Evidence<R> {
+export function evidenceOf<R extends ReadingResult>(session: CheckSession<R>, now: number): Evidence<R> {
   const last = session.readings.at(-1) ?? null;
   if (session.attempt.kind === "running") return { kind: "pending", last };
   if (session.attempt.kind === "failed") return { kind: "failed", message: session.attempt.message, last };
   if (!last) return { kind: "none" };
-  if (now - last.receivedAt > FRESH_FOR_MS) return { kind: "stale", last };
+  const stamp = last.report.checkedAt;
+  const observed = typeof stamp === "string" ? Date.parse(stamp) : Number.NaN;
+  // No assumed clock-skew tolerance: malformed/future stamps and clock reversal
+  // are history. Even a server clock ahead of admission cannot extend the local
+  // request's five-minute window. This is conservative freshness, not attestation.
+  if (
+    !Number.isFinite(now) || !Number.isFinite(last.startedAt) || !Number.isFinite(last.receivedAt) ||
+    !Number.isFinite(observed) || new Date(observed).toISOString() !== last.report.checkedAt ||
+    last.receivedAt < last.startedAt || now < last.receivedAt || observed > last.receivedAt ||
+    now - Math.min(observed, last.startedAt) >= FRESH_FOR_MS
+  ) return { kind: "stale", last };
   return { kind: "current", last };
 }
 
@@ -147,7 +159,7 @@ export function describeSession<R extends ReadingResult>(session: CheckSession<R
     case "failed":
       return `The last attempt did not complete: ${evidence.message} Earlier readings are history.`;
     case "stale":
-      return "The newest reading is more than five minutes old, so it is history. Take a new reading.";
+      return "The newest reading cannot be treated as current, so it is history. Take a new reading.";
     case "current": {
       const run = session.readings
         .filter(r => r.receivedAt > session.brokenAt)

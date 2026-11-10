@@ -114,11 +114,48 @@ describe("when the page decides whether a reading is current", () => {
     expect(describeSession(failed, T0 + 64_000)).toContain("history");
   });
 
-  it("should call it history once it is more than five minutes old, without asking the server", () => {
+  it("should call it history once the five-minute window expires, without asking the server", () => {
     const one = reading(newSession<Report>(), T0);
-    expect(evidenceOf(one, T0 + FRESH_FOR_MS).kind).toBe("current");
+    expect(evidenceOf(one, T0 + FRESH_FOR_MS - 1).kind).toBe("current");
+    expect(evidenceOf(one, T0 + FRESH_FOR_MS).kind).toBe("stale");
     expect(evidenceOf(one, T0 + FRESH_FOR_MS + 1).kind).toBe("stale");
     expect(describeSession(one, T0 + FRESH_FOR_MS + 1)).toContain("history");
+  });
+
+  it("should immediately classify an old observation delivered late as history", () => {
+    const begun = start(newSession<Report>(), T0);
+    const delivered = T0 + FRESH_FOR_MS + 1;
+    const session = completeAttempt(begun.session, begun.generation, begun.id, { ok: true, report: report(T0) }, delivered);
+    expect(session.readings[0].receivedAt).toBe(delivered);
+    expect(evidenceOf(session, delivered).kind).toBe("stale");
+    expect(describeSession(session, delivered)).toContain("history");
+  });
+
+  it("should never extend freshness beyond local request age when the server clock is ahead", () => {
+    const begun = start(newSession<Report>(), T0);
+    const delivered = T0 + FRESH_FOR_MS + 1;
+    const session = completeAttempt(begun.session, begun.generation, begun.id, { ok: true, report: report(delivered - 1) }, delivered);
+    expect(evidenceOf(session, delivered).kind).toBe("stale");
+  });
+
+  it("should reject an older observation even when it is delivered within a fresh local request", () => {
+    const begun = start(newSession<Report>(), T0);
+    const session = completeAttempt(begun.session, begun.generation, begun.id, { ok: true, report: report(T0 - FRESH_FOR_MS) }, T0);
+    expect(evidenceOf(session, T0).kind).toBe("stale");
+  });
+
+  it.each(["not-a-timestamp", "2026-02-31T12:00:00.000Z", new Date(T0 + 1).toISOString()])(
+    "should treat an invalid, normalized or future observation timestamp as history: %s", stamp => {
+      const begun = start(newSession<Report>(), T0);
+      const session = completeAttempt(begun.session, begun.generation, begun.id, { ok: true, report: { ...report(T0), checkedAt: stamp } }, T0);
+      expect(evidenceOf(session, T0).kind).toBe("stale");
+    },
+  );
+
+  it("should treat client clock reversal and a non-finite clock as history", () => {
+    const session = reading(newSession<Report>(), T0);
+    expect(evidenceOf(session, T0 - 1).kind).toBe("stale");
+    expect(evidenceOf(session, Number.NaN).kind).toBe("stale");
   });
 
   it("should judge three quiet readings only while they are current, and never as permission", () => {

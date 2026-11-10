@@ -272,7 +272,7 @@ function HistoryNote({ evidence }: { evidence: Evidence<WorkloadReport> }) {
       ? "A new reading is in progress."
       : evidence.kind === "failed"
         ? "The attempt after it did not complete."
-        : "It is more than five minutes old.";
+        : "Its observation time or request age cannot be treated as current.";
   return (
     <Alert>
       <AlertTitle>History, not the current state</AlertTitle>

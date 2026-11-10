@@ -52,7 +52,7 @@ open transactions, external schedulers, and more.
 | One check at a time per server process, at most one every ten seconds. Per process, not across replicas | `server/routers/maintenanceCheck.ts` |
 | Only the catalogue's statements: `SELECT @@session.time_zone`, one `START TRANSACTION WITH CONSISTENT SNAPSHOT`, `SELECT COUNT(*)` reads with `MAX_EXECUTION_TIME(1000)`, `ROLLBACK` | `server/maintenance/workloadCatalogue.ts`; proved in its test |
 | At most one request for a database connection outstanding per process. mysql2 cannot withdraw a request from its pool queue, so while an abandoned one waits, a new check is told `database_busy` rather than queuing another. A connection that arrives late was never used, and goes straight back | `server/maintenance/workloadReaders.ts` |
-| A connection whose statement failed or was cancelled is taken out of the pool AND its socket destroyed. mysql2 3.15's own `destroy()` only half-closes, which a stalled server can hold open. Closing the socket ends this process's side; it does not prove the server stopped the statement, which `MAX_EXECUTION_TIME(1000)` bounds there | `server/maintenance/workloadReaders.ts` |
+| A connection whose statement failed or was cancelled is taken out of the pool AND its socket destroyed. mysql2 3.15's own `destroy()` only half-closes, which a stalled server can hold open. Closing the socket ends this process's side; it does not prove the server stopped the statement. The catalogue requests `MAX_EXECUTION_TIME(1000)`; these client/loopback tests do not prove effective TiDB enforcement | `server/maintenance/workloadReaders.ts` |
 | Only `LLEN`, `ZCARD` and `SCAN … MATCH bull:*:meta`; never a BullMQ Queue, which writes its metadata key when constructed | `server/maintenance/workloadReaders.ts` |
 | Every statement 1.5 s, every Redis command 1 s, the whole reading 45 s | `LIMITS` |
 | Aggregate output only: counts, ages and fixed codes; never a row, id, key or queue name | tests |
@@ -155,10 +155,17 @@ deployment.
    Before any promotion:
    - name the rollback target deployment;
    - confirm it is still retained;
-   - confirm, without reading any value, that its variables are still current.
+   - confirm, without reading any value, that its variables are still current;
+   - establish reviewed non-secret compatibility of the selected image,
+     post-promotion schema and migration state, effective service configuration
+     and current runtime credential references. A retained image or unchanged
+     variables alone do not make the target usable.
 
-   If that cannot be confirmed, the fallback is a revert commit deployed forward,
-   which keeps today's variables. After any rollback, recheck the effective
+   If that cannot be confirmed, a revert commit deployed forward is only a
+   candidate fallback: it keeps today's variables but must pass the same
+   schema/configuration compatibility gate. Neither path reverses migration,
+   startup or worker writes. If compatibility cannot be evidenced, retain HOLD
+   rather than promising a usable fallback. After any rollback, recheck the effective
    draining setting: the restored deployment brings back its own, possibly zero,
    grace.
 7. **Gates that stay.** The protected export, isolated restore and
@@ -186,7 +193,10 @@ deployment.
     changing account or closing the page drops answers still to come. Closing
     the page does not cancel a request the server already has.
   - Readings are current only while nothing runs, the last attempt succeeded and
-    the newest is under five minutes old; otherwise they are labelled history.
+    the observation and local request are both under five minutes old; otherwise
+    they are labelled history. Late delivery never restarts the freshness window.
+    Invalid, noncanonical or future observation times and client clock reversal
+    are also history; no clock-skew tolerance or attestation is assumed.
   - Failures are fixed sentences chosen by error code, never the server's text.
   - The mutation is dropped from the client's cache once nothing observes it.
 - `client/src/lib/maintenanceCheck.ts`: plain words for every code, and the rule

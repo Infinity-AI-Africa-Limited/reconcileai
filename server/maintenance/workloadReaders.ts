@@ -24,7 +24,8 @@ import type {
  *     out of the pool AND its socket destroyed. mysql2 3.15's destroy() only
  *     half-closes (stream.end()), which a stalled peer can hold open. Closing
  *     the socket ends this process's side; it is not proof the server stopped
- *     the statement. MAX_EXECUTION_TIME(1000) bounds that on the server.
+ *     the statement. The catalogue requests MAX_EXECUTION_TIME(1000); effective
+ *     server-side enforcement is not proved by these client/loopback tests.
  *
  * Redis: a dedicated connection to the app's own REDIS_URL, made with BullMQ's
  * connection class but never a BullMQ Queue, because constructing a Queue
@@ -59,7 +60,7 @@ export interface ConnectionSource {
   getConnection(callback: (error: Error | null, connection?: BorrowedConnection) => void): void;
 }
 
-let outstanding = false;
+let outstanding: symbol | null = null;
 
 /** Out of the pool, and the socket closed now rather than whenever the peer answers. */
 function retire(connection: BorrowedConnection): void {
@@ -82,20 +83,33 @@ function borrow(source: ConnectionSource, signal: AbortSignal): Promise<Borrowed
       onAbort();
       return;
     }
-    outstanding = true;
-    signal.addEventListener("abort", onAbort, { once: true });
-    source.getConnection((error, connection) => {
-      outstanding = false;
+    const admission = Symbol("database_acquisition");
+    outstanding = admission;
+    const clearAdmission = (): void => {
+      // A callback delivered after a synchronous throw belongs to the old request.
+      if (outstanding === admission) outstanding = null;
       signal.removeEventListener("abort", onAbort);
-      if (settled) {
-        // Abandoned before the pool answered: it was never used, so give it back.
-        connection?.release();
-        return;
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      source.getConnection((error, connection) => {
+        clearAdmission();
+        if (settled) {
+          // Abandoned before the pool answered: it was never used, so give it back.
+          connection?.release();
+          return;
+        }
+        settled = true;
+        if (error || !connection) reject(new Error("unavailable"));
+        else resolve(connection);
+      });
+    } catch {
+      clearAdmission();
+      if (!settled) {
+        settled = true;
+        reject(new Error("unavailable"));
       }
-      settled = true;
-      if (error || !connection) reject(new Error("unavailable"));
-      else resolve(connection);
-    });
+    }
   });
 }
 
