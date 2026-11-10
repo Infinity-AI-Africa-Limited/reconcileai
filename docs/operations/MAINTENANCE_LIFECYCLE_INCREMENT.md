@@ -96,3 +96,35 @@ Synthetic job IDs are namespaced (`synthetic-*`) so they cannot collide with Bul
 Validation on 4 November 2026: all five new tests passed in three consecutive executions; combined actual-Redis validation passed 28 tests across five files. Source/test typechecks and compiled cold-mode checks are recorded in the review handoff. These are **controlled cross-process adapter** results, not full-bootstrap, integrated-database, provider-grace, sustained all-writer freeze, actual backlog-resume, export/restore, RTO or financial-correctness proof. This test-only increment is not a new runtime prerequisite for collecting the private inventory, nor permission to stop production.
 
 Final review gate on the unchanged runtime source: committed migrations and drift passed on a new disposable loopback MySQL instance; full regression passed **5,261 tests with 21 conditional skips and no failures**. The separate actual-Redis run passed **28/28**, and the new five-test suite passed in two further executions. Source/test typechecks, lint, build and compiled cold-mode smoke all passed. The existing route/detached-work ratchets remain unchanged. Both fixture servers were stopped and their synthetic data directories removed. No production connection or managed Manus publish/checkpoint action occurred.
+
+## Railway launch and grace proposal — review only, 4 November 2026
+
+This recipe-only operational increment proposes three changes in `railway.json`: direct launch with `NODE_ENV=production exec node dist/index.js`, host `drainingSeconds: 120`, and `overlapSeconds: 0`. It preserves build, pre-deploy migrations, liveness path/timeout, restart policy and retry count. It adds no schema, runtime handler, dependency or production variable. The supported compiled bootstrap and complete adjacent server chunks remain required. `package.json` remains unchanged; pnpm is still used for build and migration, not as the deployed runtime launcher.
+
+Upstream Nixpacks emits a bash command entrypoint. Shell `exec` replaces that shell with Node instead of retaining a package-manager launcher. A synthetic local process test can check command parsing, production mode and direct SIGTERM delivery; it does **not** prove the live Railway image's PID hierarchy, signal delivery or successful production drain. Those require separately approved runtime evidence.
+
+The proposed host allowance is finite. With no application override, `RECONCILEAI_DRAIN_TIMEOUT_MS` defaults to 90,000 ms. The shutdown adapter shares that deadline across tracked-work settling and HTTP/resource closure; cleanup only receives the remaining application budget. A 120-second host allowance does not cancel long-running work, add a separate cleanup deadline, automatically replay jobs, or turn `incomplete` into `stopped`. Any later forced kill is failed drain evidence. Zero overlap avoids an intentional post-promotion overlap delay but does not prevent startup coexistence, fence a second deployment or certify global idle.
+
+### HOLD — first promotion and merge must be coordinated
+
+Railway's documented default shutdown grace is zero seconds. A Railway-labelled support response says an old deployment uses its original creation-time draining snapshot; adding a new grace setting is not a retroactive fix for the running process. The new deployment's overlap setting governs first replacement, but overlap is not old-process shutdown grace. This external guidance has not been measured against the current production deployment, and manual Remove applicability remains unverified.
+
+Because `main` auto-deploys, **Claude must not merge this configuration PR as an ordinary uncoordinated deployment**. Code review may proceed, but first merge/promotion remains on HOLD until the owner approves its exact production action and there is private evidence that accepted work can survive the first replacement without assuming the old process has the newly proposed grace. Do not disable CI or deployment controls to bypass that gate. A reviewed PR is not an outage/export approval.
+
+Required before first promotion and later export:
+
+1. Record the active image/source, actual start command, effective old/new deployment timing snapshots, replicas and any relevant shared overrides without exposing variable values, raw logs or provider payloads. Owner-supplied screenshots on 4 November show the four requested service-variable searches as absent; this is not a scan of every scope.
+2. Obtain protected aggregate workload/idleness and upstream retry/catch-up evidence. Fence or coordinate every ingress and producer through separately approved controls before relying on zero unresolved work; a single momentary zero count is insufficient. If accepted/in-flight work cannot be accounted for, do not proceed. The old process may receive no useful grace on first replacement.
+3. After an owner-approved first promotion, verify the new deployment's actual command, stored 120-second allowance, zero intentional overlap delay and normal startup; recheck liveness, admission and dependency health. Verify direct signal delivery/drain during a separately approved controlled action, not by stopping the live service during preflight.
+4. Keep TiDB background writers, both repository schedulers, Manus Auto publish/unpublish, private cluster-wide session proof, encrypted private export, isolated restore and the maintenance window as separate gates. No backup or all-writer quiescence is claimed by this recipe.
+
+Railway's current legacy Config as Code page states that existing files keep working until 1 December 2026. This is an interim change for the existing service, not a broader infrastructure migration. Review effective parsing now and plan the provider's separate migration before that cutoff; do not silently combine it with the emergency recovery scope.
+
+Sources reviewed on 4 November 2026:
+
+- [Railway deployment reference — default zero-second shutdown grace](https://docs.railway.com/deployments/reference)
+- [Railway Config as Code — precedence, timing fields and legacy cutoff](https://docs.railway.com/config-as-code/reference)
+- [Railway-labelled reply — creation-time draining snapshot and first replacement](https://station.railway.com/questions/which-draining-configuration-applies-to-4b18d1d8)
+- [Nixpacks Dockerfile generation — bash entrypoint](https://github.com/railwayapp/nixpacks/blob/main/src/nixpacks/builder/docker/dockerfile_generation.rs)
+
+No live Railway setting, secret, workflow enablement, Manus publish state, production record, Redis object or S3 object is changed by preparing this branch. Validation and final PR state belong in the non-secret review handoff; no successful live drain, deployment, export, restore or RTO is asserted here.
