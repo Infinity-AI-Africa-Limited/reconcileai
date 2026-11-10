@@ -17,8 +17,10 @@ import { superAdminProcedure } from "./shared";
  * - One check at a time per server process, and not more often than every ten
  *   seconds, so a stuck button cannot queue load against the database.
  *
- * It writes nothing: no audit row and no storage probe. The log line carries
- * who ran it and the verdict, never a count.
+ * The check writes no business or workload data: no audit row and no storage
+ * probe. The request around it is not write-free: authenticating any request
+ * updates the user's lastSignedIn. The log line carries who ran it and the
+ * verdict, never a count.
  */
 const MIN_INTERVAL_MS = 10_000;
 

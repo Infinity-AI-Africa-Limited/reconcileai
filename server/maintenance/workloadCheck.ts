@@ -38,6 +38,7 @@ import {
  */
 export const ERROR_CODES = Object.freeze([
   "database_unavailable",
+  "database_busy",
   "database_session_failed",
   "database_snapshot_failed",
   "database_read_failed",
@@ -85,8 +86,11 @@ export interface WorkloadReplica {
   replicaId: string | null;
 }
 export interface WorkloadCheckDependencies {
-  /** Resolves null when the app has no database configured. */
-  openDatabase(signal: AbortSignal): Promise<WorkloadDatabaseConnection | null>;
+  /**
+   * Resolves null when the app has no database configured, and "busy" while an
+   * earlier check's request for a connection is still waiting in the pool.
+   */
+  openDatabase(signal: AbortSignal): Promise<WorkloadDatabaseConnection | "busy" | null>;
   /** Resolves null when REDIS_URL is unset: queued work then lives only in process memory. */
   openRedis(signal: AbortSignal): Promise<WorkloadRedisConnection | null>;
   /** Monotonic milliseconds, for deadlines and the elapsed time. */
@@ -233,6 +237,10 @@ export async function runWorkloadCheck(deps: WorkloadCheckDependencies): Promise
   async function readDatabase(): Promise<void> {
     const opened = await bounded(signal => deps.openDatabase(signal), LIMITS.connectMs, "database_unavailable", () => {});
     if (!opened) return;
+    if (opened.value === "busy") {
+      errors.add("database_busy");
+      return;
+    }
     if (!opened.value) {
       errors.add("database_unavailable");
       return;

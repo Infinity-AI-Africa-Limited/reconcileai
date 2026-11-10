@@ -1,4 +1,3 @@
-import type { Pool, PoolConnection } from "mysql2";
 import { getDb } from "../db";
 import { applicationLifecycle } from "./lifecycle";
 import { compileRedisRead, compileStatement, LIMITS, SCAN_MATCH } from "./workloadCatalogue";
@@ -16,12 +15,23 @@ import type {
  * database, TLS settings and UTC session pin as the app), used for one
  * consistent snapshot and handed back only after a clean ROLLBACK. Only
  * catalogue statements are compiled; there is no other way in.
+ *   - At most ONE request for a connection is outstanding per process. mysql2
+ *     cannot withdraw a request from its pool queue, so one abandoned by a
+ *     timeout stays queued until the pool answers; while it does, a new check
+ *     is refused as `busy` instead of queuing another. A connection that
+ *     arrives after its request was abandoned was never used: it goes back.
+ *   - A connection whose statement failed or was cancelled is RETIRED: taken
+ *     out of the pool AND its socket destroyed. mysql2 3.15's destroy() only
+ *     half-closes (stream.end()), which a stalled peer can hold open. Closing
+ *     the socket ends this process's side; it is not proof the server stopped
+ *     the statement. MAX_EXECUTION_TIME(1000) bounds that on the server.
  *
  * Redis: a dedicated connection to the app's own REDIS_URL, made with BullMQ's
  * connection class but never a BullMQ Queue, because constructing a Queue
- * writes the queue's metadata key. Connecting sends INFO and nothing else: no
- * client-info tag, no retries, no offline queue, no reconnects. Commands are
- * the catalogue's LLEN and ZCARD reads and SCAN over queue metadata keys.
+ * writes the queue's metadata key. Connecting sends AUTH and SELECT when the
+ * URL carries them, then INFO; closing sends QUIT. No client-info tag, no
+ * retries, no offline queue, no reconnects. Commands are the catalogue's LLEN
+ * and ZCARD reads and SCAN over queue metadata keys.
  *
  * Nothing here logs. Failures become the caller's fixed codes, so no host, key
  * or connection string can reach a log or a page.
@@ -36,7 +46,31 @@ function abortable<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return Promise.race([work, aborted]);
 }
 
-function borrow(pool: Pool, signal: AbortSignal): Promise<PoolConnection> {
+/** The parts of a mysql2 pool connection the reader uses. */
+export interface BorrowedConnection {
+  query(options: { sql: string; timeout: number }, callback: (error: Error | null, rows: unknown) => void): unknown;
+  release(): void;
+  destroy(): void;
+  /** The connection's socket (a TLS socket once TLS has started). */
+  stream?: { destroy(): void };
+}
+/** The part of a mysql2 pool the reader uses. */
+export interface ConnectionSource {
+  getConnection(callback: (error: Error | null, connection?: BorrowedConnection) => void): void;
+}
+
+let outstanding = false;
+
+/** Out of the pool, and the socket closed now rather than whenever the peer answers. */
+function retire(connection: BorrowedConnection): void {
+  try {
+    connection.destroy();
+  } finally {
+    connection.stream?.destroy();
+  }
+}
+
+function borrow(source: ConnectionSource, signal: AbortSignal): Promise<BorrowedConnection> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const onAbort = (): void => {
@@ -48,8 +82,10 @@ function borrow(pool: Pool, signal: AbortSignal): Promise<PoolConnection> {
       onAbort();
       return;
     }
+    outstanding = true;
     signal.addEventListener("abort", onAbort, { once: true });
-    pool.getConnection((error, connection) => {
+    source.getConnection((error, connection) => {
+      outstanding = false;
       signal.removeEventListener("abort", onAbort);
       if (settled) {
         // Abandoned before the pool answered: it was never used, so give it back.
@@ -63,10 +99,16 @@ function borrow(pool: Pool, signal: AbortSignal): Promise<PoolConnection> {
   });
 }
 
-export async function openAppDatabase(signal: AbortSignal): Promise<WorkloadDatabaseConnection | null> {
-  const db = await getDb();
-  if (!db) return null;
-  const connection = await borrow(db.$client, signal);
+/**
+ * Borrow one connection from `source` for one reading. Resolves "busy" while an
+ * earlier request is still waiting in the pool, without adding another.
+ */
+export async function openPoolDatabase(
+  source: ConnectionSource,
+  signal: AbortSignal,
+): Promise<WorkloadDatabaseConnection | "busy"> {
+  if (outstanding) return "busy";
+  const connection = await borrow(source, signal);
   return {
     run: (id, operationSignal) =>
       new Promise((resolve, reject) => {
@@ -75,8 +117,8 @@ export async function openAppDatabase(signal: AbortSignal): Promise<WorkloadData
         const onAbort = (): void => {
           if (settled) return;
           settled = true;
-          // A cancelled statement may still be running: the connection must not be reused.
-          connection.destroy();
+          // A cancelled statement may still be running: retire the connection.
+          retire(connection);
           reject(new Error("aborted"));
         };
         if (operationSignal.aborted) {
@@ -93,8 +135,14 @@ export async function openAppDatabase(signal: AbortSignal): Promise<WorkloadData
         });
       }),
     release: () => connection.release(),
-    drop: () => connection.destroy(),
+    drop: () => retire(connection),
   };
+}
+
+export async function openAppDatabase(signal: AbortSignal): Promise<WorkloadDatabaseConnection | "busy" | null> {
+  const db = await getDb();
+  if (!db) return null;
+  return openPoolDatabase(db.$client, signal);
 }
 
 export async function openAppRedis(signal: AbortSignal): Promise<WorkloadRedisConnection | null> {

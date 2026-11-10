@@ -11,7 +11,7 @@ import { createRequire } from "node:module";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { QUEUE_IDS } from "./workloadCatalogue";
 import { runWorkloadCheck, type WorkloadCheckDependencies } from "./workloadCheck";
-import { appReplica, openAppRedis } from "./workloadReaders";
+import { appReplica, openAppRedis, openPoolDatabase, type BorrowedConnection, type ConnectionSource } from "./workloadReaders";
 
 const FIXTURE = process.env.RECONCILEAI_TEST_REDIS_URL?.trim();
 const FIXTURE_DB = 13;
@@ -48,6 +48,91 @@ describe("when the replica describes itself", () => {
 
   it("should report nothing it was not given", () => {
     expect(appReplica({})).toMatchObject({ commit: null, deploymentId: null, replicaId: null });
+  });
+});
+
+/** A pool whose answers the test hands out by hand. */
+function handPool() {
+  const waiting: ((error: Error | null, connection?: BorrowedConnection) => void)[] = [];
+  const source: ConnectionSource = { getConnection: callback => void waiting.push(callback) };
+  return { source, waiting };
+}
+function fakeConnection(answer?: (callback: (error: Error | null, rows: unknown) => void) => void) {
+  const calls = { released: 0, destroyed: 0, socketDestroyed: 0 };
+  const connection: BorrowedConnection = {
+    query: (_options, callback) => {
+      if (answer) answer(callback);
+      return undefined;
+    },
+    release: () => void calls.released++,
+    destroy: () => void calls.destroyed++,
+    stream: { destroy: () => void calls.socketDestroyed++ },
+  };
+  return { connection, calls };
+}
+
+describe("when a statement is cancelled or its connection dropped", () => {
+  it("should take the connection out of the pool AND destroy its socket", async () => {
+    const pool = handPool();
+    const opening = openPoolDatabase(pool.source, new AbortController().signal);
+    const hung = fakeConnection(); // never answers
+    pool.waiting.shift()?.(null, hung.connection);
+    const reader = await opening;
+    if (reader === "busy") throw new Error("unexpected busy");
+    const cancel = new AbortController();
+    const running = reader.run("session.timezone", cancel.signal);
+    cancel.abort();
+    await expect(running).rejects.toThrow("aborted");
+    expect(hung.calls).toEqual({ released: 0, destroyed: 1, socketDestroyed: 1 });
+  });
+
+  it("should do the same when the check drops the connection", async () => {
+    const pool = handPool();
+    const opening = openPoolDatabase(pool.source, new AbortController().signal);
+    const fine = fakeConnection(callback => callback(null, [{ tz: "+00:00" }]));
+    pool.waiting.shift()?.(null, fine.connection);
+    const reader = await opening;
+    if (reader === "busy") throw new Error("unexpected busy");
+    await expect(reader.run("session.timezone", new AbortController().signal)).resolves.toEqual({ tz: "+00:00" });
+    reader.drop();
+    expect(fine.calls).toEqual({ released: 0, destroyed: 1, socketDestroyed: 1 });
+  });
+});
+
+describe("when the pool does not answer in time", () => {
+  it("should keep one request waiting at most, and give a late connection back unused", async () => {
+    const pool = handPool();
+    const timeout = new AbortController();
+    const first = openPoolDatabase(pool.source, timeout.signal);
+    timeout.abort();
+    await expect(first).rejects.toThrow("aborted");
+    expect(pool.waiting).toHaveLength(1);
+
+    // The abandoned request is still in the pool's queue: no second one joins it.
+    await expect(openPoolDatabase(pool.source, new AbortController().signal)).resolves.toBe("busy");
+    expect(pool.waiting).toHaveLength(1);
+
+    // The pool answers late: the connection was never used, so it goes straight back.
+    const late = fakeConnection();
+    pool.waiting.shift()?.(null, late.connection);
+    expect(late.calls).toEqual({ released: 1, destroyed: 0, socketDestroyed: 0 });
+
+    // And the next check may ask again.
+    const next = openPoolDatabase(pool.source, new AbortController().signal);
+    expect(pool.waiting).toHaveLength(1);
+    pool.waiting.shift()?.(null, fakeConnection().connection);
+    await expect(next).resolves.not.toBe("busy");
+  });
+
+  it("should clear the waiting request when the pool answers with an error", async () => {
+    const pool = handPool();
+    const opening = openPoolDatabase(pool.source, new AbortController().signal);
+    pool.waiting.shift()?.(new Error("ETIMEDOUT"));
+    await expect(opening).rejects.toThrow("unavailable");
+    const next = openPoolDatabase(pool.source, new AbortController().signal);
+    expect(pool.waiting).toHaveLength(1);
+    pool.waiting.shift()?.(null, fakeConnection().connection);
+    await expect(next).resolves.not.toBe("busy");
   });
 });
 
