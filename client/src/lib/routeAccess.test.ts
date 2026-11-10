@@ -255,6 +255,7 @@ describe("when a tenant user types the URL of a route their ROLE does not have",
       "/admin/super-admin/analytics",
       "/admin/poc",
       "/admin/roadmap-access",
+      "/admin/maintenance-check",
     ]) {
       expect(canReachPath(p, "financial_services", "admin"), p).toBe(false);
       expect(canReachPath(p, "financial_services", "super_admin"), p).toBe(true);

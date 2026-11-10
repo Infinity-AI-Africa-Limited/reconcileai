@@ -124,4 +124,11 @@ the same risk as any deploy made now.
 - `server/maintenance/workloadCheck.ts`: one reading, bounded, with the verdict rules.
 - `server/maintenance/workloadReaders.ts`: the real database and Redis connections.
 - `server/routers/maintenanceCheck.ts`: the super-admin mutation, mounted as `maintenanceCheck`.
-- The private page is a separate, stacked change.
+- `client/src/pages/MaintenanceCheck.tsx`: the page, at `/admin/maintenance-check`
+  (Infinity AI → Maintenance Check). It only renders.
+- `client/src/hooks/useMaintenanceCheck.ts`: one reading per press, kept in page
+  memory only; nothing runs on load, focus or a timer.
+- `client/src/lib/maintenanceCheck.ts`: plain words for every code, and the rule
+  for a run of readings: the latest three must all observe nothing, each at
+  least a minute after the one before. Even that is shown as "nothing
+  observed", never as permission.
