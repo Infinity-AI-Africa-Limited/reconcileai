@@ -169,6 +169,7 @@
     "server/maintenance/workloadReaders.db.test.ts",
     "server/routers/maintenanceCheck.test.ts",
     "server/routers/maintenanceCheck.http.db.test.ts",
+    "server/maintenance/railwayLaunch.test.ts",
     "server/jobQueue.maintenance.test.ts",
     "server/jobQueue.maintenance.redis.test.ts",
     "server/api/gatewayLifetime.test.ts",

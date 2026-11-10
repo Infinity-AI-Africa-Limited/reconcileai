@@ -6,7 +6,9 @@
   },
   "deploy": {
     "preDeployCommand": "pnpm db:migrate",
-    "startCommand": "pnpm start",
+    "startCommand": "NODE_ENV=production exec node dist/index.js",
+    "drainingSeconds": 120,
+    "overlapSeconds": 0,
     "healthcheckPath": "/api/healthz",
     "healthcheckTimeout": 120,
     "restartPolicyType": "ON_FAILURE",
