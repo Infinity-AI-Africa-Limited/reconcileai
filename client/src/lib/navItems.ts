@@ -199,6 +199,7 @@ export const NAV_ITEMS: NavEntry[] = [
   { label: "Platform Analytics", path: "/admin/super-admin/analytics", group: "superAdmin", roles: ["super_admin"] },
   { label: "POC Hub", path: "/admin/poc", group: "superAdmin", roles: ["super_admin"] },
   { label: "Roadmap Access", path: "/admin/roadmap-access", group: "superAdmin", roles: ["super_admin"] },
+  { label: "Maintenance Check", path: "/admin/maintenance-check", group: "superAdmin", roles: ["super_admin"] },
 ];
 
 /**

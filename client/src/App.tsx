@@ -74,6 +74,7 @@ import CBNCompliance from "./pages/CBNCompliance";
 import MagicLogin from "./pages/MagicLogin";
 import Login from "./pages/Login";
 import SuperAdminDashboard from "./pages/SuperAdminDashboard";
+import MaintenanceCheck from "./pages/MaintenanceCheck";
 import { ShoplineWelcome, ShoplineError } from "./pages/ShoplineConnect";
 import { ShopifyError } from "./pages/ShopifyConnect";
 import ShopifyAppHome from "./pages/ShopifyAppHome";
@@ -295,6 +296,7 @@ function Router() {
           <Route path="/admin/super-admin/orgs">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
           <Route path="/admin/super-admin/users">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
           <Route path="/admin/super-admin/analytics">{() => <DashboardPage component={SuperAdminDashboard} />}</Route>
+          <Route path="/admin/maintenance-check">{() => <DashboardPage component={MaintenanceCheck} />}</Route>
           <Route path="/roadmap-access" component={RoadmapAccess} />
           <Route path="/roadmap" component={RoadmapViewer} />
       <Route path="/settlement-monitor">{() => <DashboardPage component={SettlementMonitor} />}</Route>

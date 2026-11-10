@@ -56,6 +56,7 @@ import {
   Globe,
   BarChart3,
   Network,
+  Gauge,
 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState } from "react";
 import { useLocation } from "wouter";
@@ -117,6 +118,7 @@ const NAV_ICONS: Record<string, React.ElementType> = {
   "/admin/super-admin/analytics": BarChart3,
   "/admin/poc": FlaskConical,
   "/admin/roadmap-access": Map,
+  "/admin/maintenance-check": Gauge,
 };
 
 /** Attach the icon a NavEntry needs to render. */

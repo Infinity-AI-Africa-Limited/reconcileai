@@ -134,6 +134,40 @@ describe("when the pool does not answer in time", () => {
     pool.waiting.shift()?.(null, fakeConnection().connection);
     await expect(next).resolves.not.toBe("busy");
   });
+
+  it("should reopen admission after acquisition throws synchronously", async () => {
+    const source: ConnectionSource = { getConnection: () => { throw new Error("synthetic acquisition failure"); } };
+    const signal = new AbortController();
+    await expect(openPoolDatabase(source, signal.signal)).rejects.toThrow("unavailable");
+    signal.abort(); // The failed request's listener must no longer affect admission.
+    const pool = handPool();
+    const next = openPoolDatabase(pool.source, new AbortController().signal);
+    expect(pool.waiting).toHaveLength(1);
+    pool.waiting.shift()?.(null, fakeConnection().connection);
+    const reader = await next;
+    expect(reader).not.toBe("busy");
+    if (reader !== "busy") reader.release();
+  });
+
+  it("should not let an older thrown acquisition clear a newer waiting request", async () => {
+    const old = handPool();
+    const source: ConnectionSource = { getConnection: callback => {
+      old.source.getConnection(callback);
+      throw new Error("synthetic acquisition failure");
+    } };
+    await expect(openPoolDatabase(source, new AbortController().signal)).rejects.toThrow("unavailable");
+    const pool = handPool();
+    const next = openPoolDatabase(pool.source, new AbortController().signal);
+    expect(pool.waiting).toHaveLength(1);
+    const late = fakeConnection();
+    old.waiting.shift()?.(null, late.connection);
+    expect(late.calls.released).toBe(1);
+    await expect(openPoolDatabase(pool.source, new AbortController().signal)).resolves.toBe("busy");
+    expect(pool.waiting).toHaveLength(1);
+    pool.waiting.shift()?.(null, fakeConnection().connection);
+    const reader = await next;
+    if (reader !== "busy") reader.release();
+  });
 });
 
 describe("when the app has no Redis", () => {
