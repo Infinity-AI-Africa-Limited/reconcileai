@@ -30,7 +30,7 @@ const VERDICTS: Record<WorkloadVerdict, VerdictPresentation> = {
     title: "Nothing observed",
     tone: "neutral",
     message:
-      "Nothing was in flight in the areas checked at this moment. This is not permission to deploy, back up or change anything.",
+      "Nothing was in flight in the areas checked when this reading was taken. This is not permission to deploy, back up or change anything.",
   },
 };
 
@@ -40,6 +40,7 @@ export function presentVerdict(verdict: WorkloadVerdict): VerdictPresentation {
 
 const ERRORS: Record<string, string> = {
   database_unavailable: "The database could not be reached.",
+  database_busy: "An earlier check is still waiting for a database connection, so this one did not queue another.",
   database_session_failed: "The database session was not in UTC, so ages could not be trusted.",
   database_snapshot_failed: "A consistent database snapshot could not be opened.",
   database_read_failed: "A database count failed.",

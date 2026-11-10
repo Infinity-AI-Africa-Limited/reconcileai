@@ -23,6 +23,7 @@
     "scripts/closeDuplicateRetailExceptions.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
     "client/src/lib/maintenanceCheck.test.ts",
+    "client/src/lib/maintenanceCheckSession.test.ts",
     "client/src/lib/exceptionWorkflowPresentation.test.ts",
     "client/src/lib/exceptionWorkflowPanel.test.ts",
     "client/src/lib/keyedDraft.test.ts",

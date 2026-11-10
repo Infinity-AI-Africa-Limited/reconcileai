@@ -175,8 +175,20 @@ deployment.
 - `server/routers/maintenanceCheck.ts`: the super-admin mutation, mounted as `maintenanceCheck`.
 - `client/src/pages/MaintenanceCheck.tsx`: the page, at `/admin/maintenance-check`
   (Infinity AI → Maintenance Check). It only renders.
-- `client/src/hooks/useMaintenanceCheck.ts`: one reading per press, kept in page
-  memory only; nothing runs on load, focus or a timer.
+- `client/src/hooks/useMaintenanceCheck.ts`: glue between React and the
+  controller. Nothing runs on load, focus, reconnect or a timer; the clock only
+  re-renders, so old readings turn into history.
+- `client/src/lib/maintenanceCheckSession.ts`: the page's rules and lifecycle.
+  - One press is one request, sent now or not at all: an offline press is
+    refused, and the mutation never pauses, retries or replays.
+  - A synchronous lock allows one request at a time.
+  - Every answer is matched to the attempt and generation that asked. Clearing,
+    changing account or closing the page drops answers still to come. Closing
+    the page does not cancel a request the server already has.
+  - Readings are current only while nothing runs, the last attempt succeeded and
+    the newest is under five minutes old; otherwise they are labelled history.
+  - Failures are fixed sentences chosen by error code, never the server's text.
+  - The mutation is dropped from the client's cache once nothing observes it.
 - `client/src/lib/maintenanceCheck.ts`: plain words for every code, and the rule
   for a run of readings: the latest three must all observe nothing, each at
   least a minute after the one before. Even that is shown as "nothing

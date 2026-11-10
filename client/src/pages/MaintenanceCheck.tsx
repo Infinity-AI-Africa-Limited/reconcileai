@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useMaintenanceCheck, type WorkloadReport } from "@/hooks/useMaintenanceCheck";
+import type { CheckSession, Evidence } from "@/lib/maintenanceCheckSession";
 import {
   describeError,
   describeNotCollected,
@@ -18,9 +19,10 @@ import {
  * Maintenance check: a super-admin reading of the work in flight.
  *
  * The page only renders. One press of "Run check" asks the server for one
- * reading; the hook keeps this visit's readings and the rules in
- * lib/maintenanceCheck judge them. Nothing is stored, and nothing here is
- * permission to change production.
+ * reading, now or not at all; the hook keeps this visit's readings, and the
+ * rules in lib/maintenanceCheckSession decide what is current and what is
+ * history. Nothing is stored, and nothing here is permission to change
+ * production.
  */
 const TONE_CLASSES: Record<Tone, string> = {
   critical: "border-red-500/40 bg-red-500/10",
@@ -39,12 +41,14 @@ const STATE_LABELS: Record<string, string> = {
   repeat: "Repeat schedules",
 };
 
-function Verdict({ report }: { report: WorkloadReport }) {
+const timeOf = (ms: number): string => new Date(ms).toLocaleTimeString("en-GB");
+
+function Verdict({ report, historical }: { report: WorkloadReport; historical: boolean }) {
   const verdict = presentVerdict(report.verdict);
   return (
-    <div className={`rounded-lg border p-4 ${TONE_CLASSES[verdict.tone]}`}>
+    <div className={`rounded-lg border p-4 ${historical ? "border-dashed opacity-70 " + TONE_CLASSES.neutral : TONE_CLASSES[verdict.tone]}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <h2 className="text-lg font-semibold">{verdict.title}</h2>
+        <h2 className="text-lg font-semibold">{historical ? `${verdict.title} (history)` : verdict.title}</h2>
         <span className="text-xs text-muted-foreground">
           {new Date(report.checkedAt).toLocaleString("en-GB", { timeZoneName: "short" })} · {report.elapsedMs} ms
         </span>
@@ -245,15 +249,52 @@ function Blind({ report }: { report: WorkloadReport }) {
   );
 }
 
+function AttemptLine({ session }: { session: CheckSession<WorkloadReport> }) {
+  const attempt = session.attempt;
+  if (attempt.kind === "none") return null;
+  if (attempt.kind === "running") return <p className="text-sm">Reading… started {timeOf(attempt.startedAt)}.</p>;
+  if (attempt.kind === "failed")
+    return (
+      <Alert variant="destructive">
+        <AlertTitle>The last attempt did not complete</AlertTitle>
+        <AlertDescription>
+          {timeOf(attempt.at)}: {attempt.message}
+        </AlertDescription>
+      </Alert>
+    );
+  return <p className="text-sm text-muted-foreground">Last reading received at {timeOf(attempt.at)}.</p>;
+}
+
+function HistoryNote({ evidence }: { evidence: Evidence<WorkloadReport> }) {
+  if (evidence.kind === "none" || evidence.kind === "current" || !evidence.last) return null;
+  const reason =
+    evidence.kind === "pending"
+      ? "A new reading is in progress."
+      : evidence.kind === "failed"
+        ? "The attempt after it did not complete."
+        : "It is more than five minutes old.";
+  return (
+    <Alert>
+      <AlertTitle>History, not the current state</AlertTitle>
+      <AlertDescription>
+        This reading was received at {timeOf(evidence.last.receivedAt)}. {reason}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 export default function MaintenanceCheck() {
-  const { latest, reports, summary, run, running, error } = useMaintenanceCheck();
+  const { session, evidence, summary, running, run, clear } = useMaintenanceCheck();
+  const shown = evidence.kind === "none" ? null : evidence.last;
+  const current = evidence.kind === "current";
+  const newestId = session.readings.at(-1)?.attemptId;
   return (
     <div className="mx-auto max-w-6xl space-y-6 p-4 sm:p-6">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold">Maintenance check</h1>
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Reads the work the platform has in flight, for deciding whether maintenance can start. It changes nothing.
-          No result is permission to deploy, back up or change production.
+          Reads the work the platform has in flight, for deciding whether maintenance can start. It only reads, and it
+          changes no business data. No result is permission to deploy, back up or change production.
         </p>
       </header>
 
@@ -267,27 +308,24 @@ export default function MaintenanceCheck() {
             <Button onClick={run} disabled={running}>
               {running ? "Reading…" : "Run check"}
             </Button>
+            <Button variant="outline" onClick={clear} disabled={session.readings.length === 0 && session.attempt.kind === "none"}>
+              Clear readings
+            </Button>
             <span className="text-xs text-muted-foreground">
-              One reading per press. Take three, each at least a minute after the last.
+              One reading per press, sent now or not at all. Take three, each at least a minute after the last.
             </span>
           </div>
-          {error ? (
-            <Alert variant="destructive">
-              <AlertTitle>The check did not run</AlertTitle>
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          ) : null}
-          {reports.length > 0 ? (
+          <AttemptLine session={session} />
+          {session.readings.length > 0 ? (
             <ol className="space-y-1 text-sm">
-              {reports
+              {session.readings
                 .slice()
                 .reverse()
-                .map(report => (
-                  <li key={report.checkedAt} className="flex flex-wrap gap-x-3">
-                    <span className="tabular-nums text-muted-foreground">
-                      {new Date(report.checkedAt).toLocaleTimeString("en-GB")}
-                    </span>
-                    <span>{presentVerdict(report.verdict).title}</span>
+                .map(reading => (
+                  <li key={reading.attemptId} className="flex flex-wrap gap-x-3">
+                    <span className="tabular-nums text-muted-foreground">{timeOf(reading.receivedAt)}</span>
+                    <span>{presentVerdict(reading.report.verdict).title}</span>
+                    {current && reading.attemptId === newestId ? null : <span className="text-muted-foreground">(history)</span>}
                   </li>
                 ))}
             </ol>
@@ -295,15 +333,16 @@ export default function MaintenanceCheck() {
         </CardContent>
       </Card>
 
-      {latest ? (
-        <section className="space-y-6" aria-label="Latest reading">
-          <Verdict report={latest} />
-          <Problems errors={latest.errors} />
-          <Surfaces report={latest} />
-          <Queues report={latest} />
-          <Intake report={latest} />
-          <ThisServer report={latest} />
-          <Blind report={latest} />
+      {shown ? (
+        <section className="space-y-6" aria-label={current ? "Current reading" : "Earlier reading"}>
+          <HistoryNote evidence={evidence} />
+          <Verdict report={shown.report} historical={!current} />
+          <Problems errors={shown.report.errors} />
+          <Surfaces report={shown.report} />
+          <Queues report={shown.report} />
+          <Intake report={shown.report} />
+          <ThisServer report={shown.report} />
+          <Blind report={shown.report} />
         </section>
       ) : null}
     </div>
