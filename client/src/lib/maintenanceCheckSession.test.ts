@@ -144,13 +144,25 @@ describe("when the page decides whether a reading is current", () => {
     expect(evidenceOf(session, T0).kind).toBe("stale");
   });
 
-  it.each(["not-a-timestamp", "2026-02-31T12:00:00.000Z", new Date(T0 + 1).toISOString()])(
-    "should treat an invalid, normalized or future observation timestamp as history: %s", stamp => {
+  it.each(["not-a-timestamp", "2026-02-31T12:00:00.000Z"])(
+    "should treat an invalid or noncanonical observation timestamp as history: %s", stamp => {
       const begun = start(newSession<Report>(), T0);
       const session = completeAttempt(begun.session, begun.generation, begun.id, { ok: true, report: { ...report(T0), checkedAt: stamp } }, T0);
       expect(evidenceOf(session, T0).kind).toBe("stale");
     },
   );
+
+  it("should keep a genuine reading current when the browser's clock runs behind the server's", () => {
+    // The browser is 3 s behind the server: the server stamps the reading 3 s
+    // "after" the browser received it. That is skew, not a stale answer.
+    const begun = start(newSession<Report>(), T0);
+    const received = T0 + 1_000;
+    const session = completeAttempt(begun.session, begun.generation, begun.id, { ok: true, report: report(T0 + 3_000) }, received);
+    expect(evidenceOf(session, received + 500).kind).toBe("current");
+    // ...and the server's later clock still cannot stretch the window past the request's start.
+    expect(evidenceOf(session, T0 + FRESH_FOR_MS - 1).kind).toBe("current");
+    expect(evidenceOf(session, T0 + FRESH_FOR_MS).kind).toBe("stale");
+  });
 
   it("should treat client clock reversal and a non-finite clock as history", () => {
     const session = reading(newSession<Report>(), T0);

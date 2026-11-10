@@ -193,10 +193,13 @@ deployment.
     changing account or closing the page drops answers still to come. Closing
     the page does not cancel a request the server already has.
   - Readings are current only while nothing runs, the last attempt succeeded and
-    the observation and local request are both under five minutes old; otherwise
-    they are labelled history. Late delivery never restarts the freshness window.
-    Invalid, noncanonical or future observation times and client clock reversal
-    are also history; no clock-skew tolerance or attestation is assumed.
+    under five minutes have passed since the EARLIER of the server's observation
+    and the page's request; otherwise they are labelled history. Late delivery
+    never restarts the window, and a server clock ahead of the browser cannot
+    stretch it. A server stamp later than the browser's clock is treated as clock
+    skew, not as staleness, so a browser running a second behind still sees
+    current readings. Malformed or noncanonical stamps and a browser clock that
+    went backwards are history. This is conservative freshness, not attestation.
   - Failures are fixed sentences chosen by error code, never the server's text.
   - The mutation is dropped from the client's cache once nothing observes it.
 - `client/src/lib/maintenanceCheck.ts`: plain words for every code, and the rule

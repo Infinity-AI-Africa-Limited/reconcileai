@@ -136,13 +136,18 @@ export function evidenceOf<R extends ReadingResult>(session: CheckSession<R>, no
   if (!last) return { kind: "none" };
   const stamp = last.report.checkedAt;
   const observed = typeof stamp === "string" ? Date.parse(stamp) : Number.NaN;
-  // No assumed clock-skew tolerance: malformed/future stamps and clock reversal
-  // are history. Even a server clock ahead of admission cannot extend the local
-  // request's five-minute window. This is conservative freshness, not attestation.
+  // Age runs from the EARLIER of the server's observation and the moment this
+  // page sent the request, so neither a late delivery nor a server clock ahead
+  // of the browser can stretch the five-minute window. A server stamp later
+  // than the browser's clock is skew, not staleness: refusing it would turn
+  // every genuine reading into history for a browser whose clock runs a second
+  // behind, and buys nothing, since the earlier time already bounds the age.
+  // Malformed or noncanonical stamps and a clock that went backwards are
+  // history. Conservative freshness, not attestation.
   if (
     !Number.isFinite(now) || !Number.isFinite(last.startedAt) || !Number.isFinite(last.receivedAt) ||
     !Number.isFinite(observed) || new Date(observed).toISOString() !== last.report.checkedAt ||
-    last.receivedAt < last.startedAt || now < last.receivedAt || observed > last.receivedAt ||
+    last.receivedAt < last.startedAt || now < last.receivedAt ||
     now - Math.min(observed, last.startedAt) >= FRESH_FOR_MS
   ) return { kind: "stale", last };
   return { kind: "current", last };
@@ -159,7 +164,7 @@ export function describeSession<R extends ReadingResult>(session: CheckSession<R
     case "failed":
       return `The last attempt did not complete: ${evidence.message} Earlier readings are history.`;
     case "stale":
-      return "The newest reading cannot be treated as current, so it is history. Take a new reading.";
+      return "The newest reading is five minutes or more old, or its timing could not be trusted, so it is history. Take a new reading.";
     case "current": {
       const run = session.readings
         .filter(r => r.receivedAt > session.brokenAt)
