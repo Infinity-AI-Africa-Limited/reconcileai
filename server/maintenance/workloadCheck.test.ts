@@ -34,6 +34,7 @@ const REPLICA: WorkloadReplica = {
 
 interface DatabaseScript {
   notConfigured?: boolean;
+  busy?: boolean;
   openFails?: boolean;
   rows?: Partial<Record<DatabaseStatementId, unknown>>;
   fail?: DatabaseStatementId;
@@ -86,6 +87,7 @@ function harness(database: DatabaseScript = {}, redis: RedisScript = {}) {
     openDatabase: async () => {
       if (database.openFails) throw new Error("unavailable");
       if (database.notConfigured) return null;
+      if (database.busy) return "busy";
       return {
         run: (id, signal) => {
           calls.statements.push(id);
@@ -293,6 +295,16 @@ describe("when the database cannot be read as asked", () => {
     const report = await runWorkloadCheck(deps);
     expect(report.errors).toContain("database_unavailable");
     expect(report.database.snapshot).toBe("unavailable");
+    expect(calls.reads.length).toBe(QUEUE_IDS.length * QUEUE_STATES.length);
+  });
+
+  it("should say so when an earlier check's request for a connection is still waiting", async () => {
+    const { deps, calls } = harness({ busy: true });
+    const report = await runWorkloadCheck(deps);
+    expect(report.errors).toContain("database_busy");
+    expect(report.errors).not.toContain("database_unavailable");
+    expect(report.verdict).toBe("no_go_incomplete_evidence");
+    expect(calls.statements).toEqual([]);
     expect(calls.reads.length).toBe(QUEUE_IDS.length * QUEUE_STATES.length);
   });
 
