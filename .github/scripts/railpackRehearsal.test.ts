@@ -33,13 +33,27 @@ const SCRIPT = path.resolve(__dirname, "railpack-rehearsal.sh").replace(/\\/g, "
  *   app_exits  the probe fails and the app container is no longer running;
  *   never      the probe fails and the app keeps running.
  * `docker exec` (the migration count) answers FAKE_RECORDED_MIGRATIONS.
+ * pnpm's no-op answers by FAKE_PNPM: "needs_registry" fails with the
+ * registry error unless the fetched-pnpm volume is mounted; anything else runs.
  */
 const FAKE_DOCKER = `#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$CALL_LOG"
 case "$1" in
+  volume) ;;
   run)
     case " $* " in
+      *" --entrypoint printenv "*) echo /opt/pnpm ;;
+      *" --entrypoint node "*" -p "*) echo 10.18.0 ;;
       *" --entrypoint node "*) if [ "$FAKE_DOCKER_MODE" = healthy ]; then exit 0; fi; exit 1 ;;
+      *"command -v pnpm"*) echo /app/node_modules/.bin/pnpm ;;
+      *"pnpm exec node --version"*)
+        case " $* " in
+          *" --volume "*) echo v22.0.0 ;;
+          *) if [ "$FAKE_PNPM" = needs_registry ]; then
+               echo "request to https://registry.npmjs.org/pnpm/-/pnpm-10.4.1.tgz failed" >&2; exit 1
+             fi
+             echo v22.0.0 ;;
+        esac ;;
       *" --detach "*) echo fakecontainerid ;;
     esac ;;
   exec) echo "$FAKE_RECORDED_MIGRATIONS" ;;
@@ -67,6 +81,7 @@ const SCRIPT_ENV_KNOBS = [
   "HEALTH_TIMEOUT_SECONDS",
   "PROBE_INTERVAL_SECONDS",
   "STOP_TIMEOUT_SECONDS",
+  "PNPM_TOOLS_VOLUME",
 ] as const;
 
 let workDir: string;
@@ -107,6 +122,7 @@ async function runScript(
     SCRIPT_PATH: SCRIPT,
     FAKE_DOCKER_MODE: mode,
     FAKE_RECORDED_MIGRATIONS: "3",
+    FAKE_PNPM: "runs_offline",
     CALL_LOG: callLog.replace(/\\/g, "/"),
     IMAGE: "rehearsal-image:test",
     NETWORK: "rehearsal-net",
@@ -200,6 +216,8 @@ describe("when the app answers its health check", () => {
     expect(start?.match(/--env /g)).toHaveLength(3);
     expect(start).not.toContain("--publish");
     expect(start).not.toMatch(/(^| )-p /);
+    // No fetched-pnpm volume unless one is asked for.
+    expect(start).not.toContain("--volume");
   });
 
   it("should probe from a separate container on the same network", async () => {
@@ -250,6 +268,80 @@ describe("when a started app is stopped", () => {
     expect(result.results).toMatch(/^app-one_stop_seconds=\d+$/m);
     expect(result.results).toContain("app-one_exit_code=0");
     expect(result.results).toContain("app-one_shutdown_logged=stopped");
+  });
+});
+
+describe("when pnpm in the image needs the npm registry before it runs", () => {
+  it("should record which pnpm runs, its version and the dependency, warn, and not fail", async () => {
+    const result = await runScript(["pnpm-check"], "healthy", { FAKE_PNPM: "needs_registry" });
+
+    expect(result.code, result.out).toBe(0);
+    expect(result.results).toContain("runtime_pnpm_path=/app/node_modules/.bin/pnpm");
+    expect(result.results).toContain("project_pnpm_version=10.18.0");
+    expect(result.results).toContain("runtime_pnpm_needs_registry=yes");
+    expect(result.out).toContain("::warning::");
+  });
+
+  it("should check with no route out: every container it starts is on the internal network", async () => {
+    const result = await runScript(["pnpm-check"], "healthy", { FAKE_PNPM: "needs_registry" });
+
+    const runs = result.calls.filter((c) => c.startsWith("run "));
+    expect(runs.length).toBeGreaterThan(0);
+    for (const call of runs) expect(call).toContain("--network rehearsal-net");
+  });
+});
+
+describe("when pnpm in the image runs without the network", () => {
+  it("should record that it needs nothing, without a warning", async () => {
+    const result = await runScript(["pnpm-check"], "healthy");
+
+    expect(result.code, result.out).toBe(0);
+    expect(result.results).toContain("runtime_pnpm_needs_registry=no");
+    expect(result.out).not.toContain("::warning::");
+  });
+});
+
+describe("when pnpm fetches its pinned version once, outside the app", () => {
+  it("should refuse without a volume to keep it in", async () => {
+    const result = await runScript(["pnpm-seed"], "healthy");
+
+    expect(result.code).not.toBe(0);
+    expect(result.out).toContain("pnpm-seed needs PNPM_TOOLS_VOLUME");
+  });
+
+  it("should run pnpm alone, with the volume where pnpm keeps fetched versions and no app settings", async () => {
+    const result = await runScript(["pnpm-seed"], "healthy", {
+      FAKE_PNPM: "needs_registry",
+      PNPM_TOOLS_VOLUME: "rehearsal-tools",
+    });
+
+    expect(result.code, result.out).toBe(0);
+    expect(result.calls).toContain("volume create rehearsal-tools");
+    const seed = result.calls.find((c) => c.startsWith("run ") && c.includes("pnpm exec node --version"));
+    expect(seed).toContain("--volume rehearsal-tools:/opt/pnpm/.tools");
+    // The one container with a route out: it gets no app settings at all.
+    expect(seed).not.toContain("--network");
+    expect(seed).not.toContain("--env");
+    expect(seed).not.toContain("DATABASE_URL");
+    expect(result.results).toContain("pnpm_seeded=yes");
+  });
+
+  it("should give the fetched copy to the pre-deploy command and the start, still on the internal network", async () => {
+    const env = { PNPM_TOOLS_VOLUME: "rehearsal-tools" };
+    const migrate = await runScript(["migrate"], "healthy", env);
+    const start = await runScript(["start", "app-one"], "healthy", env);
+
+    expect(migrate.code, migrate.out).toBe(0);
+    expect(start.code, start.out).toBe(0);
+    const calls = [
+      ...migrate.calls.filter((c) => c.includes("pnpm db:migrate")),
+      ...start.calls.filter((c) => c.includes("--detach")),
+    ];
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      expect(call).toContain("--network rehearsal-net");
+      expect(call).toContain("--volume rehearsal-tools:/opt/pnpm/.tools");
+    }
   });
 });
 

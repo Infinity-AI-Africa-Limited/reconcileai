@@ -25,7 +25,9 @@ name: Railpack build rehearsal
 #     planning step runs with an empty environment, and no build argument
 #     carries a credential;
 #   - the app runs on an internal Docker network with no route out, so it
-#     cannot reach any email, LLM, storage, OAuth or merchant service.
+#     cannot reach any email, LLM, storage, OAuth or merchant service. The one
+#     container given normal network access runs pnpm and no app code (see
+#     "Let pnpm fetch its pinned version once").
 
 on:
   # Every base, as tools/ciTriggers.test.ts requires of every workflow.
@@ -170,16 +172,37 @@ jobs:
           .github/scripts/start-test-mysql.sh
           docker network connect "$NETWORK" "$MYSQL_CONTAINER"
 
+      # The first run of this rehearsal found that pnpm in this image fetches
+      # another pnpm from the npm registry before doing anything: the image's
+      # PATH puts /app/node_modules/.bin first, where the project's own pnpm
+      # devDependency lives, and that pnpm defers to the version package.json
+      # pins. This step records it on every run.
+      - name: Record which pnpm the image runs (observation)
+        run: .github/scripts/railpack-rehearsal.sh pnpm-check
+
+      # On Railway the container reaches the registry and fetches that pnpm
+      # itself, on every run. Here it is fetched once, by a container that runs
+      # pnpm and no app code, so the app containers never need a route out.
+      - name: Let pnpm fetch its pinned version once, outside the app
+        env:
+          PNPM_TOOLS_VOLUME: railpack-rehearsal-pnpm-tools
+        run: .github/scripts/railpack-rehearsal.sh pnpm-seed
+
       - name: Run the pre-deploy command in the image (pnpm db:migrate)
+        env:
+          PNPM_TOOLS_VOLUME: railpack-rehearsal-pnpm-tools
         run: .github/scripts/railpack-rehearsal.sh migrate
 
       - name: Start with Railpack's own start command and call /api/healthz
+        env:
+          PNPM_TOOLS_VOLUME: railpack-rehearsal-pnpm-tools
         run: .github/scripts/railpack-rehearsal.sh start app-railpack-default
 
       - name: Observe how it stops (not a gate)
         run: .github/scripts/railpack-rehearsal.sh stop app-railpack-default
 
       # The held candidate (PR #233) replaces `pnpm start` with this launcher.
+      # It runs no pnpm, so it gets no fetched copy: it must start on its own.
       - name: Start with the held candidate's direct launcher and call /api/healthz
         run: .github/scripts/railpack-rehearsal.sh start app-direct-launcher "NODE_ENV=production exec node dist/index.js"
 
@@ -208,6 +231,9 @@ jobs:
             row "Build commands" "$(get build_commands)"
             row "Start command (detected)" "$(get start_command)"
             row "Image size (bytes)" "$(get image_bytes)"
+            row "pnpm on the image's PATH" "$(get runtime_pnpm_path)"
+            row "The project's own pnpm (devDependency)" "$(get project_pnpm_version)"
+            row "pnpm needs the npm registry before it runs anything" "$(get runtime_pnpm_needs_registry)"
             row "Migrations in the journal" "$(get migrations_journal)"
             row "Migrations recorded after two runs" "$(get migrations_recorded)"
             row "Healthy after (s), Railpack's start command" "$(get app-railpack-default_healthy_after_seconds)"
