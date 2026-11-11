@@ -6,6 +6,13 @@
 # runs the image the way a platform runs a deployment of it, against a
 # throwaway MySQL, on a Docker network with no route out:
 #
+#   pnpm-check        record which pnpm the image runs, and whether running it
+#                     needs the npm registry. An observation, never a failure.
+#   pnpm-seed         run pnpm once, with normal network access and no app
+#                     code, so that any copy of pnpm it fetches lands in the
+#                     volume PNPM_TOOLS_VOLUME. On Railway the container has
+#                     the internet and fetches it itself; here the app never
+#                     does, so the fetch happens once, outside the app.
 #   migrate           the pre-deploy command, `pnpm db:migrate`, twice. The
 #                     first run must record every committed migration; the
 #                     second must add none, as on every later deploy.
@@ -15,6 +22,9 @@
 #                     health check reaches a deployment from outside it.
 #   stop NAME         send SIGTERM and record how the container ended. This is
 #                     an observation, not a gate: see the workflow.
+#
+# When PNPM_TOOLS_VOLUME is set, migrate and start mount that volume where pnpm
+# keeps the versions it fetches, so they find the copy pnpm-seed fetched.
 #
 # Every value is synthetic. The app receives PORT, DATABASE_URL (the throwaway
 # database) and a JWT_SECRET generated here, and nothing else.
@@ -27,12 +37,63 @@ HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-120}"
 PROBE_INTERVAL_SECONDS="${PROBE_INTERVAL_SECONDS:-2}"
 STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-30}"
 JOURNAL="${JOURNAL:-drizzle/meta/_journal.json}"
+PNPM_TOOLS_VOLUME="${PNPM_TOOLS_VOLUME:-}"
 APP_PORT=3000
 DATABASE_URL_IN_NETWORK="mysql://root:${MYSQL_ROOT_PASSWORD}@${MYSQL_CONTAINER}:3306/${MYSQL_DATABASE}"
+# A command that makes pnpm settle its own version, and runs no app code.
+PNPM_NOOP="pnpm exec node --version"
 
 log() { printf '[railpack-rehearsal] %s\n' "$*"; }
 fail() { printf '::error::%s\n' "$*"; exit 1; }
 record() { printf '%s=%s\n' "$1" "$2" >> "$RESULTS"; }
+
+# The --volume arguments for the fetched-pnpm volume, when one is in use. It is
+# mounted where pnpm keeps the versions it fetches: $PNPM_HOME/.tools.
+TOOLS_MOUNT=()
+prepare_tools_mount() {
+  TOOLS_MOUNT=()
+  if [ -n "$PNPM_TOOLS_VOLUME" ]; then
+    local home
+    home=$(docker run --rm --network "$NETWORK" --entrypoint printenv "$IMAGE" PNPM_HOME) || home=""
+    [ -n "$home" ] || fail "the image sets no PNPM_HOME"
+    TOOLS_MOUNT=(--volume "${PNPM_TOOLS_VOLUME}:${home}/.tools")
+  fi
+}
+
+pnpm_check() {
+  local path project_version out status needs
+  path=$(docker run --rm --network "$NETWORK" "$IMAGE" "command -v pnpm") || path="none"
+  project_version=$(docker run --rm --network "$NETWORK" --entrypoint node "$IMAGE" \
+    -p "require('/app/node_modules/pnpm/package.json').version" 2>/dev/null) || project_version="none"
+  status=0
+  out=$(docker run --rm --network "$NETWORK" "$IMAGE" "$PNPM_NOOP" 2>&1) || status=$?
+  if [ "$status" -eq 0 ]; then
+    needs=no
+  elif grep -q 'registry.npmjs.org' <<<"$out"; then
+    needs=yes
+  else
+    needs=unclear
+    log "pnpm failed without network for another reason; its output follows"
+    printf '%s\n' "$out"
+  fi
+  record runtime_pnpm_path "$path"
+  record project_pnpm_version "$project_version"
+  record runtime_pnpm_needs_registry "$needs"
+  log "pnpm on the image's PATH: $path (the project's own pnpm is $project_version)"
+  if [ "$needs" = yes ]; then
+    printf '::warning::%s\n' "Running pnpm in this image fetches another pnpm from the npm registry first, so every pnpm command at deploy or start time depends on the registry being reachable."
+  fi
+}
+
+pnpm_seed() {
+  [ -n "$PNPM_TOOLS_VOLUME" ] || fail "pnpm-seed needs PNPM_TOOLS_VOLUME"
+  prepare_tools_mount
+  docker volume create "$PNPM_TOOLS_VOLUME" >/dev/null
+  # Normal network on purpose: this container runs pnpm and nothing else.
+  docker run --rm "${TOOLS_MOUNT[@]}" "$IMAGE" "$PNPM_NOOP"
+  record pnpm_seeded yes
+  log "pnpm settled its version once, outside the app"
+}
 
 recorded_migrations() {
   docker exec -e MYSQL_PWD="$MYSQL_ROOT_PASSWORD" "$MYSQL_CONTAINER" \
@@ -42,9 +103,10 @@ recorded_migrations() {
 migrate() {
   local expected recorded run
   expected=$(jq '.entries | length' "$JOURNAL")
+  prepare_tools_mount
   for run in first repeat; do
     log "pre-deploy command, $run run: pnpm db:migrate"
-    docker run --rm --network "$NETWORK" --env DATABASE_URL="$DATABASE_URL_IN_NETWORK" \
+    docker run --rm --network "$NETWORK" "${TOOLS_MOUNT[@]}" --env DATABASE_URL="$DATABASE_URL_IN_NETWORK" \
       "$IMAGE" "pnpm db:migrate"
     recorded=$(recorded_migrations)
     if [ "$recorded" != "$expected" ]; then
@@ -67,8 +129,10 @@ start() {
   local name=${1:?start needs a container name} command=${2:-} jwt started elapsed
   jwt=$(openssl rand -hex 32)
   echo "::add-mask::$jwt"
+  prepare_tools_mount
   local args=(
     --detach --name "$name" --network "$NETWORK"
+    "${TOOLS_MOUNT[@]}"
     --env PORT="$APP_PORT"
     --env DATABASE_URL="$DATABASE_URL_IN_NETWORK"
     --env JWT_SECRET="$jwt"
@@ -114,8 +178,10 @@ stop() {
 }
 
 case "${1:-}" in
+  pnpm-check) pnpm_check ;;
+  pnpm-seed) pnpm_seed ;;
   migrate) migrate ;;
   start) shift; start "$@" ;;
   stop) shift; stop "$@" ;;
-  *) fail "usage: $0 migrate | start NAME [COMMAND] | stop NAME" ;;
+  *) fail "usage: $0 pnpm-check | pnpm-seed | migrate | start NAME [COMMAND] | stop NAME" ;;
 esac
