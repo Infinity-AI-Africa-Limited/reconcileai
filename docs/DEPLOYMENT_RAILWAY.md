@@ -55,8 +55,10 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
    - a root `Dockerfile`, which Railway always uses when present;
    - `pnpm` as a project dependency, which puts a second pnpm ahead of the pinned one.
 
-   Start the app directly, not through `pnpm start`. Only then does it receive SIGTERM
-   and finish its graceful shutdown (90 s default) within the 120 s draining allowance.
+   Start the app directly, not through `pnpm start`. Only then does the app receive
+   SIGTERM and run its graceful shutdown, which waits up to 90 s by default, inside the
+   120 s draining allowance. The evidence is an idle shutdown in Docker: it does not show
+   that live work always completes, or how Railway's teardown behaves.
 3. **Do not set `PORT`** — Railway injects it; the server already reads `process.env.PORT`.
 4. Add a **Redis** service to the same project and reference its URL as `REDIS_URL`
    (Variables → Add Reference → `${{Redis.REDIS_URL}}`).

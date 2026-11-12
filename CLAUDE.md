@@ -1865,11 +1865,13 @@ Cloud Run, or a self-managed VPS) — Railway is simply the current production c
 Railway stops reading `railway.json` / `railway.toml` on **1 December 2026**, and
 Nixpacks, the builder that file named, is no longer a documented choice. So the
 recipe moved into the app service's own settings in the Railway dashboard, and the
-file was deleted (owner decision 2026-11-12: the cutover ships as its own release,
-before the maintenance page; the backup proof is pursued in parallel and does not
-block it). **The dashboard is now the only place the recipe is enforced**, so it is
-recorded here and in `docs/DEPLOYMENT_RAILWAY.md`. A change there is a production
-change: get the owner's approval and update both records.
+file was deleted. Owner decisions, 12 November 2026:
+- the cutover ships as its own release, before the maintenance page;
+- at 12:45 WAT, the backup and isolated-restore proof remains a gate for that release.
+
+**The dashboard is now the only place the recipe is enforced**, so it is recorded
+here and in `docs/DEPLOYMENT_RAILWAY.md`. A change there is a production change: get
+the owner's approval and update both records.
 
 | Setting | Value |
 |---|---|
@@ -1885,9 +1887,11 @@ change: get the owner's approval and update both records.
 - **The start command must not go through pnpm.** In the Railpack rehearsal (#236,
   #237) a pnpm-launched app never completed its graceful shutdown on SIGTERM: it
   was killed when the allowance ran out, or went down with pnpm at once. Launched
-  directly, it drained and exited 0 in under a second. The app's own drain timeout
-  defaults to 90 s (`DEFAULT_DRAIN_TIMEOUT_MS`), inside the 120 s allowance; leave
-  `RECONCILEAI_DRAIN_TIMEOUT_MS` unset.
+  directly, the idle app drained and exited 0 in under a second. The app's own drain
+  timeout defaults to 90 s (`DEFAULT_DRAIN_TIMEOUT_MS`), inside the 120 s allowance;
+  leave `RECONCILEAI_DRAIN_TIMEOUT_MS` unset. That is idle Docker evidence: it does not
+  show that live work always completes within the allowance, or how Railway's teardown
+  behaves.
 - **`pnpm` must not be a project dependency.** Railpack's image puts
   `/app/node_modules/.bin` first on PATH, so a dependency copy of pnpm runs instead of
   the pinned `packageManager` version, then downloads the pinned one from the npm
