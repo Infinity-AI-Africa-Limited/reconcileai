@@ -34,10 +34,29 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
 ## 1. Create the Railway service
 
 1. Railway → **New Project → Deploy from GitHub repo** → `Infinity-AI-Africa-Limited/reconcileai`, branch `main`.
-2. Railway reads [`railway.json`](../railway.json): Nixpacks build `pnpm build`, pre-deploy
-   `pnpm db:migrate`, start `pnpm start`, healthcheck `GET /api/healthz` (120 s timeout),
-   restart on failure up to 10 times. Node comes from [`.nvmrc`](../.nvmrc) (22) and pnpm
-   from `packageManager` in `package.json`.
+2. Set the deploy recipe in the service's **Settings**. The repository holds no Railway
+   config file: Railway stops reading `railway.json` / `railway.toml` on 1 December 2026,
+   and this one was deleted in the cutover release (CLAUDE.md §12). Settings are the only
+   place the recipe is enforced, so a change there needs owner approval and an update here.
+
+   | Setting | Value |
+   |---|---|
+   | Builder | Railpack |
+   | Build command | `pnpm build` |
+   | Pre-deploy command | `pnpm db:migrate` |
+   | Start command | `NODE_ENV=production exec node dist/index.js` |
+   | Healthcheck path / timeout | `/api/healthz` / 120 s |
+   | Restart policy | On failure, up to 10 retries |
+   | Draining / overlap | 120 s / 0 s |
+
+   Railpack takes Node from [`.nvmrc`](../.nvmrc) (22) and pnpm from `packageManager` in
+   `package.json` (10.4.1). Two things would silently change the build, and
+   `tools/deployRecipe.test.ts` refuses both:
+   - a root `Dockerfile`, which Railway always uses when present;
+   - `pnpm` as a project dependency, which puts a second pnpm ahead of the pinned one.
+
+   Start the app directly, not through `pnpm start`. Only then does it receive SIGTERM
+   and finish its graceful shutdown (90 s default) within the 120 s draining allowance.
 3. **Do not set `PORT`** — Railway injects it; the server already reads `process.env.PORT`.
 4. Add a **Redis** service to the same project and reference its URL as `REDIS_URL`
    (Variables → Add Reference → `${{Redis.REDIS_URL}}`).
