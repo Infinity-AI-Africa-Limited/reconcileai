@@ -21,6 +21,7 @@ import { shopifyOrderDescription, shopifyRefundDescription } from "./ingest";
 import {
   claimableCustomerRedactionJob,
   isLivePrivacyJobStatus,
+  LIVE_PRIVACY_JOB_STATUSES,
   ShopifyPrivacyJobNotClaimableError,
 } from "./privacyJobState";
 
@@ -39,6 +40,10 @@ export type ShopifyCustomerRedactionFailureCode =
   | "selector_integrity_failed"
   | "suppression_key_unavailable"
   | "unsupported_transaction_footprint"
+  /** Supported exact-order suppression still needs a review of all attributable holdings. */
+  | "privacy_scope_review_required"
+  /** A newer parent resolution cannot be replaced by this claimed child. */
+  | "parent_state_conflict"
   /** Another customer redaction holds the store's write fence; this one waits its turn. */
   | "store_fence_busy"
   /** The tenant is fenced for shop/redact: nothing new may be written into it. */
@@ -82,6 +87,104 @@ interface SelectedOrderRow {
 
 function retryDelayMs(attempt: number): number {
   return Math.min(30_000 * 2 ** Math.max(0, attempt - 1), 10 * 60_000);
+}
+
+/** Do not let the retry handler overwrite a parent whose expected state was lost. */
+class CustomerRedactionParentStateLostError extends Error {}
+
+/**
+ * The original processing transaction has rolled back, but the earlier claim
+ * (and possibly an admission-held fence) has not. Reconcile only that exact
+ * child; a parked/final parent is authoritative and is never written here.
+ */
+async function reconcileParentStateLoss(db: Db, job: ClaimedRedactionJob, now: Date): Promise<void> {
+  await db.transaction(async (tx) => {
+    const [organization] = await tx
+      .select({ deletionState: organizations.deletionState })
+      .from(organizations)
+      .where(eq(organizations.id, job.organizationId))
+      .limit(1)
+      .for("update");
+    const [store] = await tx
+      .select({
+        status: shopifyConnectorStores.status,
+        privacyRedactionState: shopifyConnectorStores.privacyRedactionState,
+        privacyRedactionRequestId: shopifyConnectorStores.privacyRedactionRequestId,
+      })
+      .from(shopifyConnectorStores)
+      .where(and(
+        eq(shopifyConnectorStores.id, job.storeId),
+        eq(shopifyConnectorStores.organizationId, job.organizationId),
+      ))
+      .limit(1)
+      .for("update");
+    const [parent] = await tx
+      .select({ status: shopifyPrivacyRequests.status })
+      .from(shopifyPrivacyRequests)
+      .where(and(
+        eq(shopifyPrivacyRequests.id, job.requestId),
+        eq(shopifyPrivacyRequests.organizationId, job.organizationId),
+        eq(shopifyPrivacyRequests.storeId, job.storeId),
+        eq(shopifyPrivacyRequests.topic, "customers/redact"),
+      ))
+      .limit(1)
+      .for("update");
+    const parentLive = isLivePrivacyJobStatus(parent?.status);
+    const retryable = parentLive && job.attempts < SHOPIFY_CUSTOMER_REDACTION_MAX_ATTEMPTS;
+    const nextAttemptAt = retryable ? new Date(now.getTime() + retryDelayMs(job.attempts)) : null;
+    const childWrite = await tx
+      .update(shopifyPrivacyCustomerRedactionJobs)
+      .set({
+        status: parentLive ? (retryable ? "failed_retryable" : "failed_terminal") : "manual_review",
+        failureCode: "parent_state_conflict",
+        leaseId: null,
+        leaseExpiresAt: null,
+        nextAttemptAt,
+        lastCheckpoint: parentLive ? "parent_state_conflict" : "parent_state_conflict_review_required",
+      })
+      .where(and(
+        eq(shopifyPrivacyCustomerRedactionJobs.requestId, job.requestId),
+        eq(shopifyPrivacyCustomerRedactionJobs.organizationId, job.organizationId),
+        eq(shopifyPrivacyCustomerRedactionJobs.storeId, job.storeId),
+        eq(shopifyPrivacyCustomerRedactionJobs.leaseId, job.leaseId),
+        eq(shopifyPrivacyCustomerRedactionJobs.status, "processing"),
+      ));
+    // A reclaimed/parked child makes this whole reconciliation a no-op. In
+    // particular, a stale worker must not release even its old request's fence.
+    if (affectedRows(childWrite) !== 1) return;
+    if (retryable) {
+      await tx
+        .insert(shopifyPrivacyQueueOutbox)
+        .values({ kind: "customer_redact", jobId: job.requestId, status: "failed_retryable", nextAttemptAt, failureCode: "worker_failed" })
+        .onDuplicateKeyUpdate({
+          set: { status: "failed_retryable", nextAttemptAt, failureCode: "worker_failed", leaseId: null, leaseExpiresAt: null },
+        });
+      return;
+    }
+    if (parentLive && parent) {
+      // Out of attempts while the parent still says work is owed: nothing will
+      // ever run it again, so say so. The parent row is locked above and still
+      // live, so this exact-status write cannot replace a parked or final one.
+      await tx
+        .update(shopifyPrivacyRequests)
+        .set({ status: "failed_terminal", completionNote: "parent_state_conflict", completedAt: null })
+        .where(and(
+          eq(shopifyPrivacyRequests.id, job.requestId),
+          eq(shopifyPrivacyRequests.organizationId, job.organizationId),
+          eq(shopifyPrivacyRequests.storeId, job.storeId),
+          eq(shopifyPrivacyRequests.topic, "customers/redact"),
+          eq(shopifyPrivacyRequests.status, parent.status),
+        ));
+    }
+    if (
+      organization?.deletionState === "active" && store?.status !== "redacting" &&
+      store?.privacyRedactionState === "customer_redacting" && store.privacyRedactionRequestId === job.requestId
+    ) {
+      // Only an owned temporary customer fence, never lifecycle/shop-redaction
+      // state or a competing customer's fence. Commits with the child CAS.
+      await releaseStoreFence(tx, job);
+    }
+  });
 }
 
 async function claimCustomerRedactionJob(
@@ -136,7 +239,7 @@ async function claimCustomerRedactionJob(
  * completed, parked for a person, or out of attempts — must hand it back, or the
  * store stays fenced indefinitely: order sync and reauthorization refused, and
  * every other customer's redaction left waiting behind one that is not running.
- * Re-running a parked request re-acquires the fence when its worker claims it.
+ * A valid replay does not requeue or refence a parked job.
  */
 async function releaseStoreFence(tx: DbExecutor, job: Pick<ClaimedRedactionJob, "requestId" | "organizationId" | "storeId">) {
   await tx
@@ -192,6 +295,9 @@ async function setBlocked(
           eq(shopifyPrivacyRequests.organizationId, job.organizationId),
           eq(shopifyPrivacyRequests.storeId, job.storeId),
           eq(shopifyPrivacyRequests.topic, "customers/redact"),
+          // A parent already parked or resolved is a person's (or a newer
+          // run's) decision; this worker may only move one that owes work.
+          inArray(shopifyPrivacyRequests.status, [...LIVE_PRIVACY_JOB_STATUSES]),
         ),
       );
   });
@@ -261,6 +367,9 @@ async function setRetryableFailure(
           eq(shopifyPrivacyRequests.organizationId, job.organizationId),
           eq(shopifyPrivacyRequests.storeId, job.storeId),
           eq(shopifyPrivacyRequests.topic, "customers/redact"),
+          // As in setBlocked: never reopen or overwrite a parked/final parent.
+          // A retry then meets the parent-state check and parks only itself.
+          inArray(shopifyPrivacyRequests.status, [...LIVE_PRIVACY_JOB_STATUSES]),
         ),
       );
   });
@@ -345,14 +454,12 @@ async function loadSelectedOrders(
 }
 
 /**
- * Scope A never stores Shopify customer personal data: only the fixed order-led
- * projection in `ingest.ts` is allowed. A legacy or future row that deviates
- * from that projection is not silently treated as redacted; it remains in
- * manual review until a separately reviewed, record-specific remediation exists.
+ * Check only the fixed order/refund projection in `ingest.ts`. Minimization
+ * does not establish that linked evidence is non-personal or that no other
+ * customer-attributable holdings exist. A deviating row still needs separately
+ * reviewed, record-specific remediation before suppression can be recorded.
  *
- * This makes customer-redact completion a non-destructive proof of data
- * minimisation, rather than a dangerous attempt to erase financial evidence
- * while reconciliation, audit, or report writers may be active.
+ * Supported rows also require scope review; this guard is not proof of erasure.
  */
 function isFieldMinimizedScopeAOrder(row: SelectedOrderRow): boolean {
   // Two projections write rows under an order's GID (ingest.ts): the order's
@@ -412,7 +519,7 @@ export async function handleShopifyCustomerRedactionJob(
 
   try {
     const [request] = await db
-      .select({ id: shopifyPrivacyRequests.id })
+      .select({ id: shopifyPrivacyRequests.id, status: shopifyPrivacyRequests.status })
       .from(shopifyPrivacyRequests)
       .where(
         and(
@@ -423,7 +530,10 @@ export async function handleShopifyCustomerRedactionJob(
         ),
       )
       .limit(1);
-    if (!request || job.manifestVersion !== SHOPIFY_CUSTOMER_REDACTION_MANIFEST_VERSION) {
+    // A missing, final or parked exact parent is not an invitation to override
+    // its resolution, even if this child also has an invalid manifest.
+    if (!request || !isLivePrivacyJobStatus(request.status)) throw new CustomerRedactionParentStateLostError();
+    if (job.manifestVersion !== SHOPIFY_CUSTOMER_REDACTION_MANIFEST_VERSION) {
       await setBlocked(db, job, "manual_review", "invalid_request_scope");
       return;
     }
@@ -535,10 +645,9 @@ export async function handleShopifyCustomerRedactionJob(
       }
 
       const selected = await loadSelectedOrders(tx, job.organizationId, job.storeId, gids);
-      // The only permissible Scope A completion is a proof that no customer
-      // personal data was persisted. Do not delete ledger, match, exception,
-      // audit, report, or learning evidence: those systems may be active and
-      // their records are intentionally outside this narrow merchant-order app.
+      // This exact-order check does not inventory settlement, match, exception,
+      // audit, report, learning, export, or other linked holdings. Even an empty
+      // selection needs scope review; do not delete reconciliation evidence.
       if (!selected.every(isFieldMinimizedScopeAOrder)) {
         return { blocked: "unsupported_transaction_footprint" as const, deferred: false };
       }
@@ -556,31 +665,25 @@ export async function handleShopifyCustomerRedactionJob(
           .onDuplicateKeyUpdate({ set: { sourceRequestId: sql`${shopifyOrderRedactionTombstones.sourceRequestId}` } });
       }
 
-      await tx
-        .delete(shopifyPrivacyRequestSelectors)
-        .where(
-          and(
-            eq(shopifyPrivacyRequestSelectors.requestId, job.requestId),
-            eq(shopifyPrivacyRequestSelectors.organizationId, job.organizationId),
-          ),
-        );
-      const completionWrite = await tx
+      // Retain encrypted customer/order selectors for the responsible privacy
+      // reviewer. Suppression is recorded, not represented as completed erasure.
+      const reviewWrite = await tx
         .update(shopifyPrivacyCustomerRedactionJobs)
         .set({
-          status: "completed",
+          status: "manual_review",
           leaseId: null,
           leaseExpiresAt: null,
           nextAttemptAt: null,
-          failureCode: null,
-          lastCheckpoint: "field_minimization_verified",
-          completedAt: now,
+          failureCode: "privacy_scope_review_required",
+          lastCheckpoint: "suppression_recorded_review_required",
+          completedAt: null,
           recordsFound: selected.length,
           tombstonesWritten: digests.length,
           transactionsDeleted: 0,
           anomalyScoresDeleted: 0,
           orphanBatchesDeleted: 0,
           remainingTransactions: selected.length,
-          selectorDestroyedAt: now,
+          selectorDestroyedAt: null,
         })
         .where(
           and(
@@ -588,19 +691,18 @@ export async function handleShopifyCustomerRedactionJob(
             eq(shopifyPrivacyCustomerRedactionJobs.organizationId, job.organizationId),
             eq(shopifyPrivacyCustomerRedactionJobs.storeId, job.storeId),
             eq(shopifyPrivacyCustomerRedactionJobs.leaseId, job.leaseId),
+            eq(shopifyPrivacyCustomerRedactionJobs.status, "processing"),
           ),
         );
-      // A late worker must not complete a request after its lease has been
-      // reclaimed. Throwing rolls back tombstones and selector destruction in
-      // this transaction; the current owner remains responsible for the request.
-      if (affectedRows(completionWrite) !== 1) throw new Error("customer_redaction_lease_lost");
-      await tx
+      // Losing either CAS rolls back tombstones, state and fence changes together.
+      if (affectedRows(reviewWrite) !== 1) throw new Error("customer_redaction_lease_lost");
+      const parentWrite = await tx
         .update(shopifyPrivacyRequests)
         .set({
-          status: "completed",
-          completedAt: now,
+          status: "manual_review",
+          completedAt: null,
           recordsAffected: 0,
-          completionNote: "scope_a_no_personal_data_persisted",
+          completionNote: "privacy_scope_review_required",
         })
         .where(
           and(
@@ -608,21 +710,13 @@ export async function handleShopifyCustomerRedactionJob(
             eq(shopifyPrivacyRequests.organizationId, job.organizationId),
             eq(shopifyPrivacyRequests.storeId, job.storeId),
             eq(shopifyPrivacyRequests.topic, "customers/redact"),
+            eq(shopifyPrivacyRequests.status, request.status),
           ),
         );
+      if (affectedRows(parentWrite) !== 1) throw new CustomerRedactionParentStateLostError();
       // Restore only this exact temporary fence. Lifecycle status is not touched,
       // so a concurrent uninstall/shop-redact remains authoritative.
-      await tx
-        .update(shopifyConnectorStores)
-        .set({ privacyRedactionState: "active", privacyRedactionRequestId: null })
-        .where(
-          and(
-            eq(shopifyConnectorStores.id, job.storeId),
-            eq(shopifyConnectorStores.organizationId, job.organizationId),
-            eq(shopifyConnectorStores.privacyRedactionState, "customer_redacting"),
-            eq(shopifyConnectorStores.privacyRedactionRequestId, job.requestId),
-          ),
-        );
+      await releaseStoreFence(tx, job);
       return { blocked: null, deferred: false };
     });
 
@@ -634,7 +728,13 @@ export async function handleShopifyCustomerRedactionJob(
       await setBlocked(db, job, outcome.blocked === "invalid_request_scope" ? "manual_review" : "blocked_dependency", outcome.blocked);
     }
   } catch (error) {
-    await setRetryableFailure(db, job, "worker_failed", now);
+    if (error instanceof CustomerRedactionParentStateLostError) {
+      // Never route this through a generic parent writer. Park the still-owned
+      // child, or boundedly retry it if the locked parent is live again.
+      await reconcileParentStateLoss(db, job, now);
+    } else {
+      await setRetryableFailure(db, job, "worker_failed", now);
+    }
     throw new Error("Shopify customer redaction retry required");
   }
 }

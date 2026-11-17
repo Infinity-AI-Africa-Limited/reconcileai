@@ -718,6 +718,88 @@ describe.runIf(localDatabase)(
       expect(await transactionIds([privacyRow])).toEqual([]);
     });
 
+    it("should hold every deletion phase, not only transactions, while a customer redaction is unresolved", async () => {
+      const t = await seedTenant();
+      // One expired item for each phase: evidence, finished runs (and a report
+      // holding JSON but no file), an empty upload, and a processed webhook.
+      const row = await seedTransaction(t, OLD);
+      const jobId = await seedJob(t);
+      const reportId = insertId(
+        await db.insert(reconciliationReports).values({
+          organizationId: t.organizationId,
+          userId: t.userId,
+          jobId,
+          reportType: "daily",
+          title: "Masked report with JSON and no file",
+          summary: { only: "aggregates" },
+          format: "csv",
+          createdAt: OLD,
+        })
+      );
+      const emptyBatchId = insertId(
+        await db.insert(uploadBatches).values({
+          organizationId: t.organizationId,
+          userId: t.userId,
+          channelId: t.ordersChannelId,
+          fileName: "masked-empty.csv",
+          status: "completed",
+          createdAt: OLD,
+          completedAt: OLD,
+        })
+      );
+      const webhookId = `masked_webhook_${tag()}`;
+      await db.insert(shopifyWebhookEvents).values({
+        organizationId: t.organizationId,
+        storeId: t.storeId,
+        webhookId,
+        topic: "orders/updated",
+        payloadSha256: "a".repeat(64),
+        status: "processed",
+        receivedAt: OLD,
+        processedAt: OLD,
+      });
+      // How the worker leaves a supported customers/redact: under scope review.
+      const requestId = insertId(
+        await db.insert(shopifyPrivacyRequests).values({
+          organizationId: t.organizationId,
+          storeId: t.storeId,
+          topic: "customers/redact",
+          requestHash: "c".repeat(64),
+          status: "manual_review",
+          completionNote: "privacy_scope_review_required",
+          receivedAt: RECENT,
+        })
+      );
+      const surviving = async () => ({
+        transactions: await transactionIds([row]),
+        jobs: (await db.select({ id: reconciliationJobs.id }).from(reconciliationJobs).where(eq(reconciliationJobs.id, jobId))).length,
+        reports: (await db.select({ id: reconciliationReports.id }).from(reconciliationReports).where(eq(reconciliationReports.id, reportId))).length,
+        batches: (await db.select({ id: uploadBatches.id }).from(uploadBatches).where(eq(uploadBatches.id, emptyBatchId))).length,
+        webhooks: (await db.select({ id: shopifyWebhookEvents.id }).from(shopifyWebhookEvents).where(eq(shopifyWebhookEvents.webhookId, webhookId))).length,
+      });
+
+      const held = await sweep([t]);
+
+      expect(held).toMatchObject({
+        storesCompleted: 1,
+        transactionsDeleted: 0,
+        jobsDeleted: 0,
+        reportsDeleted: 0,
+        batchesDeleted: 0,
+        webhookEventsDeleted: 0,
+        deferredPrivacyRequests: 1,
+      });
+      expect(await surviving()).toEqual({ transactions: [row], jobs: 1, reports: 1, batches: 1, webhooks: 1 });
+      // The hold is counted on an aggregate receipt; the day is still closed.
+      expect(await receiptsFor(t)).toHaveLength(1);
+
+      // Resolved: the next day's sweep takes every phase's expired rows.
+      await db.update(shopifyPrivacyRequests).set({ status: "completed" }).where(eq(shopifyPrivacyRequests.id, requestId));
+      const released = await sweep([t], { now: () => new Date(NOW.getTime() + DAY) });
+      expect(released).toMatchObject({ storesCompleted: 1, transactionsDeleted: 1, jobsDeleted: 1, reportsDeleted: 1, webhookEventsDeleted: 1 });
+      expect(await surviving()).toMatchObject({ transactions: [], jobs: 0, reports: 0, webhooks: 0 });
+    });
+
     it("should work through a backlog in bounded, separately audited batches", async () => {
       const t = await seedTenant();
       const rows: number[] = [];

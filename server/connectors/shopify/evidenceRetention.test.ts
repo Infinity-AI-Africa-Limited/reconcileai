@@ -1,4 +1,5 @@
 import { MySqlDialect } from "drizzle-orm/mysql-core";
+import { getTableName, type SQL, type Table } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { scriptedDb } from "./scriptedDb.testkit";
 import {
@@ -375,5 +376,254 @@ describe("when Shopify Scope A evidence reaches its retention cutoff", () => {
       expect(warn.mock.calls[0]?.[1]).toMatchObject({ code: "shopify_scope_a_retention_incomplete" });
       warn.mockRestore();
     });
+  });
+});
+
+describe("when unresolved customer privacy requests hold normal evidence retention", () => {
+  beforeEach(() => resetShopifyScopeAEvidenceRetentionScheduleForTest());
+
+  it.each([
+    ["customers/data_request", STORE_ID],
+    ["customers/redact", STORE_ID],
+    ["customers/redact", null],
+  ])("should keep evidence for %s in store scope %s under the locked recheck and aggregate query", async (topic, storeId) => {
+    const fake = scriptedDb({
+      standing: {
+        organizations: [{ deletionState: "active" }],
+        [STORES]: [{ id: STORE_ID, organizationId: ORG_ID, status: "active" }],
+        [RECEIPTS]: [], [TRANSACTIONS]: [], [PRIVACY_REQUESTS]: [],
+        audit_chain_locks: [], audit_logs: [],
+      },
+      select: {
+        [PRIVACY_REQUESTS]: [
+          [{ id: 3, topic, storeId, organizationId: ORG_ID, status: "manual_review" }],
+          [{ id: 3, topic, storeId, organizationId: ORG_ID, status: "manual_review" }],
+          [{ n: 1 }],
+        ],
+      },
+    });
+
+    const report = await sweep(fake);
+
+    expect(fake.committed().filter((op) => op.kind === "delete")).toEqual([]);
+    expect(fake.ops.some((op) => op.kind === "select" && op.table === TRANSACTIONS && op.locked)).toBe(false);
+    expect(report.deferredPrivacyRequests).toBe(1);
+    const privacyReads = fake.ops.filter((op) => op.kind === "select" && op.table === PRIVACY_REQUESTS);
+    expect(privacyReads).toHaveLength(3);
+    expect(privacyReads[0]?.locked).toBe(true);
+    expect(privacyReads[0]?.limit).toBe(1);
+    expect(privacyReads[1]?.locked).toBe(true);
+    expect(privacyReads[0]?.where).toEqual(privacyReads[2]?.where);
+    expect(privacyReads[0]?.where?.params).toEqual([
+      ORG_ID, STORE_ID, "customers/data_request", "customers/redact", "completed",
+    ]);
+    // Exact tenant AND (same store OR unassigned store) isolates even null-store
+    // requests: another tenant or a different non-null store cannot hold these rows.
+    expect(privacyReads[0]?.where?.sql).toMatch(
+      /`shopify_privacy_requests`\.`organizationId` = \? and \(`shopify_privacy_requests`\.`storeId` = \? or `shopify_privacy_requests`\.`storeId` is null\)/i,
+    );
+    expect(privacyReads[0]?.where?.sql).toMatch(/`topic` in \(\?, \?\).*`status` not in \(\?\)/i);
+    expect(privacyReads[0]?.where?.params).not.toContain("manual_review");
+  });
+
+  it("should leave completed requests outside the hold and preserve finished-evidence deletion", async () => {
+    // Script the SQL-filtered result: completed is the only excluded status.
+    // This mock does not execute SQL; the exact rendered predicate is pinned too.
+    const fake = oneCandidate();
+
+    const report = await sweep(fake);
+
+    expect(report.storesCompleted).toBe(1);
+    expect(fake.writes("delete", TRANSACTIONS)).toHaveLength(1);
+    const privacyRead = fake.ops.find((op) => op.kind === "select" && op.table === PRIVACY_REQUESTS && op.locked);
+    expect(privacyRead?.where?.params).toEqual([
+      ORG_ID, STORE_ID, "customers/data_request", "customers/redact", "completed",
+    ]);
+    expect(privacyRead?.where?.sql).toMatch(/`status` not in \(\?\)/i);
+  });
+
+  it("should keep the separate shop-redaction fence authoritative without reading or weakening the customer hold", async () => {
+    const fake = scriptedDb({
+      standing: {
+        organizations: [{ deletionState: "active" }],
+        [STORES]: [{ id: STORE_ID, organizationId: ORG_ID, status: "redacting" }],
+      },
+    });
+
+    const report = await sweep(fake);
+
+    expect(report.storesSkipped).toBe(1);
+    expect(fake.ops.some((op) => op.kind === "select" && op.table === PRIVACY_REQUESTS)).toBe(false);
+    expect(fake.committed().filter((op) => op.kind === "delete")).toEqual([]);
+    expect(fake.writes("insert", RECEIPTS)).toEqual([]);
+  });
+});
+
+describe("when customer privacy holds must protect independently purgeable later-phase evidence", () => {
+  beforeEach(() => resetShopifyScopeAEvidenceRetentionScheduleForTest());
+
+  const JOBS = "reconciliation_jobs";
+  const REPORTS = "reconciliation_reports";
+  const SHARES = "shared_report_tokens";
+  const UPLOADS = "upload_batches";
+  const WEBHOOKS = "shopify_webhook_events";
+  const old = new Date("2026-01-01T00:00:00.000Z");
+  const job = { id: 901, organizationId: ORG_ID, sourceChannelId: 71, targetChannelId: 72, status: "completed", dateTo: old, createdAt: old, completedAt: old };
+  // Null file is not null evidence: ordinary report generation stores summary/title.
+  const report = { id: 902, jobId: 901, organizationId: ORG_ID, fileUrl: null, title: "Persisted reconciliation evidence", summary: { transactions: 12, unresolved: 2 } };
+  const share = { id: 903, reportId: 902, organizationId: ORG_ID, recipientEmail: "synthetic@example.invalid" };
+  const upload = { id: 904, organizationId: ORG_ID, channelId: 71, status: "completed", fileUrl: null, createdAt: old, completedAt: old };
+  const webhook = { id: 905, organizationId: ORG_ID, storeId: STORE_ID, status: "processed", receivedAt: old };
+
+  type CustomerRequest = { id: number; organizationId: number; storeId: number | null; topic: string; status: string };
+
+  /** Evaluate ONLY the pinned customer-hold predicate over synthetic rows.
+   * The rest of the DB remains scripted; this is not a general SQL emulator. */
+  function customerRows(fake: ReturnType<typeof scriptedDb>, requests: CustomerRequest[]) {
+    const wrap = (handle: Record<string, (...args: any[]) => any>): typeof handle => new Proxy(handle, {
+      get(target, property: string) {
+        if (property === "transaction") return (fn: (tx: typeof handle) => Promise<unknown>) => target.transaction((tx: typeof handle) => fn(wrap(tx)));
+        if (property !== "select") return target[property];
+        return (fields?: Record<string, unknown>) => {
+          const query = target.select(fields);
+          let table = "";
+          let condition: ReturnType<typeof render> | undefined;
+          const proxy: typeof query = new Proxy(query, {
+            get(builder, method: string) {
+              if (method === "then") return (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) => builder.then((rows: unknown[]) => {
+                if (table !== PRIVACY_REQUESTS) return resolve(rows);
+                expect(condition?.sql).toMatch(/`organizationId` = \? and \(.*`storeId` = \? or .*`storeId` is null\).*`topic` in \(\?, \?\).*`status` not in \(\?\)/i);
+                const [org, store, dataTopic, redactTopic, completed] = condition!.params;
+                const matched = requests.filter(row => row.organizationId === org && (row.storeId === store || row.storeId === null) && [dataTopic, redactTopic].includes(row.topic) && row.status !== completed);
+                return resolve(fields?.n ? [{ n: String(matched.length) }] : matched.slice(0, 1));
+              }, reject);
+              return (...args: unknown[]) => {
+                if (method === "from") table = getTableName(args[0] as Table);
+                if (method === "where") condition = render(args[0] as SQL);
+                builder[method](...args);
+                return proxy;
+              };
+            },
+          });
+          return proxy;
+        };
+      },
+    });
+    return { ...fake, db: wrap(fake.db as Record<string, (...args: any[]) => any>) };
+  }
+
+  function populated(privacyReads: unknown[][]) {
+    return scriptedDb({
+      standing: {
+        organizations: [{ deletionState: "active" }],
+        [STORES]: [{ id: STORE_ID, organizationId: ORG_ID, status: "active" }],
+        channels: [{ id: 71 }, { id: 72 }],
+        [RECEIPTS]: [], [TRANSACTIONS]: [], [PRIVACY_REQUESTS]: [],
+        matches: [], exceptions: [], audit_chain_locks: [], audit_logs: [],
+        [SHARES]: [share], job_progress_events: [{ id: 906, jobId: 901 }],
+      },
+      select: {
+        [PRIVACY_REQUESTS]: privacyReads,
+        [JOBS]: [[job]], [REPORTS]: [[report]], [UPLOADS]: [[upload]], [WEBHOOKS]: [[webhook]],
+      },
+    });
+  }
+
+  function expectNoLaterLoss(fake: ReturnType<typeof scriptedDb>) {
+    expect(fake.committed().filter(op => op.kind === "delete")).toEqual([]);
+    expect(fake.ops.some(op => op.kind === "select" && op.locked && [JOBS, REPORTS, UPLOADS, WEBHOOKS].includes(op.table))).toBe(false);
+  }
+
+  it.each([
+    ["customers/data_request", STORE_ID], ["customers/redact", STORE_ID], ["customers/redact", null],
+  ])("should protect a terminal job, null-file persisted JSON report/share/progress, upload and webhook for unresolved %s at store %s", async (topic, storeId) => {
+    const request = { id: 3, topic, storeId, organizationId: ORG_ID, status: "manual_review" };
+    const fake = customerRows(populated([]), [request, { ...request, id: 4 }]);
+    const audit = vi.fn(async () => undefined);
+
+    const result = await sweep(fake, audit);
+
+    expectNoLaterLoss(fake);
+    expect(result).toMatchObject({ storesCompleted: 1, storesSkipped: 0, storesFailed: 0, deferredPrivacyRequests: 2, transactionsDeleted: 0, jobsDeleted: 0, reportsDeleted: 0, reportShareLinksDeleted: 0, batchesDeleted: 0, webhookEventsDeleted: 0 });
+    const receipt = fake.writes("insert", RECEIPTS)[0];
+    expect((receipt?.data as { summary: { deferredPrivacyRequests: number } }).summary.deferredPrivacyRequests).toBe(2);
+    expect(audit).toHaveBeenCalledTimes(1); // Aggregate receipt only, no deletion audit.
+    const gate = fake.ops.find(op => op.table === PRIVACY_REQUESTS && op.locked);
+    const beforeGate = fake.ops.filter(op => op.txId === gate?.txId && op.locked).map(op => op.table);
+    expect(beforeGate).toEqual(["organizations", STORES, RECEIPTS, PRIVACY_REQUESTS]);
+    expect(gate?.where?.params).toEqual([ORG_ID, STORE_ID, "customers/data_request", "customers/redact", "completed"]);
+  });
+
+  it.each([
+    ["completed", ORG_ID, STORE_ID],
+    ["manual_review", ORG_ID + 1, STORE_ID],
+    ["manual_review", ORG_ID + 1, null],
+    ["manual_review", ORG_ID, STORE_ID + 1],
+  ])("should preserve later-phase deletion for excluded status %s org %s store %s", async (status, organizationId, storeId) => {
+    const fake = customerRows(populated([]), [{ id: 3, status, organizationId, storeId, topic: "customers/redact" }]);
+    const result = await sweep(fake);
+    expect(result).toMatchObject({ storesCompleted: 1, deferredPrivacyRequests: 0, jobsDeleted: 1, reportsDeleted: 1, reportShareLinksDeleted: 1, batchesDeleted: 1, webhookEventsDeleted: 1 });
+    expect(fake.writes("delete", "job_progress_events")).toHaveLength(1);
+    const privacyReads = fake.ops.filter(op => op.table === PRIVACY_REQUESTS);
+    expect(privacyReads).toHaveLength(6); // Four phases, receipt guard, aggregate.
+    for (const read of privacyReads) {
+      expect(read.where?.params).toEqual([ORG_ID, STORE_ID, "customers/data_request", "customers/redact", "completed"]);
+      expect(read.where?.sql).toMatch(/`organizationId` = \? and \(.*`storeId` = \? or .*`storeId` is null\).*`status` not in \(\?\)/i);
+    }
+    const jobsRead = fake.ops.find(op => op.table === JOBS && op.locked);
+    expect(jobsRead?.where?.params).toEqual(expect.arrayContaining([ORG_ID, 71, 72, "completed", "failed", "cancelled"]));
+    expect(jobsRead?.where?.sql).toMatch(/not exists \(select .* from `matches`.*not exists \(select .* from `exceptions`/i);
+    expect(fake.ops.find(op => op.table === REPORTS && op.locked)?.fields).toEqual(["id", "jobId", "organizationId", "fileUrl"]);
+  });
+
+  it.each([
+    ["jobs", STORE_ID], ["jobs", null],
+    ["uploads", STORE_ID], ["uploads", null],
+    ["webhooks", STORE_ID], ["webhooks", null],
+  ])("should apply the hold before resumed %s nonzero cursor work for unresolved redaction store %s", async (phase, storeId) => {
+    const targetTable = phase === "jobs" ? JOBS : phase === "uploads" ? UPLOADS : WEBHOOKS;
+    const first = scriptedDb({
+      standing: {
+        organizations: [{ deletionState: "active" }],
+        [STORES]: [{ id: STORE_ID, organizationId: ORG_ID, status: "active" }],
+        channels: [{ id: 71 }, { id: 72 }], [RECEIPTS]: [], [PRIVACY_REQUESTS]: [],
+      },
+      select: {
+        // Nonzero cursor. File-backed first job/upload remains held by the
+        // independent file guard; webhooks use their ten-row batch ceiling.
+        [JOBS]: phase === "jobs" ? [[{ id: 800 }]] : [[]],
+        [REPORTS]: [[{ id: 799, jobId: 800, organizationId: ORG_ID, fileUrl: "synthetic-file" }]],
+        [UPLOADS]: phase === "uploads" ? [[{ id: 800, fileUrl: "synthetic-file" }]] : [[]],
+        [WEBHOOKS]: [Array.from({ length: 10 }, (_, index) => ({ id: 791 + index }))],
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const partial = await purgeExpiredShopifyScopeAEvidence({
+        db: first.db as never, now: () => NOW, audit: vi.fn(async () => undefined) as never,
+        batchSize: 1, budgetMs: 100,
+        elapsed: () => first.ops.some(op => op.table === targetTable && op.kind === "select" && op.locked) ? 100 : 0,
+      });
+      expect(partial).toMatchObject({ storesIncomplete: 1, storesCompleted: 0 });
+      expect(first.writes("insert", RECEIPTS)).toEqual([]);
+      const request = { id: 3, organizationId: ORG_ID, storeId, topic: "customers/redact", status: "manual_review" };
+      const resumed = customerRows(populated([]), [request]);
+      const result = await purgeExpiredShopifyScopeAEvidence({ db: resumed.db as never, now: () => new Date(NOW.getTime() + 60_000), audit: vi.fn(async () => undefined) as never });
+      expectNoLaterLoss(resumed);
+      expect(result).toMatchObject({ storesCompleted: 1, storesIncomplete: 0, deferredPrivacyRequests: 1, jobsDeleted: 0, reportsDeleted: 0, reportShareLinksDeleted: 0, batchesDeleted: 0, webhookEventsDeleted: 0 });
+      expect(resumed.ops.some(op => op.table === TRANSACTIONS && op.locked)).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("should recheck holds between batches even after an earlier phase found no candidates", async () => {
+    const request = { id: 3, organizationId: ORG_ID, storeId: STORE_ID, topic: "customers/redact", status: "received" };
+    const fake = populated([[], [request], [request], [{ n: 1 }]]);
+    const result = await sweep(fake);
+    expectNoLaterLoss(fake);
+    expect(fake.ops.some(op => op.table === TRANSACTIONS && op.locked)).toBe(true); // First evidence phase exhausted.
+    expect(result.deferredPrivacyRequests).toBe(1);
+    expect(fake.ops.filter(op => op.table === PRIVACY_REQUESTS && op.locked)).toHaveLength(3);
   });
 });

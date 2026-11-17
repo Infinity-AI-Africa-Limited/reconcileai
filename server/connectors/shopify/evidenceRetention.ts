@@ -144,11 +144,12 @@ const REVIEWED_ANOMALY_STATUSES = [
   "resolved",
 ] as const satisfies readonly AnomalyReviewStatus[];
 /**
- * A customer data request in any other state still owes an answer, including
- * one handed to a person or one the worker gave up on: deleting the evidence
- * first would turn that answer into a false "we hold nothing".
+ * An unresolved customer data/redaction request holds evidence, including one
+ * parked for review or out of attempts. Suppression does not establish erasure.
+ * The privacy owner must review scope, retention and retained encrypted selectors;
+ * this conservative store-wide hold is not a new legal basis or duration.
  */
-const ANSWERED_DATA_REQUEST_STATUSES = [
+const COMPLETED_CUSTOMER_PRIVACY_STATUSES = [
   "completed",
 ] as const satisfies readonly PrivacyRequestStatus[];
 /** A webhook still `received` still owes work. */
@@ -190,7 +191,7 @@ export interface ShopifyEvidenceRetentionCounts {
   deferredNonterminalJobs: number;
   /** Past-retention transactions in an upload a governed control manifest names. */
   deferredGovernedEvidence: number;
-  /** Customer data requests for this store that are not yet answered. */
+  /** Unresolved customer data/redaction requests for this store or unassigned tenant scope. */
   deferredPrivacyRequests: number;
   /** Past-retention transactions kept because a transaction linked to them is kept. */
   deferredPairedTransactions: number;
@@ -684,13 +685,14 @@ async function collectLinkedGroup(
   };
 }
 
-type StoreLock = "ready" | "fenced" | "done_today";
+type StoreLock = "ready" | "fenced" | "done_today" | "customer_privacy_hold";
 
 /**
  * Take the tenant and store locks in shop redaction's order, and refuse a
  * fenced tenant, a redacting store, or a store another sweep already finished
- * today. Every batch starts here, so a redaction that begins mid-sweep stops
- * the next batch, and two instances never both complete one store's day.
+ * today. Every deletion phase (including resumed cursors) starts here, so an
+ * unresolved customer request or shop redaction stops the next deletion batch,
+ * and two instances never both complete one store's day.
  */
 async function lockStoreForRetention(tx: DbTransaction, scope: StoreScope): Promise<StoreLock> {
   const [organization] = await tx
@@ -736,19 +738,30 @@ async function lockStoreForRetention(tx: DbTransaction, scope: StoreScope): Prom
   ) {
     return "done_today";
   }
+  // Protected selectors cannot enumerate customer scope in SQL. Hold ALL
+  // deletion phases, not only transactions: a null-file report can still hold
+  // persisted JSON evidence, and jobs/uploads/webhooks have independent purges.
+  // Shop-redaction precedence was checked above and is never weakened here.
+  const [pendingRequest] = await tx
+    .select({ id: shopifyPrivacyRequests.id })
+    .from(shopifyPrivacyRequests)
+    .where(unresolvedCustomerPrivacyRequests(scope))
+    .limit(1)
+    .for("update");
+  if (pendingRequest) return "customer_privacy_hold";
   return "ready";
 }
 
-/** Unanswered customer data requests for this store, or for this tenant with no store named. */
-function unansweredDataRequests(scope: StoreScope): SQL {
+/** Unresolved customer privacy requests for this store, or this tenant with no store named. */
+function unresolvedCustomerPrivacyRequests(scope: StoreScope): SQL {
   return and(
     eq(shopifyPrivacyRequests.organizationId, scope.organizationId),
     or(
       eq(shopifyPrivacyRequests.storeId, scope.storeId),
       isNull(shopifyPrivacyRequests.storeId)
     ),
-    eq(shopifyPrivacyRequests.topic, "customers/data_request"),
-    notInArray(shopifyPrivacyRequests.status, [...ANSWERED_DATA_REQUEST_STATUSES])
+    inArray(shopifyPrivacyRequests.topic, ["customers/data_request", "customers/redact"]),
+    notInArray(shopifyPrivacyRequests.status, [...COMPLETED_CUSTOMER_PRIVACY_STATUSES])
   )!;
 }
 
@@ -776,16 +789,6 @@ type Phase = (
  * kept, with its whole group.
  */
 const purgeEvidenceBatch: Phase = async (tx, scope, cursor, batchSize) => {
-  // The selectors are keyed HMACs, so which orders a data request names cannot
-  // be told in SQL. Until every one is answered, the store's evidence stays.
-  const [pendingRequest] = await tx
-    .select({ id: shopifyPrivacyRequests.id })
-    .from(shopifyPrivacyRequests)
-    .where(unansweredDataRequests(scope))
-    .limit(1)
-    .for("update");
-  if (pendingRequest) return { cursor, exhausted: true, counts: {} };
-
   const seeds = await tx
     .select({ id: transactions.id, matchId: transactions.matchId })
     .from(transactions)
@@ -1306,7 +1309,7 @@ async function countDeferred(
       tx
         .select({ n: count() })
         .from(shopifyPrivacyRequests)
-        .where(unansweredDataRequests(scope))
+        .where(unresolvedCustomerPrivacyRequests(scope))
     ),
     countOne(
       tx
@@ -1351,7 +1354,7 @@ async function countDeferred(
     deferredGovernedEvidence,
     deferredPrivacyRequests,
     deferredUnprocessedWebhooks,
-    // A store held for a data request keeps every row for that reason instead.
+    // An unresolved customer privacy request holds every row for that reason.
     deferredPairedTransactions: deferredPrivacyRequests > 0 ? 0 : unheldPastRetention,
     blockedReportFiles,
     blockedUploadFiles,
@@ -1495,7 +1498,7 @@ async function sweepStore(
   const startedAt = resumed?.startedAt ?? params.now.getTime();
   const thisRun = emptyCounts();
 
-  for (let phaseIndex = resumed?.phase ?? 0; phaseIndex < PHASES.length; phaseIndex += 1) {
+  deletionPhases: for (let phaseIndex = resumed?.phase ?? 0; phaseIndex < PHASES.length; phaseIndex += 1) {
     const [phaseName, phase] = PHASES[phaseIndex]!;
     let cursor = phaseIndex === resumed?.phase ? resumed.cursor : 0;
     for (;;) {
@@ -1534,6 +1537,9 @@ async function sweepStore(
       if (step === "fenced" || step === "done_today") {
         return { status: "skipped", counts: thisRun };
       }
+      // This is a store-wide review hold, not phase exhaustion. End all
+      // deletion work; the aggregate receipt below still counts the hold once.
+      if (step === "customer_privacy_hold") break deletionPhases;
       addCounts(thisRun, step.counts);
       if (step.exhausted) break;
       cursor = step.cursor;
@@ -1542,7 +1548,7 @@ async function sweepStore(
 
   const completed = await db.transaction(async tx => {
     const lock = await lockStoreForRetention(tx, scope);
-    if (lock !== "ready") return null;
+    if (lock !== "ready" && lock !== "customer_privacy_hold") return null;
     const summary: ShopifyEvidenceRetentionCounts = {
       ...emptyCounts(),
       ...(await deletionsSinceLastReceipt(tx, scope)),
@@ -1597,7 +1603,7 @@ async function sweepStore(
 
 /**
  * Purge selected *terminal* Scope A financial evidence after its 90-day period.
- * Anything still needed (see `scopeAEvidenceHolds`, unanswered data requests,
+ * Anything still needed (see `scopeAEvidenceHolds`, unresolved customer privacy requests,
  * redacting tenants, and stored files this control does not manage) fails
  * closed: it is kept and counted rather than silently discarded.
  */

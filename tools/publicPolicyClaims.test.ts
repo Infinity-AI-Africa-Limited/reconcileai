@@ -98,7 +98,23 @@ describe("when the policies describe Shopify's privacy requests", () => {
     const text = prose(privacy);
     expect(text).toMatch(/for orders that have not yet been reconciled, we prepare an export/);
     expect(text).toMatch(/already has reconciliation records \(a match, an exception, or an anomaly review\), or no administrator can receive the export, our team handles the request manually/);
-    expect(text).toMatch(/not in the minimised form Scope A writes, our team handles the request manually/);
+    expect(text).toMatch(/where validated order selectors can be processed safely, prevent those orders from being imported again/);
+    expect(text).toMatch(/Invalid or unsupported requests require manual review/);
+  });
+
+  it("should describe suppression as pending scope review, not completed erasure", () => {
+    const text = prose(privacy);
+    expect(text).toMatch(/Existing order\/refund and related reconciliation evidence may remain pending review of the request's scope and applicable retention requirements/);
+    expect(text).toMatch(/Suppression and field minimization are not represented as completed erasure/);
+    expect(text).toMatch(/retain the encrypted request selectors for this review/);
+    expect(text).not.toMatch(/Scope A does not keep customer personal data|confirming that none is held/);
+    const redaction = read("server/connectors/shopify/customerRedaction.ts");
+    expect(redaction).toContain('failureCode: "privacy_scope_review_required"');
+    expect(redaction).not.toContain('"scope_a_no_personal_data_persisted"');
+    expect(redaction).not.toContain(".delete(shopifyPrivacyRequestSelectors)");
+    // Draft source changes do not approve legal text or a new effective date.
+    expect(privacy).toContain("responsible owner must review");
+    expect(privacy).toContain("Last updated: October 16, 2026");
   });
 
   it("should describe uninstall as deleting the Shopify credentials, as the webhook does", () => {
@@ -133,10 +149,11 @@ describe("when the privacy notice describes Scope A evidence retention", () => {
     const text = prose(privacy);
     expect(text).toContain(`removed ${days} days after the latest of`);
     for (const hold of holds) expect(text, hold).toMatch(named[hold]!);
-    // The two holds that are not per-record: the store's unanswered data
+    // The two holds that are not per-record: unresolved customer privacy
     // requests, and the pair rule that keeps a reconciled pair together.
-    expect(source).toContain('eq(shopifyPrivacyRequests.topic, "customers/data_request")');
+    expect(source).toContain('inArray(shopifyPrivacyRequests.topic, ["customers/data_request", "customers/redact"])');
     expect(text).toMatch(/while a customer data request for your store is not yet answered/);
+    expect(text).toMatch(/while a customer redaction request for your store remains unresolved/);
     expect(source).toContain("export function deletableAfterPairing");
     expect(text).toMatch(/A reconciled pair, such as an order and the settlement matched to it, is removed together/);
   });
