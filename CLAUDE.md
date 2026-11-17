@@ -1911,7 +1911,10 @@ the owner's approval and update both records.
     own actions can still deploy, so none is started before the recipe is saved;
   - automatic deploys come back only after the first deploy on the new recipe has
     been checked, as their own approved step, while `main`'s head is the commit
-    already running: reconnecting a branch may deploy at once.
+    already running: reconnecting a branch may deploy at once. Same code is
+    necessary, not sufficient (`docs/DEPLOYMENT_RAILWAY.md` §1);
+  - a manual deploy is checked the moment it appears: Abort works only while it is
+    Initializing or Building, before the pre-deploy migration runs.
 
   Draining and overlap are not in the file; they are saved with the release that
   relies on them.
