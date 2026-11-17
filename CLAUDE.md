@@ -2228,24 +2228,43 @@ PR #68 received twice while appearing to have been reviewed. A review body
 matching `/credit limit|upgrade your plan/i` means **no review happened**; report
 that rather than treating the PR as reviewed.
 
-**Review is not approval, and a green review does not unblock a merge.** Greptile
-submits `COMMENTED`; GitHub counts only `APPROVED` toward branch protection. As
-of 2026-08-11 `origin/main` requires **1 approving review** plus the **`Tests`**
-check, with **`enforce_admins: true`** and no bypass allowances — so there is no
-break-glass path, for anyone. PRs opened with the owner's credential are authored
-by `MistaRichMan`, and GitHub forbids approving your own PR.
+**Review is not approval, and approval is not permission to merge.** Inspect each
+review's state and the commit it reviewed. Greptile can submit `COMMENTED` or
+`APPROVED`: genuine `greptile-apps[bot]` approvals preceded the merges of #210, #215
+and #223 (4–5 November 2026), and GitHub counted them. As read on 17 November 2026,
+`main` requires one approving review and a strict `Tests` check, with administrator
+enforcement, and the rule does not require the approver to be a person. A comment, a
+confidence score or a credit-limit notice is not an approval, and Greptile skips draft
+PRs by default.
 
-The practical consequence: **prepare the PR, drive CI and the review to green,
-then hand off.** Do not plan on merging. `PUT /pulls/{n}/merge` returns 405
-*"At least 1 approving review is required"*.
+- Whether a bot approval meets the owner's code-review policy is **the owner's
+  decision**. It never authorises a merge or a deployment, and it is not a human
+  financial, legal, privacy or recovery approval.
+- After a substantive change, get a fresh review of the new head, even where GitHub
+  keeps the old approval.
+- PRs opened with the owner's credential are authored by `MistaRichMan`, and GitHub
+  forbids approving your own PR. Never self-approve, trial a merge, weaken protection,
+  or step around a Claude, owner or recovery gate.
+
+The practical consequence: **prepare the PR, drive CI and the review to green, then
+merge only on the owner's explicit approval.** Without an approving review,
+`PUT /pulls/{n}/merge` returns 405 *"At least 1 approving review is required"*.
 
 Re-derive these settings rather than trusting the numbers above, which change
-without notice. There is no `gh` CLI here, so borrow the credential Git already
-holds:
+without notice. Read them with the session's own GitHub tooling, for example
+`gh api repos/Infinity-AI-Africa-Limited/reconcileai/branches/main/protection`. If
+that is refused (some session tokens cannot read branch protection), ask the owner
+or Manus. **Never pull a stored credential out of Git (`git credential fill`) into
+the shell** to get around a refusal: a token in a shell variable is one `echo` away
+from a log.
 
-```bash
-tok=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill | sed -n 's/^password=//p'); curl -s -H "Authorization: token $tok" https://api.github.com/repos/Infinity-AI-Africa-Limited/reconcileai/branches/main/protection
-```
+> ⚠️ **Since 17 November 2026, a merge to `main` deploys nothing.** Automatic deploys
+> on the production service were disabled for the Railway config cutover (#238; §12
+> still says "auto-deploys" until #238 merges). A deployment is its own approved step.
+> Until the cutover completes, **merge nothing on its own, documentation included**:
+> `main`'s head must stay the commit that is running, or the next manual or
+> variable-change deployment may build a commit no one approved for it (#238,
+> "Order with other changes").
 
 ### GitHub Remotes
 
