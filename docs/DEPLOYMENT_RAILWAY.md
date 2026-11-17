@@ -39,12 +39,6 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
    and this one was deleted in the cutover release (CLAUDE.md §12). Settings are the only
    place the recipe is enforced, so a change there needs owner approval and an update here.
 
-   To change a setting, edit it, open the staged changes' **Details** and check they hold
-   only the approved change, then hold **Alt** while clicking **Deploy**. That commits the
-   change without redeploying; a plain **Deploy** applies everything staged and redeploys.
-   Redeploy and Restart reuse the original deployment's code and configuration. Rollback
-   restores its image and its variables, old credentials included.
-
    | Setting | Value |
    |---|---|
    | Builder | Railpack |
@@ -65,6 +59,28 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
    SIGTERM and run its graceful shutdown, which waits up to 90 s by default, inside the
    120 s draining allowance. The evidence is an idle shutdown in Docker: it does not show
    that live work always completes, or how Railway's teardown behaves.
+
+   To change a setting, edit it, open the staged changes' **Details** and check they hold
+   only the approved change, then hold **Alt** while clicking **Deploy**. That commits the
+   change without redeploying; a plain **Deploy** applies everything staged and redeploys.
+
+   To go back, Redeploy reuses the original deployment's code and configuration, and
+   Restart its image. Rollback restores the image and the variables, old credentials
+   included, and only within the plan's image retention. None of them reverses database
+   writes, and each is still an approved production action.
+
+   **Automatic deploys** were disabled on 17 November 2026 for the config cutover.
+   Settings then showed *Connect Environment to Branch*, the repository still attached.
+   - Disabling stops pushes from deploying. It does not stop a manual deploy, a
+     staged-change **Deploy** (a variable change, for example) or Railway's own actions,
+     and Railway does not say what happens to work already queued.
+   - Before a manual **Deploy Latest Commit**, name the commit it should deploy in the
+     approval. Railway's docs say both "the Default branch in GitHub" (`main` here) and
+     "the currently connected GitHub branch", and no branch is connected. Check the
+     commit on the new deployment while it builds, and abort it if it differs.
+   - Reconnecting a branch may turn automatic deploys back on and deploy at once. Do it
+     as its own approved step, only while that branch's head is the commit already
+     running.
 3. **Do not set `PORT`** — Railway injects it; the server already reads `process.env.PORT`.
 4. Add a **Redis** service to the same project and reference its URL as `REDIS_URL`
    (Variables → Add Reference → `${{Redis.REDIS_URL}}`).

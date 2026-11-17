@@ -61,7 +61,7 @@ needing to be restated. It is a standard of judgement, not a tone.
 
 **Current stage:** **Live in production on Railway.** The Manus prototype has graduated to a production platform: magic-link auth, Anthropic Claude LLM, a durable job queue, email delivery, a test suite, CI, and the full SHOPLINE Tier 1 retail vertical are all shipped. Claude Code owns production engineering; Manus contributes features via PR (see Section 15).
 
-**Production deployment:** https://www.reconcileaiafrica.com/ on Railway. Auto-deploys from `main`; `pnpm db:migrate` runs as a pre-deploy step. The deploy recipe lives in the Railway service settings, not in the repository (see Section 12).
+**Production deployment:** https://www.reconcileaiafrica.com/ on Railway. Auto-deploys from `main`, except while automatic deploys are off (they were disabled on 17 November 2026 for the config cutover; a merge then deploys nothing). `pnpm db:migrate` runs as a pre-deploy step. The deploy recipe lives in the Railway service settings, not in the repository (see Section 12).
 
 > ⚠️ **Working-tree note (2026-07-23):** a local checkout may sit *behind* `origin/main`.
 > Production `main` is the source of truth (it carries the SHOPLINE Phase 1 work and the
@@ -1883,7 +1883,8 @@ the owner's approval and update both records.
 | Restart policy | ON_FAILURE, up to 10 retries |
 | Draining / overlap | 120 s / 0 s |
 
-- Deploys trigger automatically on push to `main`.
+- Deploys trigger automatically on push to `main`, except while automatic deploys are
+  off (since 17 November 2026; see the save-order note below).
 - **The start command must not go through pnpm.** In the Railpack rehearsal (#236,
   #237) a pnpm-launched app never completed its graceful shutdown on SIGTERM: it
   was killed when the allowance ran out, or went down with pnpm at once. Launched
@@ -1899,13 +1900,21 @@ the owner's approval and update both records.
   release). `tools/deployRecipe.test.ts` guards this, and the root files that would
   silently change the build.
 - **A config file locks the fields it sets.** Railway confirmed on 17 November 2026
-  that while `railway.json` applied, its fields could not be edited in Settings and
-  the stored values behind them could not be seen. So the recipe could be saved only
-  after the file stopped applying: at the first deploy of a commit without it, or at
-  the 1 December cutoff. Nothing could be allowed to deploy before the saved values
-  were visible, so automatic deploys were disabled across the change, and re-enabled
-  once the first deploy on the new recipe had been checked. Draining and overlap
-  were not in the file; they were saved with the release that relies on them.
+  that while `railway.json` applies, its fields cannot be edited in Settings and the
+  stored values behind them cannot be seen. So the recipe can be saved only after the
+  file stops applying: at the first deploy of a commit without it, or at the
+  1 December cutoff. Nothing we start may deploy before the saved values are visible:
+  - automatic deploys were disabled on 17 November 2026, with the owner's approval.
+    Settings then showed *Connect Environment to Branch*, the repository still
+    attached;
+  - that stops pushes only. A manual deploy, a staged-change **Deploy** and Railway's
+    own actions can still deploy, so none is started before the recipe is saved;
+  - automatic deploys come back only after the first deploy on the new recipe has
+    been checked, as their own approved step, while `main`'s head is the commit
+    already running: reconnecting a branch may deploy at once.
+
+  Draining and overlap are not in the file; they are saved with the release that
+  relies on them.
 
 > **Migration safety (learned the hard way):** migrations are **append-only**. Never
 > re-number an already-applied migration — doing so has broken a Railway deploy before
