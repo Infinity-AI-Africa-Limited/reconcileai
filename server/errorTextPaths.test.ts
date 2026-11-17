@@ -26,6 +26,12 @@ function duplicateEmail(): DrizzleQueryError {
   return new DrizzleQueryError("insert into `users` (`email`) values (?)", [EMAIL], driver);
 }
 
+/** The query failed because its connection dropped: no `sql` on the driver's error. */
+function connectionLost(): DrizzleQueryError {
+  const socket = Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET", errno: -104, syscall: "read", fatal: true });
+  return new DrizzleQueryError("select `id` from `users` where `email` = ?", [EMAIL], socket);
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -38,6 +44,9 @@ describe("when a procedure fails with a database error it did not catch", () => 
     }),
     plain: publicProcedure.query(() => {
       throw new Error("Plain application failure");
+    }),
+    dropped: publicProcedure.query(() => {
+      throw connectionLost();
     }),
   });
 
@@ -71,6 +80,15 @@ describe("when a procedure fails with a database error it did not catch", () => 
   it("should leave an application error's message as it was", async () => {
     const { body } = await call("plain");
     expect(body).toContain("Plain application failure");
+  });
+
+  it("should treat a query whose connection dropped as a database error too", async () => {
+    const { body, logged } = await call("dropped");
+    expect(body).toContain("database error (ECONNRESET)");
+    expect(body).not.toMatch(LEAK);
+    expect(body).not.toMatch(/select/i);
+    expect(logged).toContain("ECONNRESET");
+    expect(logged).not.toMatch(LEAK);
   });
 });
 
