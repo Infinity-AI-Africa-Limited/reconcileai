@@ -39,6 +39,12 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
    and this one was deleted in the cutover release (CLAUDE.md §12). Settings are the only
    place the recipe is enforced, so a change there needs owner approval and an update here.
 
+   To change a setting, edit it, open the staged changes' **Details** and check they hold
+   only the approved change, then hold **Alt** while clicking **Deploy**. That commits the
+   change without redeploying; a plain **Deploy** applies everything staged and redeploys.
+   Redeploy and Restart reuse the original deployment's code and configuration. Rollback
+   restores its image and its variables, old credentials included.
+
    | Setting | Value |
    |---|---|
    | Builder | Railpack |
