@@ -48,10 +48,14 @@ export default function ShopifyAppHome() {
   const [loading, setLoading] = useState(true);
   const settlement = useShopifySettlementEvidence();
   const cases = useShopifyCaseReview(context, settlement.result);
-  // No full-page spinner while polling; refusal clears the verified context.
+  // No full-page spinner while polling. A refused session clears the verified
+  // context (back to the "not ready" card); any other failure keeps the last
+  // verified view under a warning, which the next successful refresh clears —
+  // one transient failure must not leave a stale banner over a recovered page.
   const refreshContext = useCallback(async () => {
     try {
       setContext(await loadShopifyAppHomeContext());
+      setError(null);
     } catch (err) {
       setError(shopifyAppHomeErrorMessage(err));
       if (appHomeErrorCode(err) === "AUTHENTICATION_REQUIRED") setContext(null);

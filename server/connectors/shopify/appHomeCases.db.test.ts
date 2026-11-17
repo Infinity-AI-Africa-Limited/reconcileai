@@ -1,7 +1,12 @@
 /**
  * Actual MySQL execution of the embedded case reader's Drizzle predicates.
- * Opt-in ONLY for the existing isolated validation database at the numerical
- * loopback endpoint below. No router, boot services, ingestion, or external API.
+ * Runs against any locally classified, throwaway MySQL target, as every other
+ * *.db.test.ts does, so CI's MySQL runs it; production and Railway URLs are
+ * rejected before Vitest registers the suite. No router, boot services,
+ * ingestion, or external API.
+ *
+ * (It was first gated on one exact local endpoint, 127.0.0.1:3415, which CI
+ * never uses: all 14 cases were reported skipped on every CI run.)
  *
  * Setup commits one synthetic fixture transaction so the service can open its
  * own real repeatable-read transactions (not a mock or nested-tx substitute).
@@ -16,22 +21,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { channels, exceptions, organizations, transactions } from "../../../drizzle/schema";
 import { shopifyConnectorStores } from "../../../drizzle/shopify_schema";
 import type { ShopifyCase } from "../../../shared/shopifyAppHomeCases";
+import { classifyDatabaseTarget } from "../../dbTarget";
 import { detailShopifyCase, listShopifyCases } from "./appHomeCases";
 import { shopifyOrdersChannelCode, shopifySettlementEvidenceChannelCode } from "./channelCodes";
 import type { ShopifyEmbeddedContext } from "./embeddedAuth";
 
-// Inspect only the supplied URL at test collection, never dotenv or a fallback.
-// Numeric loopback avoids DNS; reject query options that could override the URI.
+// Inspect only the supplied URL at test collection, never dotenv or a fallback,
+// with the classification every database suite shares.
 function isValidationTarget(value: string | undefined): boolean {
-  if (!value) return false;
-  try {
-    const parsed = new URL(value);
-    return parsed.protocol === "mysql:" && parsed.hostname === "127.0.0.1" &&
-      parsed.port === "3415" && parsed.pathname === "/shopify_embedded_validation" &&
-      parsed.search === "" && parsed.hash === "";
-  } catch {
-    return false;
-  }
+  return Boolean(value) && classifyDatabaseTarget(value!).local;
 }
 const url = process.env.DATABASE_URL;
 const validationDatabase = isValidationTarget(url);

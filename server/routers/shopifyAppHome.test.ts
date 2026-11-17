@@ -148,10 +148,38 @@ describe("when the ID token does not verify", () => {
   });
 
   it("should answer an outage, not an authentication failure, when verification itself is unavailable", async () => {
-    state.authenticate.mockRejectedValue(new ShopifyEmbeddedAuthError("CONFIG_UNAVAILABLE"));
-    expect(await refusal(() => caller().context())).toMatchObject({ code: "SERVICE_UNAVAILABLE" });
-    state.authenticate.mockRejectedValue(new Error("pool exhausted"));
-    expect(await refusal(() => caller().context())).toEqual({ code: "SERVICE_UNAVAILABLE", message: "service_unavailable" });
+    const logging = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      state.authenticate.mockRejectedValue(new ShopifyEmbeddedAuthError("CONFIG_UNAVAILABLE"));
+      expect(await refusal(() => caller().context())).toMatchObject({ code: "SERVICE_UNAVAILABLE" });
+      state.authenticate.mockRejectedValue(new Error("pool exhausted"));
+      expect(await refusal(() => caller().context())).toEqual({ code: "SERVICE_UNAVAILABLE", message: "service_unavailable" });
+    } finally { logging.mockRestore(); }
+  });
+
+  it("should log an outage by its code alone, and a refused token not at all", async () => {
+    const logging = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      state.authenticate.mockRejectedValue(new ShopifyEmbeddedAuthError("TOKEN_EXPIRED"));
+      await refusal(() => caller().context());
+      expect(logging).not.toHaveBeenCalled();
+
+      // A missing credential must be one log line away from diagnosis (CLAUDE.md §2B.9b).
+      state.authenticate.mockRejectedValue(new ShopifyEmbeddedAuthError("CONFIG_UNAVAILABLE"));
+      await refusal(() => caller().context());
+      expect(logging).toHaveBeenLastCalledWith("[shopify-app-home] authentication service failed",
+        { category: "unavailable", error: "ShopifyEmbeddedAuthError", errorCode: "CONFIG_UNAVAILABLE" });
+
+      const driver = Object.assign(new Error("connect ECONNRESET"), { code: "ECONNRESET" });
+      state.authenticate.mockRejectedValue(Object.assign(
+        new Error("Failed query: select `id` from `shopify_connector_stores` where `shopDomain` = ?\nparams: secret-shop.myshopify.com"),
+        { cause: driver },
+      ));
+      await refusal(() => caller().context());
+      expect(logging).toHaveBeenLastCalledWith("[shopify-app-home] authentication service failed",
+        { category: "unavailable", error: "Error", errorCode: "ECONNRESET" });
+      expect(JSON.stringify(logging.mock.calls)).not.toMatch(/secret-shop|Failed query|params/);
+    } finally { logging.mockRestore(); }
   });
 });
 
@@ -332,13 +360,16 @@ describe("when embedded callers inspect cases", () => {
     expect(await refusal(() => app.exceptionDetail({ caseId: 1 }))).toEqual({ code: "UNAUTHORIZED", message: "authentication_required" });
     expect(fake.queries).toHaveLength(0);
   });
-  it("should map database failure to static unavailable with no new raw error log or retained cause", async () => {
+  it("should map database failure to static unavailable, logged by type alone, with no retained cause", async () => {
     const fake = casesDb(); fake.setOutage(); state.db = fake.db;
     const logging = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       expect(await refusal(() => caller().exceptionList())).toEqual({ code: "SERVICE_UNAVAILABLE", message: "unavailable" });
       expect(await refusal(() => caller().exceptionDetail({ caseId: 1 }))).toEqual({ code: "SERVICE_UNAVAILABLE", message: "unavailable" });
-      expect(logging).not.toHaveBeenCalled();
+      // One line per failed read, from the reader; nothing raw from the router.
+      expect(logging.mock.calls.map(([message, fields]) => [message, (fields as { operation: string }).operation]))
+        .toEqual([["[shopify-app-home] case read unavailable", "list"], ["[shopify-app-home] case read unavailable", "detail"]]);
+      expect(JSON.stringify(logging.mock.calls)).not.toMatch(/RAW SQL|private@|Failed query|params/);
     } finally { logging.mockRestore(); }
   });
 });

@@ -37,9 +37,17 @@ export const embeddedProcedure = publicProcedure.use(async ({ ctx, next }) => {
     if (error instanceof ShopifyEmbeddedAuthError && shopifyEmbeddedAuthHttpStatus(error) === 401) {
       throw appHomeError("UNAUTHORIZED", "authentication_required");
     }
-    if (!(error instanceof ShopifyEmbeddedAuthError)) {
-      console.error("[shopify-app-home] authentication service failed", { category: "unavailable" });
-    }
+    // A refused token is an answer; an outage is a failure and is logged. The
+    // auth error's own code is static (CONFIG_UNAVAILABLE says the deployment
+    // is missing its Shopify credentials). Anything else is named by its type
+    // and structured code, never its text, which at this boundary may carry
+    // token claims or a query's parameters.
+    const { error: kind, errorCode } = error instanceof ShopifyEmbeddedAuthError
+      ? { error: error.name, errorCode: error.code }
+      : loggableError(error);
+    console.error("[shopify-app-home] authentication service failed", {
+      category: "unavailable", error: kind, ...(errorCode ? { errorCode } : {}),
+    });
     throw appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
   }
 });
