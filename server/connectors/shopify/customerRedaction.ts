@@ -21,6 +21,7 @@ import { shopifyOrderDescription, shopifyRefundDescription } from "./ingest";
 import {
   claimableCustomerRedactionJob,
   isLivePrivacyJobStatus,
+  LIVE_PRIVACY_JOB_STATUSES,
   ShopifyPrivacyJobNotClaimableError,
 } from "./privacyJobState";
 
@@ -158,7 +159,24 @@ async function reconcileParentStateLoss(db: Db, job: ClaimedRedactionJob, now: D
         .onDuplicateKeyUpdate({
           set: { status: "failed_retryable", nextAttemptAt, failureCode: "worker_failed", leaseId: null, leaseExpiresAt: null },
         });
-    } else if (
+      return;
+    }
+    if (parentLive && parent) {
+      // Out of attempts while the parent still says work is owed: nothing will
+      // ever run it again, so say so. The parent row is locked above and still
+      // live, so this exact-status write cannot replace a parked or final one.
+      await tx
+        .update(shopifyPrivacyRequests)
+        .set({ status: "failed_terminal", completionNote: "parent_state_conflict", completedAt: null })
+        .where(and(
+          eq(shopifyPrivacyRequests.id, job.requestId),
+          eq(shopifyPrivacyRequests.organizationId, job.organizationId),
+          eq(shopifyPrivacyRequests.storeId, job.storeId),
+          eq(shopifyPrivacyRequests.topic, "customers/redact"),
+          eq(shopifyPrivacyRequests.status, parent.status),
+        ));
+    }
+    if (
       organization?.deletionState === "active" && store?.status !== "redacting" &&
       store?.privacyRedactionState === "customer_redacting" && store.privacyRedactionRequestId === job.requestId
     ) {
@@ -277,6 +295,9 @@ async function setBlocked(
           eq(shopifyPrivacyRequests.organizationId, job.organizationId),
           eq(shopifyPrivacyRequests.storeId, job.storeId),
           eq(shopifyPrivacyRequests.topic, "customers/redact"),
+          // A parent already parked or resolved is a person's (or a newer
+          // run's) decision; this worker may only move one that owes work.
+          inArray(shopifyPrivacyRequests.status, [...LIVE_PRIVACY_JOB_STATUSES]),
         ),
       );
   });
@@ -346,6 +367,9 @@ async function setRetryableFailure(
           eq(shopifyPrivacyRequests.organizationId, job.organizationId),
           eq(shopifyPrivacyRequests.storeId, job.storeId),
           eq(shopifyPrivacyRequests.topic, "customers/redact"),
+          // As in setBlocked: never reopen or overwrite a parked/final parent.
+          // A retry then meets the parent-state check and parks only itself.
+          inArray(shopifyPrivacyRequests.status, [...LIVE_PRIVACY_JOB_STATUSES]),
         ),
       );
   });

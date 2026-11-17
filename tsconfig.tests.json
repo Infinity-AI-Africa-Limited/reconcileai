@@ -44,6 +44,7 @@
     "server/connectors/shopify/auth.test.ts",
     "server/connectors/shopify/channelCodes.test.ts",
     "server/connectors/shopify/customerRedaction.test.ts",
+    "server/connectors/shopify/customerRedaction.db.test.ts",
     "server/connectors/shopify/embeddedAuth.test.ts",
     "server/connectors/shopify/logSafety.test.ts",
     "server/connectors/shopify/managedInstall.test.ts",

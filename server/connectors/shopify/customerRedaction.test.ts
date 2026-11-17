@@ -391,6 +391,38 @@ describe("when a customer redaction stops without completing", () => {
   });
 });
 
+describe("when a stopping worker writes its request's status", () => {
+  // The parent-state check guards the run's start; these writers run later, so
+  // they carry the same rule themselves: move only a parent that still owes
+  // work, never one a person parked or a newer run resolved.
+  const LIVE = ["received", "failed_retryable", "processing"];
+
+  it.each([
+    ["parked for manual review", { [SELECTORS]: [[{ resourceType: "order", position: 0, externalIdEnc: "enc-order-501" }]] }, {}],
+    ["blocked on a dependency", { [TXNS]: [[{ ...SCOPE_A_ROW, rawData: { unexpected: true } }]] }, {}],
+  ])("should write the parent only while it is live, when %s", async (_label, select, insert) => {
+    const fake = baseScript({ select, insert });
+
+    await handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake));
+
+    const parent = fake.writes("update", REQUESTS).at(-1);
+    expect(parent?.where?.params.slice(-LIVE.length)).toEqual(LIVE);
+  });
+
+  it.each([1, 6])("should write the parent only while it is live, after a failure at attempt %s", async (attempts) => {
+    const fake = baseScript({
+      select: { [JOBS]: [[{ ...JOB, attempts }]], [TXNS]: [[SCOPE_A_ROW]] },
+      insert: { [TOMBSTONES]: [new Error("database unavailable")] },
+    });
+
+    await expect(handleShopifyCustomerRedactionJob(JOB.requestId, deps(fake))).rejects.toThrow(/retry required/);
+
+    const parent = fake.writes("update", REQUESTS).at(-1);
+    expect(parent?.data).toMatchObject({ status: attempts < 6 ? "failed_retryable" : "failed_terminal" });
+    expect(parent?.where?.params.slice(-LIVE.length)).toEqual(LIVE);
+  });
+});
+
 describe("when another customer redaction holds the store fence", () => {
   it("should wait its turn without spending an attempt, and write nothing else", async () => {
     const fake = baseScript({
@@ -710,7 +742,18 @@ describe("when a claimed redaction loses its authoritative parent", () => {
     const child = fake.writes("update", JOBS).at(-1);
     expect(child?.where?.params).toEqual([901, 42, 7, "11111111-1111-4111-8111-111111111111", "processing"]);
     expect(child?.data).toMatchObject({ status: attempts < 6 ? "failed_retryable" : "failed_terminal", failureCode: "parent_state_conflict", leaseId: null });
-    expect(fake.writes("update", REQUESTS)).toEqual([]);
+    if (attempts < 6) {
+      // Retrying: the parent still owes work and keeps saying so.
+      expect(fake.writes("update", REQUESTS)).toEqual([]);
+    } else {
+      // Out of attempts: a parent left `processing` would claim work that will
+      // never run. It is ended, by an exact write on the locked live status.
+      const parent = fake.writes("update", REQUESTS);
+      expect(parent).toHaveLength(1);
+      expect(parent[0]?.data).toMatchObject({ status: "failed_terminal", completionNote: "parent_state_conflict", completedAt: null });
+      expect(parent[0]?.where?.params).toEqual([901, 42, 7, "customers/redact", "processing"]);
+      expect(parent[0]?.txId).toBe(child?.txId);
+    }
     expect(fake.writes("insert", OUTBOX)).toHaveLength(attempts < 6 ? 1 : 0);
     expect(fenceRelease(fake) === undefined).toBe(attempts < 6);
   });
