@@ -1898,9 +1898,14 @@ the owner's approval and update both records.
   registry on every deploy and start (found by the rehearsal; removed in the cutover
   release). `tools/deployRecipe.test.ts` guards this, and the root files that would
   silently change the build.
-- Settings save order for a recipe change: values the old file also set were inert
-  while it existed; draining and overlap were not in the file, so they are saved
-  only together with the release that relies on them.
+- **A config file locks the fields it sets.** Railway confirmed on 17 November 2026
+  that while `railway.json` applied, its fields could not be edited in Settings and
+  the stored values behind them could not be seen. So the recipe could be saved only
+  after the file stopped applying: at the first deploy of a commit without it, or at
+  the 1 December cutoff. Nothing could be allowed to deploy before the saved values
+  were visible, so automatic deploys were disabled across the change, and re-enabled
+  once the first deploy on the new recipe had been checked. Draining and overlap
+  were not in the file; they were saved with the release that relies on them.
 
 > **Migration safety (learned the hard way):** migrations are **append-only**. Never
 > re-number an already-applied migration — doing so has broken a Railway deploy before
