@@ -80,6 +80,45 @@ describe("loggableError", () => {
     });
   });
 
+  describe("when a query fails because its connection did", () => {
+    // mysql2 attaches `sql` only to an error the SERVER returned. A connection
+    // that drops mid-query (ECONNRESET, PROTOCOL_CONNECTION_LOST) fails every
+    // queued query with the bare socket error, and drizzle's wrapper sets no
+    // `name` of its own. So the wrapper's own shape is the only sign that its
+    // message is a query and its parameters.
+    const socket = () => Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET", errno: -104, syscall: "read", fatal: true });
+
+    it("should report it by the driver's code, never the query or its parameters", () => {
+      const wrapped = new DrizzleQueryError("select `id` from `users` where `email` = ?", ["owner@example.com"], socket());
+
+      const logged = loggableError(wrapped);
+
+      expect(logged).toEqual({ error: "database", errorCode: "ECONNRESET" });
+      expect(JSON.stringify(logged)).not.toMatch(/owner@example\.com|select|params/i);
+    });
+
+    it("should recognise drizzle's wrapper when it carries no cause", () => {
+      const wrapped = new DrizzleQueryError("select `id` from `users` where `email` = ?", ["owner@example.com"]);
+      expect(loggableError(wrapped)).toEqual({ error: "database" });
+    });
+
+    it("should recognise the wrapper by its shape, not only its class", () => {
+      // A second copy of drizzle-orm (its CommonJS build beside the ESM one)
+      // fails `instanceof`; the shape is the same.
+      const lookalike = Object.assign(new Error("Failed query: select 1\nparams: owner@example.com"), {
+        query: "select 1",
+        params: ["owner@example.com"],
+        cause: socket(),
+      });
+      expect(loggableError(lookalike)).toEqual({ error: "database", errorCode: "ECONNRESET" });
+    });
+
+    it("should not mistake an application error that merely has a query for one", () => {
+      const search = Object.assign(new Error("Search refused"), { query: "owner@example.com" });
+      expect(loggableError(search)).toEqual({ error: "Error", message: "Search refused" });
+    });
+  });
+
   describe("when the driver fails without drizzle's wrapper", () => {
     it("should still treat it as a database error", () => {
       const driver = Object.assign(new Error("secret value"), { code: "ECONNRESET", sql: "select 1" });

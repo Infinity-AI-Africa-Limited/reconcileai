@@ -8,6 +8,7 @@
  * real duplicate, and matches any statement whose SQL merely contains the word,
  * such as `ON DUPLICATE KEY UPDATE`. Read the structured fields, down the chain.
  */
+import { DrizzleQueryError } from "drizzle-orm/errors";
 
 const ER_DUP_ENTRY = 1062;
 
@@ -45,6 +46,18 @@ export function isDuplicateKeyError(error: unknown): boolean {
 }
 
 /**
+ * drizzle's query wrapper: by class, or by its own `query` + `params` fields,
+ * for a second copy of drizzle-orm (its CommonJS build beside the ESM one) that
+ * fails `instanceof`. Both fields are required: an application error with a
+ * `query` alone is not one.
+ */
+function isDrizzleQueryWrapper(link: object): boolean {
+  if (link instanceof DrizzleQueryError) return true;
+  const { name, query, params } = link as { name?: unknown; query?: unknown; params?: unknown };
+  return name === "DrizzleQueryError" || (typeof query === "string" && Array.isArray(params));
+}
+
+/**
  * What a log may say about an error.
  *
  * Never the text of a database error: drizzle's wrapper message is
@@ -62,6 +75,13 @@ export function isDuplicateKeyError(error: unknown): boolean {
  * It is the DEEPEST code on the `cause` chain — the driver's, for a database
  * error wrapped by drizzle and then by an application error that carries a code
  * of its own.
+ *
+ * drizzle's wrapper is recognised by itself, not only through its cause. It
+ * sets no `name` (it reads "Error"), and mysql2 puts `sql` only on an error the
+ * SERVER returned: a connection that drops mid-query fails it with the bare
+ * socket error (`ECONNRESET`, `PROTOCOL_CONNECTION_LOST`), which carries
+ * neither `sql` nor `sqlMessage`. Recognised by its cause alone, that wrapper's
+ * text was logged, stored, and answered to the client by tRPC's errorFormatter.
  */
 export function loggableError(error: unknown): { error: string; errorCode?: string; message?: string } {
   if (!(error instanceof Error)) return { error: typeof error };
@@ -70,7 +90,7 @@ export function loggableError(error: unknown): { error: string; errorCode?: stri
   let current: unknown = error;
   for (let depth = 0; depth < MAX_CAUSE_DEPTH && current && typeof current === "object"; depth += 1) {
     const link = current as { name?: unknown; code?: unknown; sql?: unknown; sqlMessage?: unknown; cause?: unknown };
-    if (link.name === "DrizzleQueryError" || "sql" in link || "sqlMessage" in link) database = true;
+    if (isDrizzleQueryWrapper(link) || "sql" in link || "sqlMessage" in link) database = true;
     if (typeof link.code === "string") errorCode = link.code;
     current = link.cause;
   }
