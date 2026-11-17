@@ -10,6 +10,7 @@ import {
   initializeShopifyManagedInstall,
   loadShopifyAppHomeContext,
   shopifyAppHomeErrorMessage,
+  appHomeErrorCode,
   type ShopifyAppBridgeContext,
   type ShopifySettlementField,
 } from "@/lib/shopifyAppBridge";
@@ -19,6 +20,8 @@ import { SETTLEMENT_MAPPING_FIELDS } from "@/lib/shopifySettlementMapping";
 import { useShopifySettlementEvidence } from "@/hooks/useShopifySettlementEvidence";
 import { useShopifyOrderSync } from "@/hooks/useShopifyOrderSync";
 import { SHOPIFY_INITIAL_ORDER_WINDOW_DAYS } from "@shared/shopifyOrderSync";
+import { useShopifyCaseReview } from "@/hooks/useShopifyCaseReview";
+import { ShopifyCaseReviewPanel } from "@/components/ShopifyCaseReviewPanel";
 
 /** Radix Select forbids an empty item value, so "no column" needs a sentinel. */
 const NOT_IN_FILE = "__reconcileai_not_in_file__";
@@ -44,13 +47,18 @@ export default function ShopifyAppHome() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const settlement = useShopifySettlementEvidence();
-  // Quiet reload for polling: no full-page spinner, and a failed poll keeps the
-  // last known state (the next poll tries again).
+  const cases = useShopifyCaseReview(context, settlement.result);
+  // No full-page spinner while polling. A refused session clears the verified
+  // context (back to the "not ready" card); any other failure keeps the last
+  // verified view under a warning, which the next successful refresh clears —
+  // one transient failure must not leave a stale banner over a recovered page.
   const refreshContext = useCallback(async () => {
     try {
       setContext(await loadShopifyAppHomeContext());
-    } catch {
-      // Intentionally silent — see above.
+      setError(null);
+    } catch (err) {
+      setError(shopifyAppHomeErrorMessage(err));
+      if (appHomeErrorCode(err) === "AUTHENTICATION_REQUIRED") setContext(null);
     }
   }, []);
   const orderSync = useShopifyOrderSync(context?.sync ?? null, refreshContext);
@@ -60,6 +68,7 @@ export default function ShopifyAppHome() {
   const load = async () => {
     setLoading(true);
     setError(null);
+    setContext(null);
     try {
       await initializeShopifyManagedInstall();
       setContext(await loadShopifyAppHomeContext());
@@ -115,7 +124,7 @@ export default function ShopifyAppHome() {
             <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#F47458]">{SHOPIFY_APP_DISPLAY_NAME} × Shopify</p>
             <h1 className="mt-2 text-3xl font-bold tracking-tight text-[#1B365D]">Order-evidence workspace</h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              Compare recent Shopify order evidence with settlement evidence you control. Any difference is reviewed in ReconcileAI’s Payment Exceptions workspace, which has its own sign-in.
+              Compare recent Shopify order evidence with settlement evidence you control and inspect this store’s cases inside Shopify Admin. Inspection is read-only; decisions, approvals and closure are not editable in this embedded workspace.
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
@@ -349,26 +358,19 @@ export default function ShopifyAppHome() {
           </CardContent>
         </Card>
 
-        <Card className="border-slate-200 shadow-sm">
-          <CardHeader>
-            <CardTitle className="text-xl text-[#1B365D]">3. Investigate, approve and evidence</CardTitle>
-            <CardDescription>
-              Once both sources are present, {SHOPIFY_APP_DISPLAY_NAME} identifies differences. A person remains responsible for reviewing and approving every resolution; {SHOPIFY_APP_DISPLAY_NAME} never posts a financial decision to Shopify.
-            </CardDescription>
-          </CardHeader>
-          {exceptionWorkspace ? (
-            <CardContent className="space-y-3">
+        <ShopifyCaseReviewPanel state={cases.state} review={cases.review} />
+        {exceptionWorkspace ? (
+          <aside className="space-y-3 text-sm">
               <Button asChild variant="outline" className="border-[#1B365D] text-[#1B365D] hover:bg-slate-50">
-                <a {...exceptionWorkspace}>Open Payment Exceptions in ReconcileAI</a>
+                <a {...exceptionWorkspace}>Optional advanced ReconcileAI workspace</a>
               </Button>
               <p className="text-xs leading-5 text-slate-500">
                 Opens in a new tab, outside Shopify Admin. ReconcileAI asks you to sign in there with your ReconcileAI
                 account; if it opens on the dashboard, choose Payment Exceptions from the menu. No Shopify session or
                 store details are passed to it.
               </p>
-            </CardContent>
-          ) : null}
-        </Card>
+          </aside>
+        ) : null}
 
         <footer className="pb-4 text-xs leading-5 text-slate-500">
           This embedded workspace uses a fresh Shopify session token for each {SHOPIFY_APP_DISPLAY_NAME} request. {SHOPIFY_APP_DISPLAY_NAME} processes only the minimum order evidence needed for the stated reconciliation purpose. <a className="font-medium text-[#1B365D] underline underline-offset-2" href="/privacy">Privacy</a> · <a className="font-medium text-[#1B365D] underline underline-offset-2" href="/support">Support</a>

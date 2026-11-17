@@ -60,6 +60,12 @@ function logCalls(source: string): string[] {
  * reason it is safe. Scoped to one file and one expression, never a name.
  */
 const SANCTIONED: Record<string, { expression: string; reason: string }[]> = {
+  "connectors/shopify/appHomeCases.ts": [
+    {
+      expression: "...failureIdentity(error)",
+      reason: "failureIdentity() returns loggableError's type and code only and drops its message, which is stricter than loggableError itself",
+    },
+  ],
   "routers/shopifyAppHome.ts": [
     {
       expression: "category: refusal.message",

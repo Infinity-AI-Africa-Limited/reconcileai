@@ -6,6 +6,9 @@
  * Every answer here is an allow-list. The embedded page runs inside Shopify
  * Admin for any staff member the store owner lets open the app, so nothing
  * internal — ids, batch numbers, row data, operational error text — may reach it.
+ * The separate read-only case DTO makes ONE explicit exception: numeric caseId
+ * is a non-authority selector rechecked against tenant/store/channel ownership
+ * on every detail read (shared/shopifyAppHomeCases.ts). No other IDs leave it.
  */
 import { TRPCError } from "@trpc/server";
 import { and, desc, eq } from "drizzle-orm";

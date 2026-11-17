@@ -33,6 +33,7 @@ const DIRECT_OPENERS: Record<string, string> = {
 /** The only files that may hand drizzle something other than an app pool, and why. */
 const DRIZZLE_WITHOUT_APP_POOL: Record<string, string> = {
   "duplicateKeyDetection.test.ts": "drizzle over a scripted client that records SQL: no connection exists.",
+  "connectors/shopify/casesDb.testkit.ts": "mysql-proxy over bounded synthetic arrays only: no driver, URL or connection exists; real openers remain forbidden here.",
 };
 
 /** Modules whose exports open connections, or wrap one in drizzle. */
