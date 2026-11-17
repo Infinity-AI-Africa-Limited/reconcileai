@@ -157,3 +157,24 @@ describe("when the deadline check runs", () => {
     expect(notify).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("when customer suppression is recorded but scope review is unresolved", () => {
+  it("should keep manual-review redaction visible and overdue instead of classifying it done", async () => {
+    const review = group({
+      topic: "customers/redact", status: "manual_review", requests: 1,
+      oldestReceivedAt: new Date(NOW.getTime() - 40 * DAY), overdue: 1,
+    });
+    const fake = scriptedDb({ select: { [REQUESTS]: [[review]] } });
+    const notify = vi.fn(async () => true);
+
+    const result = await checkShopifyPrivacyDeadlines({ email: true }, { db: fake.db as never, now: () => NOW, notify });
+
+    expect(result).toEqual({ requests: 1, overdue: 1, notified: true });
+    expect(SHOPIFY_PRIVACY_STATUS_CLASSES.needsAPerson).toContain("manual_review");
+    expect(SHOPIFY_PRIVACY_STATUS_CLASSES.done).not.toContain("manual_review");
+    expect(fake.ops.find((op) => op.table === REQUESTS)?.where?.params).not.toContain("completed");
+    expect(describeShopifyPrivacyAttention([review], NOW)?.content)
+      .toContain("customers/redact · manual_review: 1 request(s); oldest received 2026-08-26, OVERDUE since 2026-09-25");
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+});

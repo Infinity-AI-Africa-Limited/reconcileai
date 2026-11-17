@@ -53,6 +53,7 @@
     "server/connectors/shopify/onboardingFailure.test.ts",
     "server/connectors/shopify/orderBackstop.test.ts",
     "server/connectors/shopify/privacyCompletion.test.ts",
+    "server/connectors/shopify/privacyDeadlines.test.ts",
     "server/connectors/shopify/privacyDownloadRoute.test.ts",
     "server/connectors/shopify/evidenceRetention.test.ts",
     "server/connectors/shopify/evidenceRetention.db.test.ts",

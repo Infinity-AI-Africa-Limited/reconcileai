@@ -478,3 +478,54 @@ describe("when a received customer request has no selectors", () => {
     expect(repairAt).toBeGreaterThan(selectorInsertAt);
   });
 });
+
+describe("when a scope-review customer redaction receives a valid replay", () => {
+  it.each(["wh-original-redaction", "wh-new-semantic-replay"])(
+    "should preserve the parked job and parent without outbox revival or refencing for %s",
+    async (webhookId) => {
+      const validation = validateCustomerPrivacySelectors(
+        "customers/redact",
+        { shop_id: 17, shop_domain: SHOP, customer: { id: 41 }, orders_to_redact: [501] },
+        STORE,
+      );
+      if (!validation.ok) throw new Error("fixture should validate");
+      const selectors = await protectCustomerPrivacySelectors(42, 7, validation.selectors);
+      const redactionJobs = "shopify_privacy_customer_redaction_jobs";
+      const fake = scriptedDb({
+        select: {
+          [REQUESTS]: [[{ id: 902, status: "manual_review" }]],
+          [STORES]: [[{ status: "active", privacyRedactionState: "active" }]],
+          [redactionJobs]: [[{ status: "manual_review", failureCode: "privacy_scope_review_required" }]],
+        },
+        // All conditional quarantine/promotion attempts find no eligible row.
+        update: { [REQUESTS]: [0, 0], [redactionJobs]: [0] },
+      });
+
+      await admit(fake, {
+        store: STORE, topic: "customers/redact", requestHash: "original-semantic-redaction-digest",
+        webhookId, validation, selectors,
+      });
+
+      const parentInsert = fake.writes("insert", REQUESTS)[0];
+      expect(parentInsert?.upsert).toBe(true);
+      expect(Object.keys(parentInsert?.onDuplicate ?? {})).toEqual(["requestHash"]);
+      const jobInsert = fake.writes("insert", redactionJobs)[0];
+      expect(jobInsert?.upsert).toBe(true);
+      expect(Object.keys(jobInsert?.onDuplicate ?? {})).toEqual(["requestId"]);
+      const promote = fake.writes("update", REQUESTS).find((op) => rowOf(op)?.status === "received");
+      expect(promote?.where?.sql).toMatch(/`admissionErrorCode` is not null/i);
+      expect(fake.writes("update", redactionJobs).some((op) => rowOf(op)?.status === "received")).toBe(false);
+      expect(fake.writes("insert", OUTBOX)).toEqual([]);
+      expect(fake.writes("update", OUTBOX)).toEqual([]);
+      expect(fake.writes("update", STORES).some((op) => rowOf(op)?.privacyRedactionState !== undefined)).toBe(false);
+      expect(fake.writes("insert", "shopify_order_redaction_tombstones")).toEqual([]);
+      // Existing duplicate selector insert contract is intentionally unchanged:
+      // the upsert preserves the stored ciphertext and keyed selector identity.
+      const selectorInsert = fake.writes("insert", SELECTORS)[0];
+      expect(selectorInsert?.upsert).toBe(true);
+      expect(Object.keys(selectorInsert?.onDuplicate ?? {})).toEqual(["externalIdHmac"]);
+      expect(fake.writes("update", EVENTS).at(-1)?.where?.params).toEqual([webhookId]);
+      expect(fake.writes("update", EVENTS).at(-1)?.data).toMatchObject({ status: "processed", errorCode: null });
+    },
+  );
+});

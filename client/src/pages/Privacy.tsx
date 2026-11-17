@@ -1,6 +1,8 @@
 /**
  * Public privacy notice for ReconcileAI's Shopify Scope A app.
  * Accessible at /privacy without authentication.
+ * Draft customer-redaction/retention wording: responsible owner must review the
+ * legal wording and effective date before publication. This is not legal approval.
  */
 export default function Privacy() {
   return (
@@ -90,7 +92,8 @@ export default function Privacy() {
               We keep evidence for as long as it is still needed: while an exception on it is open, while a governed review
               of it is in progress, while a match or anomaly on it is awaiting review, while a reconciliation run that reads
               it is queued or running, while a governed control relies on it, while a customer data request for your store
-              is not yet answered, or while a legal, security, or operational matter requires it. We retain limited
+              is not yet answered, while a customer redaction request for your store remains unresolved, or while a legal,
+              security, or operational matter requires it. We retain limited
               de-identified operational and audit evidence separately to operate and demonstrate the deletion control; it
               does not contain order values, customer identifiers, raw payloads, source-file content, or direct provider
               identifiers.
@@ -125,10 +128,11 @@ export default function Privacy() {
                 available.
               </li>
               <li>
-                <strong><code>customers/redact</code>:</strong> Scope A does not keep customer personal data, so we complete the
-                request by confirming that none is held for the orders it names, and we prevent those orders from being imported
-                again. The order references and amounts already recorded remain part of your reconciliation evidence. Where a
-                stored record is not in the minimised form Scope A writes, our team handles the request manually.
+                <strong><code>customers/redact</code>:</strong> We record the request and, where validated order selectors can
+                be processed safely, prevent those orders from being imported again. Existing order/refund and related
+                reconciliation evidence may remain pending review of the request&apos;s scope and applicable retention
+                requirements. Suppression and field minimization are not represented as completed erasure. We retain the
+                encrypted request selectors for this review. Invalid or unsupported requests require manual review.
               </li>
               <li>
                 <strong><code>shop/redact</code>:</strong> handled as described in section 6.
