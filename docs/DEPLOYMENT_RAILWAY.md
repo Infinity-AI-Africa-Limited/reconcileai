@@ -74,13 +74,24 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
    - Disabling stops pushes from deploying. It does not stop a manual deploy, a
      staged-change **Deploy** (a variable change, for example) or Railway's own actions,
      and Railway does not say what happens to work already queued.
-   - Before a manual **Deploy Latest Commit**, name the commit it should deploy in the
-     approval. Railway's docs say both "the Default branch in GitHub" (`main` here) and
-     "the currently connected GitHub branch", and no branch is connected. Check the
-     commit on the new deployment while it builds, and abort it if it differs.
+   - **What a manual deploy picks.** Railway's deployment-actions page says *Deploy
+     Latest Commit* deploys "the latest commit from the Default branch in GitHub"
+     (`main` here), and that there is "no way to force a deploy from a branch other
+     than the Default without connecting it". Its autodeploy page says "the currently
+     connected GitHub branch", and none is connected. So before starting one, confirm
+     on GitHub that `main`'s head is the commit the approval names.
+   - **Check the commit the moment the deployment appears, and abort it if it differs.**
+     Abort works only while a deployment is Initializing or Building. The pre-deploy
+     migration runs after the build, and nothing undoes what it writes. If no one can
+     watch that window, do not start the deployment.
    - Reconnecting a branch may turn automatic deploys back on and deploy at once. Do it
      as its own approved step, only while that branch's head is the commit already
-     running.
+     running. Same code is necessary, not sufficient: a rebuild still replaces the
+     running process, runs the pre-deploy migration and can pick up a newer Node patch
+     release (`.nvmrc` names 22 only).
+   - Railway also starts deployments itself, to move a service between hosts or during
+     platform upgrades; these "are mandatory and cannot be opted out of", and the docs
+     do not say whether they re-read settings.
 3. **Do not set `PORT`** — Railway injects it; the server already reads `process.env.PORT`.
 4. Add a **Redis** service to the same project and reference its URL as `REDIS_URL`
    (Variables → Add Reference → `${{Redis.REDIS_URL}}`).
