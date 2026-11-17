@@ -52,6 +52,7 @@ import { scriptedDb } from "../connectors/shopify/scriptedDb.testkit";
 import { ShopifyManualSyncError } from "../connectors/shopify/manualSync";
 import { ShopifySettlementEvidenceError } from "../connectors/shopify/settlementEvidence";
 import { shopifyAppHomeRouter } from "./shopifyAppHome";
+import { casesDb } from "../connectors/shopify/casesDb.testkit";
 
 const CURSORS = "shopify_sync_cursors";
 const REQUESTS = "shopify_sync_requests";
@@ -302,5 +303,42 @@ describe("when the merchant imports settlement evidence", () => {
   ] as const)("should map %s to %s with a stable code", async (serviceCode, code, message) => {
     state.importEvidence.mockRejectedValue(new ShopifySettlementEvidenceError(serviceCode));
     expect(await refusal(() => caller().importSettlementEvidence(evidenceInput))).toEqual({ code, message });
+  });
+});
+
+describe("when embedded callers inspect cases", () => {
+  it("should use only the fresh token context even beside another tenant's super-admin cookie", async () => {
+    const fake = casesDb(); state.db = fake.db;
+    state.authenticate.mockResolvedValue({ ...context, shopDomain: "store7.myshopify.com" });
+    const app = caller(TOKEN, { id: 888, organizationId: 99, role: "super_admin" });
+    expect((await app.exceptionList()).total).toBe(3);
+    expect((await app.exceptionDetail({ caseId: 2 })).sourceKind).toBe("shopify_refund");
+    expect(await refusal(() => app.exceptionDetail({ caseId: 5 }))).toEqual({ code: "NOT_FOUND", message: "not_found" });
+    expect(state.authenticate).toHaveBeenCalledWith(TOKEN);
+  });
+  it("should reject browser identity overrides rather than strip or forward them", async () => {
+    const fake = casesDb(); state.db = fake.db;
+    for (const key of ["storeId", "organizationId", "channelId", "shop", "userId", "portalOrg", "jobId"]) {
+      expect(await refusal(() => caller().exceptionList({ [key]: 99 } as never))).toMatchObject({ code: "BAD_REQUEST" });
+      expect(await refusal(() => caller().exceptionDetail({ caseId: 1, [key]: 99 } as never))).toMatchObject({ code: "BAD_REQUEST" });
+    }
+    expect(fake.queries).toHaveLength(0);
+  });
+  it("should refuse invalid tokens before either case read even with a privileged cookie", async () => {
+    const fake = casesDb(); state.db = fake.db;
+    state.authenticate.mockRejectedValue(new ShopifyEmbeddedAuthError("TOKEN_EXPIRED"));
+    const app = caller(TOKEN, { role: "super_admin", organizationId: 42 });
+    expect(await refusal(() => app.exceptionList())).toEqual({ code: "UNAUTHORIZED", message: "authentication_required" });
+    expect(await refusal(() => app.exceptionDetail({ caseId: 1 }))).toEqual({ code: "UNAUTHORIZED", message: "authentication_required" });
+    expect(fake.queries).toHaveLength(0);
+  });
+  it("should map database failure to static unavailable with no new raw error log or retained cause", async () => {
+    const fake = casesDb(); fake.setOutage(); state.db = fake.db;
+    const logging = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await refusal(() => caller().exceptionList())).toEqual({ code: "SERVICE_UNAVAILABLE", message: "unavailable" });
+      expect(await refusal(() => caller().exceptionDetail({ caseId: 1 }))).toEqual({ code: "SERVICE_UNAVAILABLE", message: "unavailable" });
+      expect(logging).not.toHaveBeenCalled();
+    } finally { logging.mockRestore(); }
   });
 });

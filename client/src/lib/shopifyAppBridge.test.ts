@@ -6,8 +6,13 @@ import {
   loadShopifyAppBridgeScriptForTest,
   loadShopifyAppHomeContext,
   resetShopifyAppBridgeForTest,
+  loadShopifyCases,
+  loadShopifyCase,
+  subscribeShopifyAuthRefusal,
+  triggerShopifyOrderSync,
   ShopifyAppHomeClientError,
 } from "./shopifyAppBridge";
+import { createShopifyCaseReview } from "./shopifyCaseReview";
 
 const APP_BRIDGE_SCRIPT = "https://cdn.shopify.com/shopifycloud/app-bridge.js";
 
@@ -194,5 +199,45 @@ describe("when the workspace calls its API", () => {
     expect(url).toMatch(/^\/api\/trpc\/shopifyAppHome\.initialize/);
     expect(new Headers(init.headers).get("authorization")).toBe("Bearer id-token-2");
     expect(url).not.toMatch(/organizationId|storeId|id-token/);
+  });
+});
+
+describe("when the embedded case API is called", () => {
+  it("should acquire a fresh token for list, detail and on-demand refresh, only in the Authorization header", async () => {
+    vi.useRealTimers(); resetShopifyAppBridgeForTest();
+    let sequence = 0;
+    page.window.shopify = { idToken: vi.fn(async () => `case-token-${++sequence}`) };
+    const fetchStub = vi.fn(async () => new Response(JSON.stringify({ result: { data: { json: {} } } }), { headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchStub);
+    await loadShopifyCases({ status: "unresolved", page: 1 });
+    await loadShopifyCase(7);
+    await loadShopifyCases({ status: "open", page: 2 });
+    expect(page.window.shopify.idToken).toHaveBeenCalledTimes(3);
+    fetchStub.mock.calls.forEach((call, index) => {
+      const [url, init] = call as unknown as [string, RequestInit];
+      expect(new Headers(init.headers).get("authorization")).toBe(`Bearer case-token-${index + 1}`);
+      expect(decodeURIComponent(url) + (init.body ?? "")).not.toMatch(/case-token|organizationId|storeId|channelId|userId|shopDomain|portalOrg/);
+      expect(init.method).toBe("GET");
+    });
+    expect(decodeURIComponent((fetchStub.mock.calls[1] as unknown as [string])[0])).toContain('"caseId":7');
+  });
+  it("should clear case results when any embedded operation refuses authentication", async () => {
+    vi.useRealTimers(); resetShopifyAppBridgeForTest();
+    page.window.shopify = { idToken: async () => "synthetic-token" };
+    const review = createShopifyCaseReview({ list: async () => ({ cases: [], total: 1, page: 1, pageSize: 20 }), detail: async () => { throw new Error("unused"); } });
+    await review.refresh();
+    const unsubscribe = subscribeShopifyAuthRefusal(review.refuseAuthentication);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: { json: { message: "authentication_required", code: -32001, data: { code: "UNAUTHORIZED", httpStatus: 401 } } } }), { status: 401, headers: { "content-type": "application/json" } })));
+    try {
+      await expect(triggerShopifyOrderSync()).rejects.toMatchObject({ code: "AUTHENTICATION_REQUIRED" });
+      expect(review.getSnapshot().list).toBeNull();
+      expect(review.getSnapshot().error).toContain("Shopify Admin");
+    } finally { unsubscribe(); review.dispose(); }
+  });
+  it("should preserve static not-found and unavailable without operational messages", () => {
+    const serverError = (message: string) => TRPCClientError.from({ error: { message, code: -32600, data: { code: "NOT_FOUND", httpStatus: 404 } } });
+    expect(appHomeErrorCode(serverError("not_found"))).toBe("NOT_FOUND");
+    expect(appHomeErrorCode(serverError("unavailable"))).toBe("SERVICE_UNAVAILABLE");
+    expect(appHomeErrorCode(serverError("RAW SQL private@example.invalid"))).toBe("SERVICE_UNAVAILABLE");
   });
 });

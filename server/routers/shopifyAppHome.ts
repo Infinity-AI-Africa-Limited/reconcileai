@@ -19,6 +19,7 @@ import {
 import { completeShopifyManagedInstall } from "../connectors/shopify/managedInstall";
 import { requestShopifyManualSync } from "../connectors/shopify/manualSync";
 import { importShopifySettlementEvidence } from "../connectors/shopify/settlementEvidence";
+import { createShopifyCaseProcedures } from "./shopifyAppHomeCases";
 
 /**
  * Shopify App Home: the workspace embedded in Shopify Admin.
@@ -28,7 +29,7 @@ import { importShopifySettlementEvidence } from "../connectors/shopify/settlemen
  * never read `ctx.user`: a browser that also holds a ReconcileAI cookie gains
  * nothing here, and the tenant and store come only from the verified token.
  */
-const embeddedProcedure = publicProcedure.use(async ({ ctx, next }) => {
+export const embeddedProcedure = publicProcedure.use(async ({ ctx, next }) => {
   try {
     const shopify = await authenticateShopifyEmbeddedRequest(ctx.req.headers?.authorization);
     return next({ ctx: { ...ctx, shopify } });
@@ -37,7 +38,7 @@ const embeddedProcedure = publicProcedure.use(async ({ ctx, next }) => {
       throw appHomeError("UNAUTHORIZED", "authentication_required");
     }
     if (!(error instanceof ShopifyEmbeddedAuthError)) {
-      console.error("[shopify-app-home] authentication service failed", loggableError(error));
+      console.error("[shopify-app-home] authentication service failed", { category: "unavailable" });
     }
     throw appHomeError("SERVICE_UNAVAILABLE", "service_unavailable");
   }
@@ -50,6 +51,7 @@ async function database() {
 }
 
 export const shopifyAppHomeRouter = router({
+  ...createShopifyCaseProcedures(embeddedProcedure, database),
   /** Public configuration: the app's API key, which App Bridge needs to start. */
   config: publicProcedure.query(() => {
     const apiKey = ENV.shopifyClientId.trim();

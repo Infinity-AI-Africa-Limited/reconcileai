@@ -3,6 +3,8 @@ import superjson from "superjson";
 import type { AppRouter } from "../../../server/routers";
 import { SHOPIFY_APP_DISPLAY_NAME } from "./shopifyAppIdentity";
 import { shopifyInstallErrorMessage } from "./shopifyConnection";
+import type { ShopifyCase, ShopifyCaseListRequest, ShopifyCasePage } from "@shared/shopifyAppHomeCases";
+export type { ShopifyCase, ShopifyCaseListRequest, ShopifyCasePage } from "@shared/shopifyAppHomeCases";
 
 export type ShopifyAppBridgeContext = {
   store: {
@@ -103,13 +105,15 @@ const APP_BRIDGE_POLL_MS = 50;
 let bridgeReady: Promise<ShopifyAppBridgeApi> | null = null;
 
 export class ShopifyAppHomeClientError extends Error {
-  constructor(public readonly code: "CONFIGURATION_UNAVAILABLE" | "APP_BRIDGE_UNAVAILABLE" | "AUTHENTICATION_REQUIRED" | "INSTALLATION_IN_PROGRESS" | "REQUIRED_PERMISSIONS_NOT_GRANTED" | "STORE_ACTION_REQUIRED" | "ORDER_SYNC_REQUIRED" | "ACTIVE_ADMIN_REQUIRED" | "INVALID_REQUEST" | "SYNC_IN_PROGRESS" | "SERVICE_UNAVAILABLE" | "OWNERSHIP_VERIFICATION_REQUIRED" | "EMAIL_ALREADY_REGISTERED" | "REDACTION_IN_PROGRESS" | "MISSING_CONTACT_EMAIL" | "STORE_IDENTITY_CONFLICT") {
+  constructor(public readonly code: "NOT_FOUND" | "CONFIGURATION_UNAVAILABLE" | "APP_BRIDGE_UNAVAILABLE" | "AUTHENTICATION_REQUIRED" | "INSTALLATION_IN_PROGRESS" | "REQUIRED_PERMISSIONS_NOT_GRANTED" | "STORE_ACTION_REQUIRED" | "ORDER_SYNC_REQUIRED" | "ACTIVE_ADMIN_REQUIRED" | "INVALID_REQUEST" | "SYNC_IN_PROGRESS" | "SERVICE_UNAVAILABLE" | "OWNERSHIP_VERIFICATION_REQUIRED" | "EMAIL_ALREADY_REGISTERED" | "REDACTION_IN_PROGRESS" | "MISSING_CONTACT_EMAIL" | "STORE_IDENTITY_CONFLICT") {
     super(code);
     this.name = "ShopifyAppHomeClientError";
   }
 }
 
 const MESSAGE_CODES: Record<string, ShopifyAppHomeClientError["code"]> = {
+  not_found: "NOT_FOUND",
+  unavailable: "SERVICE_UNAVAILABLE",
   authentication_required: "AUTHENTICATION_REQUIRED",
   installation_in_progress: "INSTALLATION_IN_PROGRESS",
   required_permissions_not_granted: "REQUIRED_PERMISSIONS_NOT_GRANTED",
@@ -168,11 +172,20 @@ const embeddedClient = createTRPCClient<AppRouter>({
   ],
 });
 
+/** Ephemeral refusal signal only — no token, identity, data or persistent cache. */
+const authRefusalListeners = new Set<() => void>();
+export function subscribeShopifyAuthRefusal(listener: () => void): () => void {
+  authRefusalListeners.add(listener);
+  return () => { authRefusalListeners.delete(listener); };
+}
+
 async function appHomeCall<T>(call: () => Promise<T>): Promise<T> {
   try {
     return await call();
   } catch (error) {
-    throw new ShopifyAppHomeClientError(appHomeErrorCode(error));
+    const code = appHomeErrorCode(error);
+    if (code === "AUTHENTICATION_REQUIRED") for (const listener of authRefusalListeners) listener();
+    throw new ShopifyAppHomeClientError(code);
   }
 }
 
@@ -279,6 +292,14 @@ export async function loadShopifyAppHomeContext(): Promise<ShopifyAppBridgeConte
   return appHomeCall(() => embeddedClient.shopifyAppHome.context.query());
 }
 
+/** Query-only, fresh token per request. The case selector conveys no authority. */
+export async function loadShopifyCases(input?: ShopifyCaseListRequest): Promise<ShopifyCasePage> {
+  return appHomeCall(() => embeddedClient.shopifyAppHome.exceptionList.query(input));
+}
+export async function loadShopifyCase(caseId: number): Promise<ShopifyCase> {
+  return appHomeCall(() => embeddedClient.shopifyAppHome.exceptionDetail.query({ caseId }));
+}
+
 /**
  * Ensure this verified Shopify App Bridge session has a stored offline token
  * before App Home reads its connection. The server treats an active store as a
@@ -303,6 +324,8 @@ export function shopifyAppHomeErrorMessage(error: unknown): string {
     return `${SHOPIFY_APP_DISPLAY_NAME} could not load this Shopify workspace. Please try again.`;
   }
   switch (error.code) {
+    case "NOT_FOUND":
+      return "This case is not available in this Shopify workspace. Return to the list and refresh.";
     case "CONFIGURATION_UNAVAILABLE":
       return `The Shopify connection is not configured for this environment yet. Please contact ${SHOPIFY_APP_DISPLAY_NAME} support.`;
     case "APP_BRIDGE_UNAVAILABLE":
