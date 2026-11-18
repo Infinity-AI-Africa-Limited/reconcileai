@@ -80,6 +80,11 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
      than the Default without connecting it". Its autodeploy page says "the currently
      connected GitHub branch", and none is connected. So before starting one, confirm
      on GitHub that `main`'s head is the commit the approval names.
+   - **A variable change's Deploy has the same unknown.** Which commit a staged variable
+     change builds while no branch is connected is not documented, and Railway's support
+     declined to confirm it (18 November 2026). Hold `main` at the running commit, name
+     that commit in the approval, and check it the same way. #244 tests both actions in
+     a separate project.
    - **Check the commit the moment the deployment appears, and abort it if it differs.**
      Abort works only while a deployment is Initializing or Building. The pre-deploy
      migration runs after the build, and nothing undoes what it writes. If no one can
