@@ -61,7 +61,7 @@ needing to be restated. It is a standard of judgement, not a tone.
 
 **Current stage:** **Live in production on Railway.** The Manus prototype has graduated to a production platform: magic-link auth, Anthropic Claude LLM, a durable job queue, email delivery, a test suite, CI, and the full SHOPLINE Tier 1 retail vertical are all shipped. Claude Code owns production engineering; Manus contributes features via PR (see Section 15).
 
-**Production deployment:** https://www.reconcileaiafrica.com/ on Railway. Auto-deploys from `main`; `pnpm db:migrate` runs as a pre-deploy step (see `railway.json` and Section 12).
+**Production deployment:** https://www.reconcileaiafrica.com/ on Railway. Auto-deploys from `main`, except while automatic deploys are off (they were disabled on 17 November 2026 for the config cutover; a merge then deploys nothing). `pnpm db:migrate` runs as a pre-deploy step. The deploy recipe lives in the Railway service settings, not in the repository (see Section 12).
 
 > ⚠️ **Working-tree note (2026-07-23):** a local checkout may sit *behind* `origin/main`.
 > Production `main` is the source of truth (it carries the SHOPLINE Phase 1 work and the
@@ -1860,14 +1860,64 @@ via Cloudflare. The app is a standard Node.js application, so it also runs on an
 Node-compatible host (Render, Fly.io, DigitalOcean App Platform, AWS App Runner, Google
 Cloud Run, or a self-managed VPS) — Railway is simply the current production choice.
 
-### How Railway deploys it (see `railway.json`)
+### How Railway deploys it (the service settings, since the cutover release)
 
-- **Builder:** Nixpacks; **build command:** `pnpm build`
-- **Pre-deploy:** `pnpm db:migrate` — **migrations run automatically on every deploy**
-- **Start:** `pnpm start`
-- **Health check:** `/api/healthz` (liveness; returns 200 while the process is alive)
-- **Restart policy:** ON_FAILURE, up to 10 retries
-- Deploys trigger automatically on push to `main`.
+Railway stops reading `railway.json` / `railway.toml` on **1 December 2026**, and
+Nixpacks, the builder that file named, is no longer a documented choice. So the
+recipe moved into the app service's own settings in the Railway dashboard, and the
+file was deleted. Owner decisions, 12 November 2026:
+- the cutover ships as its own release, before the maintenance page;
+- at 12:45 WAT, the backup and isolated-restore proof remains a gate for that release.
+
+**The dashboard is now the only place the recipe is enforced**, so it is recorded
+here and in `docs/DEPLOYMENT_RAILWAY.md`. A change there is a production change: get
+the owner's approval and update both records.
+
+| Setting | Value |
+|---|---|
+| Builder | Railpack (no root `Dockerfile`: Railway always prefers one if it exists) |
+| Build command | `pnpm build` |
+| Pre-deploy command | `pnpm db:migrate` — **migrations run automatically on every deploy** |
+| Start command | `NODE_ENV=production exec node dist/index.js` |
+| Health check | `/api/healthz` (liveness; returns 200 while the process is alive), timeout 120 s |
+| Restart policy | ON_FAILURE, up to 10 retries |
+| Draining / overlap | 120 s / 0 s |
+
+- Deploys trigger automatically on push to `main`, except while automatic deploys are
+  off (since 17 November 2026; see the save-order note below).
+- **The start command must not go through pnpm.** In the Railpack rehearsal (#236,
+  #237) a pnpm-launched app never completed its graceful shutdown on SIGTERM: it
+  was killed when the allowance ran out, or went down with pnpm at once. Launched
+  directly, the idle app drained and exited 0 in under a second. The app's own drain
+  timeout defaults to 90 s (`DEFAULT_DRAIN_TIMEOUT_MS`), inside the 120 s allowance;
+  leave `RECONCILEAI_DRAIN_TIMEOUT_MS` unset. That is idle Docker evidence: it does not
+  show that live work always completes within the allowance, or how Railway's teardown
+  behaves.
+- **`pnpm` must not be a project dependency.** Railpack's image puts
+  `/app/node_modules/.bin` first on PATH, so a dependency copy of pnpm runs instead of
+  the pinned `packageManager` version, then downloads the pinned one from the npm
+  registry on every deploy and start (found by the rehearsal; removed in the cutover
+  release). `tools/deployRecipe.test.ts` guards this, and the root files that would
+  silently change the build.
+- **A config file locks the fields it sets.** Railway confirmed on 17 November 2026
+  that while `railway.json` applies, its fields cannot be edited in Settings and the
+  stored values behind them cannot be seen. So the recipe can be saved only after the
+  file stops applying: at the first deploy of a commit without it, or at the
+  1 December cutoff. Nothing we start may deploy before the saved values are visible:
+  - automatic deploys were disabled on 17 November 2026, with the owner's approval.
+    Settings then showed *Connect Environment to Branch*, the repository still
+    attached;
+  - that stops pushes only. A manual deploy, a staged-change **Deploy** and Railway's
+    own actions can still deploy, so none is started before the recipe is saved;
+  - automatic deploys come back only after the first deploy on the new recipe has
+    been checked, as their own approved step, while `main`'s head is the commit
+    already running: reconnecting a branch may deploy at once. Same code is
+    necessary, not sufficient (`docs/DEPLOYMENT_RAILWAY.md` §1);
+  - a manual deploy is checked the moment it appears: Abort works only while it is
+    Initializing or Building, before the pre-deploy migration runs.
+
+  Draining and overlap are not in the file; they are saved with the release that
+  relies on them.
 
 > **Migration safety (learned the hard way):** migrations are **append-only**. Never
 > re-number an already-applied migration — doing so has broken a Railway deploy before

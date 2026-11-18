@@ -34,10 +34,69 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
 ## 1. Create the Railway service
 
 1. Railway → **New Project → Deploy from GitHub repo** → `Infinity-AI-Africa-Limited/reconcileai`, branch `main`.
-2. Railway reads [`railway.json`](../railway.json): Nixpacks build `pnpm build`, pre-deploy
-   `pnpm db:migrate`, start `pnpm start`, healthcheck `GET /api/healthz` (120 s timeout),
-   restart on failure up to 10 times. Node comes from [`.nvmrc`](../.nvmrc) (22) and pnpm
-   from `packageManager` in `package.json`.
+2. Set the deploy recipe in the service's **Settings**. The repository holds no Railway
+   config file: Railway stops reading `railway.json` / `railway.toml` on 1 December 2026,
+   and this one was deleted in the cutover release (CLAUDE.md §12). Settings are the only
+   place the recipe is enforced, so a change there needs owner approval and an update here.
+
+   | Setting | Value |
+   |---|---|
+   | Builder | Railpack |
+   | Build command | `pnpm build` |
+   | Pre-deploy command | `pnpm db:migrate` |
+   | Start command | `NODE_ENV=production exec node dist/index.js` |
+   | Healthcheck path / timeout | `/api/healthz` / 120 s |
+   | Restart policy | On failure, up to 10 retries |
+   | Draining / overlap | 120 s / 0 s |
+
+   Railpack takes Node from [`.nvmrc`](../.nvmrc) (22) and pnpm from `packageManager` in
+   `package.json` (10.4.1). Two things would silently change the build, and
+   `tools/deployRecipe.test.ts` refuses both:
+   - a root `Dockerfile`, which Railway always uses when present;
+   - `pnpm` as a project dependency, which puts a second pnpm ahead of the pinned one.
+
+   Start the app directly, not through `pnpm start`. Only then does the app receive
+   SIGTERM and run its graceful shutdown, which waits up to 90 s by default, inside the
+   120 s draining allowance. The evidence is an idle shutdown in Docker: it does not show
+   that live work always completes, or how Railway's teardown behaves.
+
+   To change a setting, edit it, open the staged changes' **Details** and check they hold
+   only the approved change, then hold **Alt** while clicking **Deploy**. That commits the
+   change without redeploying; a plain **Deploy** applies everything staged and redeploys.
+
+   To go back, Redeploy reuses the original deployment's code and configuration, and
+   Restart its image. Rollback restores the image and the variables, old credentials
+   included, and only within the plan's image retention. None of them reverses database
+   writes, and each is still an approved production action.
+
+   **Automatic deploys** were disabled on 17 November 2026 for the config cutover.
+   Settings then showed *Connect Environment to Branch*, the repository still attached.
+   - Disabling stops pushes from deploying. It does not stop a manual deploy, a
+     staged-change **Deploy** (a variable change, for example) or Railway's own actions,
+     and Railway does not say what happens to work already queued.
+   - **What a manual deploy picks.** Railway's deployment-actions page says *Deploy
+     Latest Commit* deploys "the latest commit from the Default branch in GitHub"
+     (`main` here), and that there is "no way to force a deploy from a branch other
+     than the Default without connecting it". Its autodeploy page says "the currently
+     connected GitHub branch", and none is connected. So before starting one, confirm
+     on GitHub that `main`'s head is the commit the approval names.
+   - **A variable change's Deploy has the same unknown.** Which commit a staged variable
+     change builds while no branch is connected is not documented, and Railway's support
+     declined to confirm it (18 November 2026). Hold `main` at the running commit, name
+     that commit in the approval, and check it the same way. #244 tests both actions in
+     a separate project.
+   - **Check the commit the moment the deployment appears, and abort it if it differs.**
+     Abort works only while a deployment is Initializing or Building. The pre-deploy
+     migration runs after the build, and nothing undoes what it writes. If no one can
+     watch that window, do not start the deployment.
+   - Reconnecting a branch may turn automatic deploys back on and deploy at once. Do it
+     as its own approved step, only while that branch's head is the commit already
+     running. Same code is necessary, not sufficient: a rebuild still replaces the
+     running process, runs the pre-deploy migration and can pick up a newer Node patch
+     release (`.nvmrc` names 22 only).
+   - Railway also starts deployments itself, to move a service between hosts or during
+     platform upgrades; these "are mandatory and cannot be opted out of", and the docs
+     do not say whether they re-read settings.
 3. **Do not set `PORT`** — Railway injects it; the server already reads `process.env.PORT`.
 4. Add a **Redis** service to the same project and reference its URL as `REDIS_URL`
    (Variables → Add Reference → `${{Redis.REDIS_URL}}`).
