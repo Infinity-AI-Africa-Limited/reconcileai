@@ -18,6 +18,61 @@ Three production decisions depend on the answers:
 | #242, and later Release 1 | **Deploy Latest Commit** | which commit it picks while no branch is connected |
 | Turning automatic deploys back on | **Connect Environment to Branch** | whether it deploys at once, and what |
 
+## Attempt 1, 19 November 2026: blocked before the baseline
+
+Run by Manus under the owner's approval. The project, an empty capped service (0.5 vCPU,
+0.5 GB) and the private fixture repository were created, and the repository was selectable
+in Railway's picker. **The first deploy could not start**: the Deploy control was disabled,
+and Railway said "No project member has access to this GitHub repository. Check if the
+GitHub Railway App is installed and project members have their GitHub accounts connected."
+No scenario ran. Cleanup was verified: the repository returned 404, the project was deleted
+immediately, and Railway showed $0.00 usage for it.
+
+The message does not say which condition failed. Railway's own troubleshooting for it
+(deployments/github-autodeploys, "Can't enable autodeploy") lists, in order: a project member
+with a connected GitHub account and contributor access; the Railway GitHub App's access to
+the repository; no pending app permission update; "wait a few minutes for Railway caches to
+refresh"; disconnect and reconnect the repository; and "Add -> GitHub Repository -> Refresh to
+force a cache refresh". The repository was about ten minutes old when the deploy was tried,
+and production's repository in the same organisation deploys, so a stale cache is the most
+likely cause. That is unproven. The preflight below covers every listed condition except
+reinstalling the app, which stays out of bounds.
+
+## Preflight: repository access, before anything can run
+
+Do all of this before a deployment is attempted; none of it costs anything.
+
+1. **Identity, read only.** In Railway's account settings, confirm the owner's account shows
+   a connected GitHub account, and which one. That account must have write access to the new
+   repository.
+2. **Create the repository as that account, and author every fixture commit as it.** That
+   matches production, where commits on `main` come from the linked account. Railway's docs
+   also say pushes from a GitHub account with no linked Railway account wait for a manual
+   Deployment Approval, which would confuse Scenario D.
+3. **Create the repository at least 15 minutes before connecting it.** Then, in Railway, use
+   **Add -> GitHub Repository -> Refresh** once before connecting.
+4. **Create the project and the empty service, save the caps, then connect the repository.**
+   A sourceless service showed $0.00 in attempt 1. **Check that the Deploy control is
+   enabled before anything else.**
+5. **If it is disabled**, follow Railway's steps once, in order: wait a few minutes; **Add ->
+   GitHub Repository -> Refresh**; disconnect and reconnect the repository. Still disabled:
+   stop and clean up.
+   - Never reinstall the Railway GitHub App, never widen its installation to all
+     repositories, and never touch production's connection. Adding the one test repository
+     to the installation, if it is not covered, is a separate owner action.
+
+## Lessons from attempt 1 that change the steps
+
+- **The no-redeploy commit needs Alt held while clicking Deploy.** Alt+Enter did nothing.
+  Scenario C exercises Alt + Deploy. If the operator's browser tooling cannot hold Alt while
+  clicking, the owner performs it, here and in production (#238's recipe save and release
+  steps).
+- **Deleting a project asks for the owner's authenticator code**, and **Delete Project**
+  first starts a 48-hour grace period; **Delete Immediately**, with its confirmation phrase,
+  removes it at once. Run the test when the owner can enter the code at cleanup.
+- Caps (0.5 vCPU, 0.5 GB) and the dummy variable can be saved on the empty service before
+  any source is attached, so nothing runs uncapped.
+
 ## What it can show, and what it cannot
 
 It can show, for a new service in the same state (automatic deploys disabled the same way):
@@ -83,11 +138,15 @@ Each result then names exactly one of them.
 
 ### Setup
 
+Run the **preflight** above first; its steps 1–4 replace the creation steps that follow.
+
 1. Create the repository with the fixture files. Commit **M1** (`main-1`).
 2. Create branch `side` from M1 and commit **S1** (`side-1`).
-3. Railway: **New Project → Deploy from GitHub repo →** `railway-source-probe`, branch `main`;
-   name the project `source-probe`. **STOP if this flow is inside the ReconcileAI project.**
-4. Add the variable `PROBE_VARIABLE=v1` and **Deploy** (automatic deploys are still on: setup only).
+3. Railway: a new project named `source-probe`, with one empty service. Save the caps and the
+   variable `PROBE_VARIABLE=v1`, then connect `railway-source-probe`, branch `main`.
+   **STOP if this flow is inside the ReconcileAI project.**
+4. With the Deploy control confirmed enabled (preflight step 4), **Deploy** once: the
+   baseline. Automatic deploys are still on here; this is setup only.
 5. When Active, record the start line. Expect `marker=main-1 … probeVariable=v1 … railwayBranch=main`.
 6. **Disable** automatic deployments with the same control used on production. Record the
    branch section's wording **immediately, and after a reload**. Production showed
@@ -156,7 +215,9 @@ The closest match to the Anthropic key deployment.
 ### Cleanup: always, including after a STOP
 
 19. Record the project's usage cost from Railway's usage page.
-20. Delete the Railway project (**Project settings → Danger → Delete**). Confirm it is gone.
+20. Delete the Railway project: **Project settings → Danger → Delete Project**, the owner
+    enters the authenticator code, then **Delete Immediately** with its confirmation phrase.
+    Confirm the dashboard no longer lists it, including under Deleted.
 21. Delete the GitHub repository. If it was added to the Railway GitHub App's selected
     repositories, remove it.
 
