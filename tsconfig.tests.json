@@ -193,6 +193,7 @@
     "server/outboundDestination.test.ts",
     "server/webhookDestination.db.test.ts",
     "tools/publicPolicyClaims.test.ts",
-    "tools/shopifyAppHomeHandoff.test.ts"
+    "tools/shopifyAppHomeHandoff.test.ts",
+    "tools/railwaySourceProbe.test.ts"
   ]
 }

@@ -1,0 +1,14 @@
+{
+  "name": "railway-source-probe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Non-production probe: reports which commit and which dummy variable a Railway deployment received.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "start": "node server.mjs"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}
