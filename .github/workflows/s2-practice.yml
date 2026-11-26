@@ -1,0 +1,61 @@
+name: S2 practice run (synthetic data only)
+
+# The database recovery rehearsal (tools/s2-practice/README.md). Made-up data
+# only: no secret is read, no production host is reachable from it, and it is
+# never a required check. Run by hand, or when its own files change.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/s2-practice/**"
+      - ".github/workflows/s2-practice.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s2-practice-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  practice:
+    name: S2 practice run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Choose the work directory
+        run: echo "S2_WORK=$RUNNER_TEMP/s2work" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Start the synthetic cluster
+        run: tools/s2-practice/cluster.sh up "$S2_WORK"
+      - name: Run the practice
+        run: node tools/s2-practice/practice.mjs "$S2_WORK"
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "$S2_WORK/receipt.json" ]; then
+            {
+              echo '### S2 practice receipt (synthetic)'
+              echo '```json'
+              cat "$S2_WORK/receipt.json"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cp "$S2_WORK/receipt.json" "$RUNNER_TEMP/s2-receipt.json"
+          fi
+      - name: Keep the receipt (synthetic, no secrets)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-practice-receipt
+          path: ${{ runner.temp }}/s2-receipt.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Remove the cluster and the synthetic dumps
+        if: always()
+        run: tools/s2-practice/cluster.sh down "$S2_WORK"
