@@ -35,7 +35,7 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
 
 1. Railway → **New Project → Deploy from GitHub repo** → `Infinity-AI-Africa-Limited/reconcileai`, branch `main`.
 2. Set the deploy recipe in the service's **Settings**. The repository holds no Railway
-   config file: Railway stops reading `railway.json` / `railway.toml` on 1 December 2026,
+   config file: Railway stops reading `railway.json` / `railway.toml` on 1 January 2027,
    and this one was deleted in the cutover release (CLAUDE.md §12). Settings are the only
    place the recipe is enforced, so a change there needs owner approval and an update here.
 

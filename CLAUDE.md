@@ -1862,7 +1862,8 @@ Cloud Run, or a self-managed VPS) — Railway is simply the current production c
 
 ### How Railway deploys it (the service settings, since the cutover release)
 
-Railway stops reading `railway.json` / `railway.toml` on **1 December 2026**, and
+Railway stops reading `railway.json` / `railway.toml` on **1 January 2027** (its docs
+said 1 December 2026 until late November, then moved the date), and
 Nixpacks, the builder that file named, is no longer a documented choice. So the
 recipe moved into the app service's own settings in the Railway dashboard, and the
 file was deleted. Owner decisions, 12 November 2026:
@@ -1903,7 +1904,7 @@ the owner's approval and update both records.
   that while `railway.json` applies, its fields cannot be edited in Settings and the
   stored values behind them cannot be seen. So the recipe can be saved only after the
   file stops applying: at the first deploy of a commit without it, or at the
-  1 December cutoff. Nothing we start may deploy before the saved values are visible:
+  1 January 2027 cutoff. Nothing we start may deploy before the saved values are visible:
   - automatic deploys were disabled on 17 November 2026, with the owner's approval.
     Settings then showed *Connect Environment to Branch*, the repository still
     attached;
