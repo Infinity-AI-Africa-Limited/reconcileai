@@ -1,0 +1,254 @@
+name: Railpack build rehearsal
+
+# HOLD: a rehearsal, approved by the owner on 11 November 2026 for preparation
+# and synthetic testing only (PR #235, comment 6798738817). It changes nothing
+# that deploys, and is not meant to merge.
+#
+# Why: Railway stops reading railway.json on 1 December 2026, and Nixpacks, the
+# builder that file names, can no longer be selected. The first build after the
+# cutoff will most likely use Railpack. This builds the source with a pinned
+# Railpack, runs the committed migrations in the built image against a
+# disposable MySQL, starts the image and calls /api/healthz.
+#
+# A green run shows that Railway's PUBLIC builder can build and start this
+# source. It does NOT show that Railway's hosted build will behave the same:
+#   - Railway may run another Railpack version;
+#   - it passes the service's own variables to the build, and this passes none;
+#   - it takes the start command, pre-deploy command and health check from the
+#     service settings;
+#   - production runs on TiDB, not MySQL.
+#
+# Bounds:
+#   - no Railway access or key, no production secret or data, no paid runner;
+#   - no root Dockerfile, and nothing here changes how production builds;
+#   - the GitHub token stays out of the build: checkout does not keep it, the
+#     planning step runs with an empty environment, and no build argument
+#     carries a credential;
+#   - the app runs on an internal Docker network with no route out, so it
+#     cannot reach any email, LLM, storage, OAuth or merchant service. The one
+#     container given normal network access runs pnpm and no app code (see
+#     "Let pnpm fetch its pinned version once").
+
+on:
+  # Every base, as tools/ciTriggers.test.ts requires of every workflow.
+  pull_request:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railpack-rehearsal-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RAILPACK_VERSION: "0.43.0"
+  # sha256 of railpack-v0.43.0-x86_64-unknown-linux-musl.tar.gz, as listed in
+  # that release's checksums.txt (read on 2026-11-11). A replaced asset fails.
+  RAILPACK_SHA256: "248a8f60f36854aabed6124113631078a802de3461660855fc4de9c26065c1fb"
+  # The BuildKit frontend from the same release, pinned by digest. Railpack's
+  # docs recommend the frontend version that matches the planner.
+  RAILPACK_FRONTEND: "ghcr.io/railwayapp/railpack-frontend:v0.43.0@sha256:355ef61fae6f2551103cd8b10c710cb07167dd353d561f15c69b8d7ac1c676cc"
+  IMAGE: "reconcileai-railpack-rehearsal:ci"
+  NETWORK: "railpack-rehearsal"
+  # Read by .github/scripts/start-test-mysql.sh and the rehearsal script.
+  # All synthetic; the database exists only for this run.
+  MYSQL_CONTAINER: "railpack-rehearsal-mysql"
+  MYSQL_DATABASE: "reconcileai_rehearsal"
+  MYSQL_ROOT_PASSWORD: "root"
+
+jobs:
+  rehearsal:
+    name: Railpack build rehearsal
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the commit under review
+        uses: actions/checkout@v4
+        with:
+          # The pull request's head itself, not GitHub's merge commit, so the
+          # image is built from exactly the commit being reviewed.
+          ref: ${{ github.event.pull_request.head.sha }}
+          # Nothing in the workspace may hold the GitHub token: the build
+          # context is this directory.
+          persist-credentials: false
+
+      - name: Record the source and set up the results file
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/railpack/home"
+          {
+            echo "RESULTS=$RUNNER_TEMP/railpack/results.env"
+            echo "SOURCE_COMMIT=$(git rev-parse HEAD)"
+            echo "SOURCE_TREE=$(git rev-parse 'HEAD^{tree}')"
+          } >> "$GITHUB_ENV"
+          : > "$RUNNER_TEMP/railpack/results.env"
+
+      - name: Install the pinned Railpack
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/railpack"
+          asset="railpack-v${RAILPACK_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          curl -fsSL --retry 5 --retry-all-errors -o "$dir/$asset" \
+            "https://github.com/railwayapp/railpack/releases/download/v${RAILPACK_VERSION}/${asset}"
+          echo "${RAILPACK_SHA256}  $dir/$asset" | sha256sum -c -
+          tar -xzf "$dir/$asset" -C "$dir" railpack
+          version=$("$dir/railpack" --version)
+          [ "$version" = "railpack version ${RAILPACK_VERSION}" ] || { echo "::error::unexpected version: $version"; exit 1; }
+          echo "RAILPACK=$dir/railpack" >> "$GITHUB_ENV"
+
+      - name: Plan the build (empty environment)
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/railpack"
+          # env -i: nothing from the runner reaches the planner. Railway would
+          # pass the service's variables here; this passes none.
+          for attempt in 1 2 3; do
+            status=0
+            env -i PATH=/usr/bin:/bin HOME="$out/home" \
+              "$RAILPACK" prepare . --plan-out "$out/plan.json" --info-out "$out/info.json" || status=$?
+            [ "$status" -eq 0 ] && break
+            # 75 is Railpack's "transient, worth retrying", such as a download.
+            if [ "$status" -ne 75 ] || [ "$attempt" -eq 3 ]; then exit "$status"; fi
+            sleep $((attempt * 15))
+          done
+
+      - name: Check what Railpack chose
+        run: |
+          set -euo pipefail
+          # Versions and the outcome are in the info file; the plan is written
+          # separately, and the info file leaves it out.
+          info="$RUNNER_TEMP/railpack/info.json"
+          plan="$RUNNER_TEMP/railpack/plan.json"
+          node_version=$(jq -r '.resolvedPackages.node.resolvedVersion // "none"' "$info")
+          pnpm_version=$(jq -r '.resolvedPackages.pnpm.resolvedVersion // "none"' "$info")
+          start_command=$(jq -r '.deploy.startCommand // "none"' "$plan")
+          build_commands=$(jq -r '[.steps[] | select(.name == "build") | .commands[]? | .cmd? // empty] | join(" && ")' "$plan")
+          install_commands=$(jq -r '[.steps[] | select(.name == "install") | .commands[]? | .cmd? // empty] | join(" && ")' "$plan")
+          {
+            echo "node=$node_version"
+            echo "pnpm=$pnpm_version"
+            echo "start_command=$start_command"
+            echo "build_commands=$build_commands"
+            echo "install_commands=$install_commands"
+          } >> "$RESULTS"
+          echo "Node $node_version, pnpm $pnpm_version"
+          echo "install: $install_commands"
+          echo "build:   $build_commands"
+          echo "start:   $start_command"
+          problems=0
+          jq -e '.success == true' "$info" >/dev/null || { echo "::error::Railpack reports the plan as unsuccessful"; problems=1; }
+          # Production builds on Node 22 (.nvmrc). Railpack's own default is
+          # the newest LTS, so a miss here is a real difference.
+          [[ "$node_version" == 22.* ]] || { echo "::error::Node resolved to $node_version, not 22.x from .nvmrc"; problems=1; }
+          [ "$pnpm_version" = "10.4.1" ] || { echo "::error::pnpm resolved to $pnpm_version, not 10.4.1 from package.json"; problems=1; }
+          [ "$start_command" = "pnpm run start" ] || { echo "::error::start command is '$start_command', not the package.json start script"; problems=1; }
+          [[ "$build_commands" == *"pnpm run build"* ]] || { echo "::error::the build step does not run the package.json build script"; problems=1; }
+          [[ "$install_commands" == *"--frozen-lockfile"* ]] || { echo "::error::the install step does not use the lockfile"; problems=1; }
+          exit "$problems"
+
+      - name: Build the image with Railpack's BuildKit frontend
+        run: |
+          set -euo pipefail
+          # The only build argument names the public frontend image.
+          docker buildx build --load --progress plain \
+            --build-arg BUILDKIT_SYNTAX="$RAILPACK_FRONTEND" \
+            -f "$RUNNER_TEMP/railpack/plan.json" \
+            -t "$IMAGE" .
+          echo "image_bytes=$(docker image inspect -f '{{.Size}}' "$IMAGE")" >> "$RESULTS"
+          # The base images the plan names, by tag, with the digest they had.
+          # Informational, so a lookup that fails records "unknown" rather than
+          # failing a build that succeeded.
+          for ref in $(jq -r '[.. | objects | .image? // empty | select(type == "string")] | unique[]' "$RUNNER_TEMP/railpack/plan.json"); do
+            digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ { print $2; exit }') || digest=""
+            echo "base_image=$ref@${digest:-unknown}" >> "$RESULTS"
+          done
+
+      - name: Start a disposable MySQL on a network with no route out
+        run: |
+          set -euo pipefail
+          docker network create --internal "$NETWORK" >/dev/null
+          [ "$(docker network inspect -f '{{.Internal}}' "$NETWORK")" = "true" ]
+          .github/scripts/start-test-mysql.sh
+          docker network connect "$NETWORK" "$MYSQL_CONTAINER"
+
+      # The first run of this rehearsal found that pnpm in this image fetches
+      # another pnpm from the npm registry before doing anything: the image's
+      # PATH puts /app/node_modules/.bin first, where the project's own pnpm
+      # devDependency lives, and that pnpm defers to the version package.json
+      # pins. This step records it on every run.
+      - name: Record which pnpm the image runs (observation)
+        run: .github/scripts/railpack-rehearsal.sh pnpm-check
+
+      # On Railway the container reaches the registry and fetches that pnpm
+      # itself, on every run. Here it is fetched once, by a container that runs
+      # pnpm and no app code, so the app containers never need a route out.
+      - name: Let pnpm fetch its pinned version once, outside the app
+        env:
+          PNPM_TOOLS_VOLUME: railpack-rehearsal-pnpm-tools
+        run: .github/scripts/railpack-rehearsal.sh pnpm-seed
+
+      - name: Run the pre-deploy command in the image (pnpm db:migrate)
+        env:
+          PNPM_TOOLS_VOLUME: railpack-rehearsal-pnpm-tools
+        run: .github/scripts/railpack-rehearsal.sh migrate
+
+      - name: Start with Railpack's own start command and call /api/healthz
+        env:
+          PNPM_TOOLS_VOLUME: railpack-rehearsal-pnpm-tools
+        run: .github/scripts/railpack-rehearsal.sh start app-railpack-default
+
+      - name: Observe how it stops (not a gate)
+        run: .github/scripts/railpack-rehearsal.sh stop app-railpack-default
+
+      # The held candidate (PR #233) replaces `pnpm start` with this launcher.
+      # It runs no pnpm, so it gets no fetched copy: it must start on its own.
+      - name: Start with the held candidate's direct launcher and call /api/healthz
+        run: .github/scripts/railpack-rehearsal.sh start app-direct-launcher "NODE_ENV=production exec node dist/index.js"
+
+      - name: Observe how it stops (not a gate)
+        run: .github/scripts/railpack-rehearsal.sh stop app-direct-launcher
+
+      - name: Summary
+        if: always()
+        run: |
+          set -uo pipefail
+          get() { grep -m1 "^$1=" "${RESULTS:-/dev/null}" 2>/dev/null | cut -d= -f2- || true; }
+          row() { printf '| %s | %s |\n' "$1" "${2:-not reached}"; }
+          {
+            echo "## Railpack build rehearsal"
+            echo
+            echo "Railpack ${RAILPACK_VERSION} on a GitHub-hosted runner, MySQL 8.0, synthetic settings, no outbound network for the app."
+            echo "This shows public-tool compatibility only. It is not proof of Railway's hosted build or deployment."
+            echo
+            echo "| Check | Result |"
+            echo "|---|---|"
+            row "Source commit" "\`${SOURCE_COMMIT:-?}\`"
+            row "Source tree" "\`${SOURCE_TREE:-?}\`"
+            row "Node" "$(get node)"
+            row "pnpm" "$(get pnpm)"
+            row "Install commands" "$(get install_commands)"
+            row "Build commands" "$(get build_commands)"
+            row "Start command (detected)" "$(get start_command)"
+            row "Image size (bytes)" "$(get image_bytes)"
+            row "pnpm on the image's PATH" "$(get runtime_pnpm_path)"
+            row "The project's own pnpm (devDependency)" "$(get project_pnpm_version)"
+            row "pnpm needs the npm registry before it runs anything" "$(get runtime_pnpm_needs_registry)"
+            row "Migrations in the journal" "$(get migrations_journal)"
+            row "Migrations recorded after two runs" "$(get migrations_recorded)"
+            row "Healthy after (s), Railpack's start command" "$(get app-railpack-default_healthy_after_seconds)"
+            row "Healthy after (s), direct launcher" "$(get app-direct-launcher_healthy_after_seconds)"
+            echo
+            echo "Stop behaviour (observed, not a gate): SIGTERM, then SIGKILL after 30 s."
+            echo
+            echo "| Launcher | Seconds to stop | Exit code | App's shutdown log |"
+            echo "|---|---|---|---|"
+            for name in app-railpack-default app-direct-launcher; do
+              printf '| %s | %s | %s | %s |\n' "$name" \
+                "$(get "${name}_stop_seconds")" "$(get "${name}_exit_code")" "$(get "${name}_shutdown_logged")"
+            done
+            echo
+            echo "Base images:"
+            grep '^base_image=' "${RESULTS:-/dev/null}" 2>/dev/null | cut -d= -f2- \
+              | while IFS= read -r ref; do printf -- '- %s\n' "$ref"; done || true
+          } >> "$GITHUB_STEP_SUMMARY"
