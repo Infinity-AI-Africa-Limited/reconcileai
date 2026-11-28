@@ -1,8 +1,8 @@
 # Deploying ReconcileAI to Railway
 
-**Status (2026-10-06):** production already runs on Railway at
-`https://www.reconcileaiafrica.com`, auto-deploying from `main`. This runbook is the
-reference for that service. `reconcileai.vip` is historical; do not configure it.
+**Status:** production runs on Railway at `https://www.reconcileaiafrica.com`.
+Automatic deploys from `main` have been off since 17 November 2026, for the config
+cutover (§1). This runbook is the reference for that service. `reconcileai.vip` is historical; do not configure it.
 
 > ⚠️ **This runbook describes the production service only.** Do not copy its values into a
 > second Railway service (staging, a disaster-recovery copy). A second service needs its own
@@ -13,7 +13,8 @@ reference for that service. `reconcileai.vip` is historical; do not configure it
 
 **Stack:** Node 22 · Express + tRPC · Vite/React · Drizzle ORM · MySQL (TiDB Cloud).
 **Build:** `pnpm build` → `dist/index.js` (server) + `dist/public/` (static client).
-**Start:** `pnpm start` → `node dist/index.js` (reads `PORT` from the environment).
+**Start:** `NODE_ENV=production exec node dist/index.js`, launched directly and not through
+`pnpm start` (§1), reading `PORT` from the environment.
 
 ---
 

@@ -1958,9 +1958,9 @@ pnpm install
 # Build frontend and backend (Vite for client, esbuild for server)
 pnpm build
 
-# Start production server
-pnpm start
-# equivalently: NODE_ENV=production node dist/index.js
+# Start the production server. Launch node directly, not through `pnpm start`:
+# pnpm does not pass SIGTERM on, so the app could not drain (see above).
+NODE_ENV=production node dist/index.js
 ```
 
 **Build output:**
@@ -2010,7 +2010,7 @@ Proxy status: Proxied
 | Platform | Best for | Notes |
 |---|---|---|
 | **Railway** | Simplest deployment, automatic GitHub deploys | Connect GitHub repo, set env vars, deploy in < 5 min |
-| **Render** | Free tier available, auto-deploys from GitHub | Set `pnpm build` as build command, `pnpm start` as start command |
+| **Render** | Free tier available, auto-deploys from GitHub | Set `pnpm build` as build command and `NODE_ENV=production node dist/index.js` as start command (not `pnpm start`, which does not pass SIGTERM on) |
 | **Fly.io** | Low-latency, close to Nigerian users (has Johannesburg region) | Requires `fly.toml` config file |
 | **DigitalOcean App Platform** | Straightforward, predictable pricing | Good for production workloads |
 | **Self-managed VPS (DigitalOcean Droplet / Hetzner)** | Full control, cheapest at scale | Use PM2 for process management, Nginx as reverse proxy |

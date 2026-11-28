@@ -6,8 +6,8 @@
  *
  *   - a root Dockerfile. Railway always builds with one when it exists, so it
  *     would replace the Railpack recipe without anyone touching the settings;
- *   - railway.json / railway.toml. Railway stops reading them on 1 December
- *     2026. Before then one would override the settings key by key; after, it
+ *   - railway.json / railway.toml. Railway stops reading them on 1 January
+ *     2027. Before then one would override the settings key by key; after, it
  *     would look authoritative and change nothing;
  *   - railpack.json / nixpacks.toml, builder config files. Railpack reads the
  *     first, so it would change the build outside the recorded recipe;
