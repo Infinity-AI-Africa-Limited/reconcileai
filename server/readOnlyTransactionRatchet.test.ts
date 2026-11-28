@@ -18,6 +18,16 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = path.resolve(__dirname, "..");
 const SCANNED = ["server", "scripts", "shared", "tools"];
+/**
+ * Files that send the construct on purpose, to show TiDB refusing it, each with
+ * its reason. Nothing here may use it to keep a path from writing.
+ */
+const SENDS_IT_TO_SHOW_THE_REFUSAL = new Map([
+  [
+    "tools/s2-practice/practice.mjs",
+    "the synthetic S2 practice (never merged) sends it to a throwaway TiDB to show the 1235 refusal this file describes",
+  ],
+]);
 const READ_ONLY = /accessMode\s*:\s*["']read only["']|TRANSACTION\s+READ\s+ONLY|\b(?:transaction|tx)_read_only\b/i;
 
 function sourceFiles(dir: string): string[] {
@@ -33,6 +43,7 @@ function sourceFiles(dir: string): string[] {
 describe("when the code opens a transaction", () => {
   it("should never ask for a read-only one, which production's TiDB refuses", () => {
     const offenders = SCANNED.flatMap((dir) => sourceFiles(path.join(ROOT, dir)))
+      .filter((file) => !SENDS_IT_TO_SHOW_THE_REFUSAL.has(path.relative(ROOT, file)))
       .flatMap((file) =>
         fs
           .readFileSync(file, "utf8")

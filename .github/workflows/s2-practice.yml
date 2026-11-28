@@ -1,0 +1,112 @@
+name: S2 practice run (synthetic data only)
+
+# The database recovery rehearsal (tools/s2-practice/README.md). Made-up data
+# only: it reads no secret and connects only to its own containers. It is NOT
+# network-isolated (Docker's default network, a networked install), so it must
+# never be given a real credential or real data. Never a required check. Runs
+# when its own files change, or when dispatched through the API (with
+# gc_expiry, the slow expired-snapshot demonstration too).
+on:
+  workflow_dispatch:
+    inputs:
+      gc_expiry:
+        description: "Also run the slow (about 25 minutes) expired-snapshot demonstration"
+        type: boolean
+        default: false
+  pull_request:
+    paths:
+      - "tools/s2-practice/**"
+      - ".github/workflows/s2-practice.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s2-practice-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  practice:
+    name: S2 practice run
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Choose the work directory
+        run: echo "S2_WORK=$RUNNER_TEMP/s2work" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Start the synthetic cluster
+        run: tools/s2-practice/cluster.sh up "$S2_WORK"
+      - name: Run the practice
+        run: node tools/s2-practice/practice.mjs "$S2_WORK"
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "$S2_WORK/receipt.json" ]; then
+            {
+              echo '### S2 practice receipt (synthetic)'
+              echo '```json'
+              cat "$S2_WORK/receipt.json"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cp "$S2_WORK/receipt.json" "$RUNNER_TEMP/s2-receipt.json"
+          fi
+      - name: Keep the receipt (synthetic, no secrets)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-practice-receipt
+          path: ${{ runner.temp }}/s2-receipt.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Remove the cluster and the synthetic dumps
+        if: always()
+        run: tools/s2-practice/cluster.sh down "$S2_WORK"
+
+  gc-expiry:
+    name: Expired snapshot refused (slow)
+    if: github.event_name == 'workflow_dispatch' && inputs.gc_expiry
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Choose the work directory
+        run: echo "S2_WORK=$RUNNER_TEMP/s2work" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Start the synthetic cluster
+        run: tools/s2-practice/cluster.sh up "$S2_WORK"
+      - name: Wait for garbage collection to pass a point, then export at it
+        run: node tools/s2-practice/gc_expiry.mjs "$S2_WORK"
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f "$S2_WORK/gc-expiry.json" ]; then
+            {
+              echo '### Expired-snapshot demonstration (synthetic)'
+              echo '```json'
+              cat "$S2_WORK/gc-expiry.json"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            cp "$S2_WORK/gc-expiry.json" "$RUNNER_TEMP/gc-expiry.json"
+          fi
+      - name: Keep the result (synthetic, no secrets)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-gc-expiry
+          path: ${{ runner.temp }}/gc-expiry.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Remove the cluster
+        if: always()
+        run: tools/s2-practice/cluster.sh down "$S2_WORK"
