@@ -41,11 +41,12 @@ is worth setting now; everything else defaults correctly.
 
 ## 2. Database migration — no longer a manual step
 
-> ⚠️ **Superseded.** `railway.json` now carries
-> `preDeployCommand: pnpm db:migrate`, so deploying `main` migrates the
-> production schema before the new code starts. **There is nothing to run by
-> hand here.** This section is kept as the record of how release `0041` was
-> applied, back when release did not migrate.
+> ⚠️ **Superseded.** The Railway service's pre-deploy command is
+> `pnpm db:migrate` (set in its Settings since the cutover release; `railway.json`
+> carried it before that), so deploying `main` migrates the production schema
+> before the new code starts. **There is nothing to run by hand here.** This
+> section is kept as the record of how release `0041` was applied, back when
+> release did not migrate.
 >
 > If a deploy fails during its pre-deploy step, run `pnpm db:drift` to see which
 > statement will collide, fix the migration, and redeploy. Do not reach for a

@@ -19,6 +19,7 @@
   "include": [],
   "files": [
     ".github/scripts/startTestMysql.test.ts",
+    "tools/deployRecipe.test.ts",
     "scripts/bootstrapAdminGuard.test.ts",
     "scripts/closeDuplicateRetailExceptions.test.ts",
     "client/src/lib/dailyControlPage.test.ts",
