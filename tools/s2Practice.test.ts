@@ -8,6 +8,7 @@ import {
   CLIENT_PROFILE,
   DUMP_PROFILE,
   FORBIDDEN_EXPORT_OPTIONS,
+  SNAPSHOT_BUDGET_MS,
   STARTER_LIMITS,
   buildRanges,
   checkCoverage,
@@ -16,10 +17,16 @@ import {
   createRowHasher,
   dataOnlyChunkProblems,
   dumpCompleted,
+  exactTsoProblem,
   exportProfileProblems,
-  holderWithinLimits,
   normaliseCreateTable,
   parseGeneralLog,
+  parseSafePoint,
+  parseSqlDigests,
+  physicalMsOfTso,
+  quoteIdentifier,
+  snapshotWithinBudget,
+  sqlDigestStatement,
   statementEndingTransaction,
 } from "./s2-practice/lib.mjs";
 
@@ -151,14 +158,57 @@ describe("when the source and the restored copy are compared", () => {
   });
 });
 
-describe("when a holding transaction is checked against Starter's limits", () => {
-  it("should pass inside 30 minutes and 340 seconds of idleness", () => {
-    expect(holderWithinLimits({ openMs: 60_000, maxIdleMs: 30_000 }).ok).toBe(true);
+describe("when an export is checked against the hosted 10-minute window", () => {
+  it("should keep the planning budget inside Support's 10-minute window", () => {
+    expect(STARTER_LIMITS.snapshotWindowMs).toBe(600_000);
+    expect(SNAPSHOT_BUDGET_MS).toBeLessThan(STARTER_LIMITS.snapshotWindowMs);
   });
 
-  it("should fail at the transaction limit and at the idle limit", () => {
-    expect(holderWithinLimits({ openMs: STARTER_LIMITS.transactionMs, maxIdleMs: 1 }).ok).toBe(false);
-    expect(holderWithinLimits({ openMs: 1, maxIdleMs: STARTER_LIMITS.idleMs }).ok).toBe(false);
+  it("should pass when the last snapshot read ends inside the budget, counted from capture", () => {
+    expect(snapshotWithinBudget(SNAPSHOT_BUDGET_MS)).toEqual({ ok: true, problems: [] });
+  });
+
+  it("should fail one millisecond over the budget", () => {
+    expect(snapshotWithinBudget(SNAPSHOT_BUDGET_MS + 1).ok).toBe(false);
+  });
+
+  it("should refuse a budget that is not inside the window", () => {
+    expect(snapshotWithinBudget(1, STARTER_LIMITS.snapshotWindowMs).problems[0]).toMatch(/not inside/);
+  });
+});
+
+describe("when the snapshot point is copied", () => {
+  const point = "470780533441036289";
+
+  it("should accept the exact digits as text", () => {
+    expect(exactTsoProblem(point)).toBeNull();
+  });
+
+  it("should refuse a number, because a TSO is beyond 2^53 and comes back rounded", () => {
+    expect(String(Number(point))).not.toBe(point);
+    expect(exactTsoProblem(Number(point))).toMatch(/not text/);
+  });
+
+  it("should refuse anything that is not a plain run of digits, or beyond 64 bits", () => {
+    expect(exactTsoProblem("4.7078053344103629e17")).toMatch(/digits/);
+    expect(exactTsoProblem(" 470780533441036289")).toMatch(/digits/);
+    expect(exactTsoProblem("18446744073709551616")).toMatch(/64 bits/);
+  });
+});
+
+describe("when garbage collection's progress is read", () => {
+  it("should read TiDB's safe-point format as epoch milliseconds", () => {
+    expect(new Date(parseSafePoint("20261128-16:49:06.077 +0000")).toISOString()).toBe("2026-11-28T16:49:06.077Z");
+    expect(new Date(parseSafePoint("20261128-17:49:06 +0100")).toISOString()).toBe("2026-11-28T16:49:06.000Z");
+  });
+
+  it("should give NaN, never a date, for anything it cannot read", () => {
+    expect(parseSafePoint("2026-11-28 16:49:06")).toBeNaN();
+    expect(parseSafePoint(undefined)).toBeNaN();
+  });
+
+  it("should take a TSO's physical time from its upper bits", () => {
+    expect(new Date(physicalMsOfTso("470780533441036289")).toISOString()).toBe("2026-11-28T17:00:13.627Z");
   });
 });
 
@@ -227,5 +277,53 @@ describe("when an export command line is checked against the profile", () => {
 
   it("should keep the export profile free of --single-transaction", () => {
     expect(DUMP_PROFILE).not.toContain("--single-transaction");
+  });
+});
+
+describe("when the stock client validates a copy with server-side digests", () => {
+  const columns = [
+    { COLUMN_NAME: "id", DATA_TYPE: "bigint" },
+    { COLUMN_NAME: "amount", DATA_TYPE: "decimal" },
+    { COLUMN_NAME: "reference", DATA_TYPE: "varchar" },
+    { COLUMN_NAME: "payload", DATA_TYPE: "json" },
+    { COLUMN_NAME: "blob", DATA_TYPE: "longblob" },
+  ];
+
+  it("should hash text and bytes as stored, and everything else as its text form", () => {
+    const sql = sqlDigestStatement("transactions", columns);
+    expect(sql).toContain("IFNULL(HEX(`reference`), '-')");
+    expect(sql).toContain("IFNULL(HEX(`blob`), '-')");
+    expect(sql).toContain("IFNULL(HEX(CAST(`amount` AS CHAR)), '-')");
+    expect(sql).toContain("IFNULL(HEX(CAST(`payload` AS CHAR)), '-')");
+    expect(sql).not.toMatch(/HEX\(`amount`\)/);
+  });
+
+  it("should give every column's NULL a mark no hex value can be, so NULL and an empty value differ", () => {
+    // HEX('') is '' and HEX(NULL) is NULL; IFNULL turns only the NULL into '-'.
+    const marks = sqlDigestStatement("t", columns).match(/IFNULL\(HEX\(.+?\), '-'\)/g) ?? [];
+    expect(marks).toHaveLength(columns.length);
+  });
+
+  it("should count rows, so a duplicated row is not cancelled out by the XOR", () => {
+    const sql = sqlDigestStatement("t", columns);
+    expect(sql).toContain("COUNT(*)");
+    expect(sql).toContain("SUM(CAST(CONV(SUBSTRING(h, 1, 15), 16, 10) AS UNSIGNED))");
+    expect(sql).toContain("BIT_XOR(CAST(CONV(SUBSTRING(h, 16, 15), 16, 10) AS UNSIGNED))");
+  });
+
+  it("should refuse a name that is not plain, before it can reach SQL", () => {
+    expect(() => sqlDigestStatement("t`; DROP TABLE x; --", columns)).toThrow(/not a plain identifier/);
+    expect(() => sqlDigestStatement("t", [{ COLUMN_NAME: "a'b", DATA_TYPE: "int" }])).toThrow(/not a plain identifier/);
+    expect(() => sqlDigestStatement("t", [])).toThrow(/no columns/);
+    expect(quoteIdentifier("transactions_legacy_archive")).toBe("`transactions_legacy_archive`");
+  });
+
+  it("should read only well-formed digest lines from the client's output", () => {
+    const output = ["Enter password: ", "digest\tusers\t3\t12\t7", "warning: something", "digest\tbad\t3\tNULL\t7", "digest\tempty\t0\t0\t0"].join("\n");
+    expect(parseSqlDigests(output)).toEqual({ users: "3/12/7", empty: "0/0/0" });
+  });
+
+  it("should refuse output that digests one table twice", () => {
+    expect(() => parseSqlDigests("digest\tusers\t1\t1\t1\ndigest\tusers\t2\t2\t2")).toThrow(/twice/);
   });
 });

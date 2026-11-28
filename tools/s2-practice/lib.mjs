@@ -19,7 +19,8 @@ export const CLIENT_PROFILE = Object.freeze([
 /**
  * The export profile. There is deliberately no --single-transaction: on TiDB it
  * yields no snapshot (see the receipt's finding). Consistency comes from
- * --init-command pinning tidb_snapshot to a holding transaction's start_ts.
+ * --init-command pinning tidb_snapshot to one point taken from SHOW MASTER
+ * STATUS, which is also the profile TiDB Cloud Support describes for Starter.
  */
 export const DUMP_PROFILE = Object.freeze([
   "--skip-lock-tables",
@@ -196,19 +197,44 @@ export function compareDigests(expected, actual) {
   return mismatches;
 }
 
-/** TiDB Cloud Starter's documented limits (tidb-cloud/serverless-limitations.md, read 2026-11-24). */
-export const STARTER_LIMITS = Object.freeze({ transactionMs: 30 * 60 * 1000, idleMs: 340 * 1000 });
+/**
+ * TiDB Cloud Starter's limits. The first two are from tidb-cloud/serverless-limitations.md
+ * (read 2026-11-24). The snapshot window is Support's statement of 27 November 2026:
+ * "Old data is kept for 10 minutes. This window can't be extended or held open."
+ */
+export const STARTER_LIMITS = Object.freeze({
+  transactionMs: 30 * 60 * 1000,
+  idleMs: 340 * 1000,
+  snapshotWindowMs: 10 * 60 * 1000,
+});
+
+/** The planning budget inside the 10-minute window: 8 minutes, leaving 2 for setup and margin. */
+export const SNAPSHOT_BUDGET_MS = 8 * 60 * 1000;
 
 /**
- * Whether a snapshot-holding transaction stayed inside Starter's limits. A
- * synthetic run is far smaller than production, so a pass here says the
- * method fits, not that production's export will.
+ * Whether every read at the snapshot finished inside the budget, counted from
+ * the moment the point was captured (not from the start of the dump), to the
+ * last read that must see that same point.
  */
-export function holderWithinLimits({ openMs, maxIdleMs }, limits = STARTER_LIMITS) {
+export function snapshotWithinBudget(elapsedMs, budgetMs = SNAPSHOT_BUDGET_MS, limits = STARTER_LIMITS) {
   const problems = [];
-  if (!(openMs < limits.transactionMs)) problems.push(`open ${openMs} ms, limit ${limits.transactionMs} ms`);
-  if (!(maxIdleMs < limits.idleMs)) problems.push(`idle ${maxIdleMs} ms at most, limit ${limits.idleMs} ms`);
+  if (!(budgetMs < limits.snapshotWindowMs)) problems.push(`budget ${budgetMs} ms is not inside the ${limits.snapshotWindowMs} ms window`);
+  if (!(elapsedMs <= budgetMs)) problems.push(`the last snapshot read ended ${elapsedMs} ms after capture, budget ${budgetMs} ms`);
   return { ok: problems.length === 0, problems };
+}
+
+/**
+ * A TSO is an unsigned 64-bit integer, beyond the 2^53 that a floating-point
+ * number holds exactly. Copied through a tool that turns it into a number (a
+ * spreadsheet, JavaScript, some drivers), it comes back rounded: a later value
+ * is refused as "a future time", an earlier one silently names another point.
+ * So the point travels as text, and only as exact digits.
+ */
+export function exactTsoProblem(value) {
+  if (typeof value !== "string") return `the snapshot point is a ${typeof value}, not text: a number cannot hold it exactly`;
+  if (!/^[1-9]\d{0,19}$/.test(value)) return "the snapshot point is not a plain run of digits";
+  if (BigInt(value) > 18446744073709551615n) return "the snapshot point is beyond 64 bits";
+  return null;
 }
 
 /**
@@ -247,4 +273,77 @@ export function parseGeneralLog(text) {
     if (conn && txnStartTS !== undefined && sql !== undefined) entries.push({ conn, user, txnStartTS, sql });
   }
   return entries;
+}
+
+/** A TSO's physical part: milliseconds since the epoch, in its upper 46 bits. */
+export function physicalMsOfTso(tso) {
+  return Number(BigInt(tso) >> 18n);
+}
+
+/**
+ * TiDB records its GC safe point as "20261128-16:49:06.077 +0000" (in mysql.tidb,
+ * tikv_gc_safe_point). Returns epoch milliseconds, or NaN for anything else, so a
+ * value that cannot be read never looks like a passed safe point.
+ */
+export function parseSafePoint(text) {
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))? ([+-])(\d{2})(\d{2})$/.exec(String(text ?? "").trim());
+  if (!m) return NaN;
+  const [, y, mo, d, h, mi, s, frac = "0", sign, oh, om] = m;
+  return Date.parse(`${y}-${mo}-${d}T${h}:${mi}:${s}.${frac.padEnd(3, "0").slice(0, 3)}${sign}${oh}:${om}`);
+}
+
+/**
+ * Backquotes a table or column name. Only plain names (letters, digits, _ and $) are
+ * accepted, which every name in the app's schema is, so a name can also sit inside a
+ * string literal unescaped.
+ */
+export function quoteIdentifier(name) {
+  if (typeof name !== "string" || !/^[A-Za-z0-9_$]{1,64}$/.test(name)) {
+    throw new Error(`not a plain identifier: ${JSON.stringify(name)}`);
+  }
+  return `\`${name}\``;
+}
+
+/** Column types whose stored value is text or bytes: hashed as those bytes, whatever the collation. */
+const BYTE_TYPES = new Set([
+  "char", "varchar", "tinytext", "text", "mediumtext", "longtext",
+  "binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob", "enum", "set",
+]);
+
+/**
+ * One statement that has the server digest every row of a table, so the stock `mysql`
+ * client can validate a copy and no custom tool ever holds the password. Each row becomes
+ * the SHA-256 of its values, every value as hex and NULL as "-", which no hex can be:
+ * no delimiter or NULL collisions. The table's digest is its row count plus the sum and
+ * the XOR of two 60-bit slices of those hashes, so row order does not matter and a
+ * duplicated row still counts. Run it with the session time zone at UTC on both sides.
+ */
+export function sqlDigestStatement(table, columns) {
+  if (!Array.isArray(columns) || columns.length === 0) throw new Error(`${table}: no columns to digest`);
+  const values = columns.map((c) => {
+    const column = quoteIdentifier(c.COLUMN_NAME);
+    const asStored = BYTE_TYPES.has(String(c.DATA_TYPE).toLowerCase());
+    return `IFNULL(HEX(${asStored ? column : `CAST(${column} AS CHAR)`}), '-')`;
+  });
+  const quoted = quoteIdentifier(table);
+  return (
+    `SELECT 'digest', '${table}', COUNT(*), ` +
+    "IFNULL(SUM(CAST(CONV(SUBSTRING(h, 1, 15), 16, 10) AS UNSIGNED)), 0), " +
+    "BIT_XOR(CAST(CONV(SUBSTRING(h, 16, 15), 16, 10) AS UNSIGNED)) " +
+    `FROM (SELECT SHA2(CONCAT_WS(',', ${values.join(", ")}), 256) AS h FROM ${quoted}) AS d;`
+  );
+}
+
+/** Reads the stock client's batch output of sqlDigestStatement lines: table → "count/sum/xor". */
+export function parseSqlDigests(output) {
+  const digests = {};
+  for (const line of String(output).split("\n")) {
+    const fields = line.split("\t");
+    if (fields[0] !== "digest" || fields.length !== 5) continue;
+    const [, table, count, sum, xor] = fields;
+    if (![count, sum, xor].every((v) => /^\d+$/.test(v))) continue;
+    if (table in digests) throw new Error(`${table} digested twice`);
+    digests[table] = `${count}/${sum}/${xor}`;
+  }
+  return digests;
 }

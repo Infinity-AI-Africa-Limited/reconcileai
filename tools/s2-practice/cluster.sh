@@ -8,7 +8,9 @@
 # snapshot reads, start_ts and the CLUSTER_* tables behave as they do there.
 # The target is a standalone TiDB of the same version. Both serve TLS with a
 # throwaway CA made here, so the client profile's VERIFY_IDENTITY is exercised.
-# Nothing listens beyond 127.0.0.1.
+# Ports are published on 127.0.0.1 only. That limits who connects in, not what
+# the containers reach out to: this is not an isolated environment, so it is
+# for made-up data and throwaway credentials only.
 set -euo pipefail
 
 ACTION="${1:?usage: cluster.sh up|down <workdir>}"
